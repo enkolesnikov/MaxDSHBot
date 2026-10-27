@@ -85,9 +85,13 @@ export function createObserver({ client, config, logger, target, policy, runtime
     const value = data?.usage
     if (!value) return
     rollUsageDay()
-    usage.input += Number(value.inputTokens ?? 0)
-    usage.output += Number(value.outputTokens ?? 0)
-    usage.total += Number(value.totalTokens ?? (Number(value.inputTokens ?? 0) + Number(value.outputTokens ?? 0)))
+    const input = Number(value.inputTokens ?? 0)
+    const output = Number(value.outputTokens ?? 0)
+    usage.input += input
+    usage.output += output
+    // `totalTokens` may include provider cache reads, which dwarfs the real
+    // request size — report the visible request/response sum instead.
+    usage.total += input + output
   }
 
   function onSessionEvent(session, event) {
