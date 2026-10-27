@@ -74,7 +74,7 @@ function runtimeStub(overrides = {}) {
     { sessionId: 'session-aaaaaaaa', running: true, cwd: '/work/app', updatedAt: 2, title: 'Рабочая' },
     { sessionId: 'session-bbbbbbbb', running: false, cwd: '/work/lib', updatedAt: 1, title: 'Старая' },
   ]
-  const calls = { prompts: [], cancels: [] }
+  const calls = { prompts: [], cancels: [], incoming: [] }
   return {
     calls,
     runtime: {
@@ -98,6 +98,15 @@ function runtimeStub(overrides = {}) {
         return true
       },
       titleFor: (id) => (String(id) === 'session-aaaaaaaa' ? 'Рабочая' : 'Старая'),
+      saveIncoming: async (attachments, sessionId) => {
+        calls.incoming.push({ attachments, sessionId })
+        return {
+          saved: [{ path: '/work/app/max-inbox/2026-10-27-1-report.pdf', name: 'report.pdf', type: 'file', bytes: 42 }],
+          errors: [],
+          dir: '/work/app/max-inbox',
+          promptText: 'Пользователь прислал файлы из MAX:\n• /work/app/max-inbox/report.pdf',
+        }
+      },
       ...overrides,
     },
   }
@@ -308,4 +317,42 @@ test('/digest triggers the observer digest', async () => {
   await bot.handleUpdate(messageUpdate({ text: '/digest' }))
   assert.equal(calls, 1)
   assert.match(client.sent[0].text, /Дайджест отправлен/)
+})
+
+test('incoming MAX attachments are saved and handed to the agent', async () => {
+  const { bot, client, calls } = makeBot()
+  await bot.handleUpdate({
+    update_type: 'message_created',
+    chat_id: 123456789,
+    message: {
+      sender: { user_id: 987654321, is_bot: false },
+      recipient: { chat_id: 123456789 },
+      body: {
+        text: 'посмотри отчёт',
+        attachments: [{ type: 'file', filename: 'report.pdf', size: 42, payload: { url: 'https://iu.oneme.ru/f' } }],
+      },
+    },
+  })
+  assert.equal(calls.incoming.length, 1)
+  assert.equal(calls.incoming[0].sessionId, 'session-aaaaaaaa')
+  assert.equal(calls.prompts.length, 1)
+  assert.match(calls.prompts[0].text, /посмотри отчёт/)
+  assert.match(calls.prompts[0].text, /report\.pdf/)
+  assert.match(client.sent[0].text, /Сохранено: 1/)
+  assert.match(client.sent[0].text, /Передано агенту/)
+})
+
+test('incoming files are refused when receiveFiles is off', async () => {
+  const { bot, client, calls } = makeBot({ config: { receiveFiles: false } })
+  await bot.handleUpdate({
+    update_type: 'message_created',
+    chat_id: 123456789,
+    message: {
+      sender: { user_id: 987654321, is_bot: false },
+      recipient: { chat_id: 123456789 },
+      body: { attachments: [{ type: 'file', filename: 'a.pdf', payload: { url: 'https://x' } }] },
+    },
+  })
+  assert.equal(calls.incoming.length, 0)
+  assert.match(client.sent[0].text, /Приём файлов отключён/)
 })

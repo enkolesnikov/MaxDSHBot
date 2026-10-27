@@ -11,11 +11,13 @@ const { apply, normalizeConfig, isTopLevelSession } = await import('../index.js'
 
 const tick = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms))
 
-function createFakeCtx({ sessionTitle } = {}) {
+function createFakeCtx({ sessionTitle, services } = {}) {
   const listeners = new Map()
   const logs = []
   const ctx = {
-    get: (name) => (name === 'sessionTitle' && sessionTitle !== undefined ? { get: () => ({ title: sessionTitle }) } : undefined),
+    get: (name) =>
+      services?.[name] ??
+      (name === 'sessionTitle' && sessionTitle !== undefined ? { get: () => ({ title: sessionTitle }) } : undefined),
     logger: () => ({
       error: (...args) => logs.push(['error', ...args]),
       warn: (...args) => logs.push(['warn', ...args]),
@@ -414,4 +416,63 @@ test('images inside code fences are not forwarded', async () => {
   assert.equal(client.sent.length, 1)
   assert.equal(client.uploads.length, 0)
   assert.equal(client.sent[0].attachments, undefined)
+})
+
+test('image blocks from tool results are attached to the final message once', async () => {
+  const services = {
+    attachments: {
+      async readImage(ref) {
+        return { ref, data: new Uint8Array([1, 2, 3, 4]) }
+      },
+    },
+  }
+  const { ctx, emit } = createFakeCtx({ services })
+  const client = createFakeClient()
+  apply(
+    ctx,
+    { botToken: 't', chatId: '1', forwardToolImages: true, buttons: false },
+    { createClient: () => client },
+  )
+  const s = session('session-tool-image', { cwd: '/work' })
+
+  emit('session/event', s, evt('turn/start', { turn: 1 }))
+  emit(
+    'session/event',
+    s,
+    evt('tool/result', {
+      turn: 1,
+      step: 1,
+      message: {
+        role: 'tool',
+        content: [
+          { type: 'text', text: '<content>image</content>' },
+          { type: 'image', attachment: { attachmentId: 'img-1', mediaType: 'image/png', name: 'shot.png' } },
+        ],
+      },
+    }),
+  )
+  emit('session/event', s, assistantEvent(1, 2, 'готово'))
+  emit('session/event', s, evt('turn/end', { turn: 1, reason: { kind: 'completed' } }))
+  await tick(60)
+
+  assert.equal(client.uploads.length, 1)
+  assert.equal(client.uploads[0].type, 'image')
+  const attachments = client.sent.at(-1).attachments ?? []
+  assert.ok(attachments.some((item) => item.type === 'image' && item.payload?.token))
+})
+
+test('tool images are ignored when forwardToolImages is off', async () => {
+  const services = { attachments: { async readImage(ref) { return { ref, data: new Uint8Array([1]) } } } }
+  const { ctx, emit } = createFakeCtx({ services })
+  const client = createFakeClient()
+  apply(ctx, { botToken: 't', chatId: '1', forwardToolImages: false, buttons: false }, { createClient: () => client })
+  const s = session('session-tool-image-off', { cwd: '/work' })
+
+  emit('session/event', s, evt('turn/start', { turn: 1 }))
+  emit('session/event', s, evt('tool/result', { turn: 1, step: 1, message: { role: 'tool', content: [{ type: 'image', attachment: { attachmentId: 'x' } }] } }))
+  emit('session/event', s, assistantEvent(1, 2, 'готово'))
+  emit('session/event', s, evt('turn/end', { turn: 1, reason: { kind: 'completed' } }))
+  await tick(60)
+
+  assert.equal(client.uploads.length, 0)
 })

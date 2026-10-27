@@ -31,6 +31,7 @@ import { createBot } from './lib/bot.mjs'
 import { createPolicy } from './lib/policy.mjs'
 import { createObserver } from './lib/observer.mjs'
 import { collectMessageImages, extractImageReferences } from './lib/images.mjs'
+import { createIncoming } from './lib/incoming.mjs'
 
 export const name = 'dsh-max-notify'
 
@@ -90,7 +91,12 @@ const DEFAULTS = {
   digestEnabled: false,
   digestTime: '21:00',
   forwardImages: true,
+  forwardToolImages: true,
   maxImages: 4,
+  receiveFiles: true,
+  inboxDir: undefined,
+  maxIncomingFiles: 4,
+  maxIncomingBytes: 25 * 1024 * 1024,
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -184,6 +190,11 @@ export function normalizeConfig(raw = {}) {
     digestEnabled: asBoolean(merged.digestEnabled, DEFAULTS.digestEnabled),
     forwardImages: asBoolean(merged.forwardImages, DEFAULTS.forwardImages),
     maxImages: asInteger(merged.maxImages, DEFAULTS.maxImages, 0, 12),
+    forwardToolImages: asBoolean(merged.forwardToolImages, DEFAULTS.forwardToolImages),
+    receiveFiles: asBoolean(merged.receiveFiles, DEFAULTS.receiveFiles),
+    inboxDir: String(merged.inboxDir || env.MAX_NOTIFY_INBOX_DIR || '').trim() || undefined,
+    maxIncomingFiles: asInteger(merged.maxIncomingFiles, DEFAULTS.maxIncomingFiles, 1, 12),
+    maxIncomingBytes: asInteger(merged.maxIncomingBytes, DEFAULTS.maxIncomingBytes, 1024, 1024 * 1024 * 1024),
     digestTime: /^\d{2}:\d{2}$/.test(String(merged.digestTime ?? '')) ? String(merged.digestTime) : DEFAULTS.digestTime,
     quietHours: normalizeQuietHours(merged.quietHours),
     mode: ['all', 'errors', 'mute'].includes(merged.mode) ? merged.mode : DEFAULTS.mode,
@@ -350,6 +361,8 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
   }
   /** sessionId -> { turn, text } — latest assistant text of the open turn. */
   const pending = new Map()
+  /** sessionId -> { turn, refs } — image blocks seen in tool results during the turn. */
+  const pendingToolImages = new Map()
 
   function resolveTitle(session) {
     if (!config.includeTitle) return undefined
@@ -490,6 +503,13 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     return false
   }
 
+  const incomingLocal = createIncoming({
+    client,
+    config,
+    logger,
+    resolveCwd: async (sessionId) => (await statusInfo(sessionId))?.cwd,
+  })
+
   const target = { chatId: config.chatId, userId: config.chatId === undefined ? config.userId : undefined }
   const state = createState({ file: resolveStateFile(config), logger, chatId: config.chatId })
   const policy = createPolicy({ config, state, logger })
@@ -519,7 +539,14 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     interactions,
     policy,
     observer,
-    runtime: { listSessions, statusInfo, promptSession, cancelSession, titleFor },
+    runtime: {
+      listSessions,
+      statusInfo,
+      promptSession,
+      cancelSession,
+      titleFor,
+      saveIncoming: (attachments, sessionId) => incomingLocal.save(attachments, sessionId),
+    },
   })
 
   /** Paths already sent to MAX by the deliverables pipeline (per session). */
@@ -537,14 +564,19 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
    * Images from the final answer: assistant image blocks plus images referenced
    * in the visible markdown (local files relative to the session cwd, or URLs).
    */
-  async function collectFinalImages(session, text, message) {
+  async function collectFinalImages(session, text, message, toolImageRefs = []) {
     if (!config.forwardImages || config.maxImages <= 0) return []
     const max = config.maxImages
     const key = String(session?.id ?? '')
     const seen = imagesSent.get(key) ?? new Set()
     const attachments = []
 
-    for (const ref of collectMessageImages(message)) {
+    const blockRefs = [...collectMessageImages(message), ...(Array.isArray(toolImageRefs) ? toolImageRefs : [])]
+    const seenIds = new Set()
+    for (const ref of blockRefs) {
+      const attachmentId = String(ref?.attachmentId ?? '')
+      if (attachmentId !== '' && seenIds.has(attachmentId)) continue
+      if (attachmentId !== '') seenIds.add(attachmentId)
       if (attachments.length >= max) break
       try {
         const stored = await getService('attachments')?.readImage?.(ref)
@@ -594,7 +626,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     return [{ type: 'inline_keyboard', payload: { buttons: rows } }]
   }
 
-  async function deliver(session, text, reason, message) {
+  async function deliver(session, text, reason, message, toolImageRefs = []) {
     if (!(await ensureTargetAllowed())) return
     const decision = policy.decide('final')
     if (!decision.send) {
@@ -617,7 +649,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       return
     }
     const keyboard = finalKeyboard(session)
-    const images = await collectFinalImages(session, text, message)
+    const images = await collectFinalImages(session, text, message, toolImageRefs)
     const attachments = images.length > 0 || keyboard ? [...images, ...(keyboard ?? [])] : undefined
     for (const [index, chunk] of chunks.entries()) {
       const isLast = index === chunks.length - 1
@@ -649,6 +681,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     switch (event.type) {
       case 'turn/start':
         pending.delete(id)
+        pendingToolImages.delete(id)
         progress.onTurnStart(session)
         return
       case 'assistant/message': {
@@ -658,8 +691,27 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
         pending.set(id, { turn: data.turn, text, message: data.message })
         return
       }
+      case 'tool/result': {
+        if (!config.forwardToolImages || config.maxImages <= 0) return
+        if (!config.includeSubagents && !isTopLevelSession(session)) return
+        const refs = collectMessageImages(data.message)
+        if (refs.length === 0) return
+        const entry = pendingToolImages.get(id) ?? { turn: data.turn, refs: [] }
+        const seenIds = new Set(entry.refs.map((ref) => String(ref?.attachmentId ?? '')))
+        for (const ref of refs) {
+          if (entry.refs.length >= config.maxImages) break
+          const key = String(ref?.attachmentId ?? '')
+          if (key === '' || seenIds.has(key)) continue
+          seenIds.add(key)
+          entry.refs.push(ref)
+        }
+        pendingToolImages.set(id, entry)
+        return
+      }
       case 'turn/end': {
         progress.onTurnEnd(session)
+        const toolImages = pendingToolImages.get(id)?.turn === data.turn ? pendingToolImages.get(id).refs : []
+        pendingToolImages.delete(id)
         const record = pending.get(id)
         pending.delete(id)
         if (!record || record.turn !== data.turn) return
@@ -668,7 +720,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
         const text = record.text.trim()
         if (!text) return
         if (!config.includeSubagents && !isTopLevelSession(session)) return
-        void enqueue(() => deliver(session, text, data.reason, record.message))
+        void enqueue(() => deliver(session, text, data.reason, record.message, toolImages))
         return
       }
       case 'deliverables/presented': {
@@ -698,6 +750,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
   ctx.on('session/disposed', (session) => {
     if (session?.id) {
       pending.delete(session.id)
+      pendingToolImages.delete(session.id)
       progress.onTurnEnd(session)
     }
   })

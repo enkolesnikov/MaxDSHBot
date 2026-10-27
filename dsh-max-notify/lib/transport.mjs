@@ -12,7 +12,8 @@
  *    We ship certs/ca-chain.pem (Russian Trusted Sub CA + Russian Trusted Root CA)
  *    and pass it explicitly via https.request({ ca }).
  */
-import { readFileSync } from 'node:fs'
+import { createWriteStream, mkdirSync, readFileSync, renameSync, unlinkSync } from 'node:fs'
+import { dirname } from 'node:path'
 import { basename, extname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import https from 'node:https'
@@ -460,6 +461,107 @@ export function createMaxClient(options = {}) {
     throw lastError
   }
 
+  /**
+   * Download one remote attachment (MAX media URL) to a local file with a byte
+   * cap and redirect handling. Writes `dest.tmp` then renames atomically.
+   */
+  function downloadToFile(urlString, destPath, { maxBytes = 25 * 1024 * 1024, redirects = 5, timeoutMs: callTimeoutMs } = {}) {
+    return new Promise((resolve, reject) => {
+      const attempt = (target, remaining) => {
+        let url
+        try {
+          url = new URL(target)
+        } catch (error) {
+          reject(error)
+          return
+        }
+        if (url.protocol !== 'https:') {
+          reject(new Error(`refusing non-https attachment URL: ${url.protocol}`))
+          return
+        }
+        const req = https.request(
+          {
+            method: 'GET',
+            protocol: url.protocol,
+            hostname: url.hostname,
+            port: url.port || undefined,
+            path: `${url.pathname}${url.search}`,
+            headers: { Authorization: token, 'User-Agent': USER_AGENT },
+            ca: trustedCa,
+            rejectUnauthorized: !insecureTls,
+            timeout: callTimeoutMs ?? timeoutMs,
+          },
+          (res) => {
+            const status = res.statusCode ?? 0
+            if (status >= 300 && status < 400 && res.headers.location) {
+              res.resume()
+              if (remaining <= 0) {
+                reject(new Error('too many redirects while downloading an attachment'))
+                return
+              }
+              attempt(new URL(res.headers.location, url).toString(), remaining - 1)
+              return
+            }
+            if (status < 200 || status >= 300) {
+              const chunks = []
+              res.on('data', (chunk) => chunks.push(chunk))
+              res.on('end', () =>
+                reject(
+                  new Error(`attachment download failed: HTTP ${status} ${Buffer.concat(chunks).toString('utf8').slice(0, 200)}`),
+                ),
+              )
+              return
+            }
+            try {
+              mkdirSync(dirname(destPath), { recursive: true })
+            } catch (error) {
+              reject(error)
+              return
+            }
+            const tmpPath = `${destPath}.${process.pid}.tmp`
+            const stream = createWriteStream(tmpPath)
+            let bytes = 0
+            let failed = false
+            const fail = (error) => {
+              if (failed) return
+              failed = true
+              stream.destroy()
+              try {
+                unlinkSync(tmpPath)
+              } catch {
+                // best effort
+              }
+              reject(error)
+            }
+            res.on('data', (chunk) => {
+              bytes += chunk.length
+              if (bytes > maxBytes) {
+                fail(new Error(`attachment exceeds ${maxBytes} bytes`))
+                res.destroy()
+              }
+            })
+            res.on('error', fail)
+            stream.on('error', fail)
+            res.pipe(stream)
+            stream.on('finish', () => {
+              if (failed) return
+              try {
+                renameSync(tmpPath, destPath)
+                resolve({ path: destPath, bytes })
+              } catch (error) {
+                fail(error)
+              }
+            })
+          },
+        )
+        req.on('timeout', () => req.destroy(new Error('attachment download timed out')))
+        req.on('error', reject)
+        req.end()
+      }
+      attempt(urlString, redirects)
+    })
+  }
+
   return {
     getMe,
     getUpdates,
@@ -473,6 +575,7 @@ export function createMaxClient(options = {}) {
     setCommands,
     uploadMedia,
     sendWithAttachments,
+    downloadToFile,
     uploadTypeFor,
     baseUrl,
     token,
