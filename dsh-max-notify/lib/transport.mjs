@@ -547,7 +547,7 @@ export function createMaxClient(options = {}) {
               if (failed) return
               try {
                 renameSync(tmpPath, destPath)
-                resolve({ path: destPath, bytes })
+                resolve({ path: destPath, bytes, contentType: String(res.headers['content-type'] ?? '') })
               } catch (error) {
                 fail(error)
               }
