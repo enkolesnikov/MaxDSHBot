@@ -1,7 +1,9 @@
 # dsh-max-notify
 
 DSH (DeepSeek Harness) plugin: forward **the last assistant message of every
-agent turn** to **MAX messenger** (max.ru) through a bot.
+agent turn** to **MAX messenger** (max.ru) through a bot — and drive the agent
+from MAX ("Пульт"): chat, commands, approvals, questions, live progress and
+file deliverables.
 
 - Zero runtime dependencies (relative imports + `node:` builtins only — required
   for `link:`-installed DSH plugins, which cannot import `@deepseek-ai/*`).
@@ -15,6 +17,14 @@ agent turn** to **MAX messenger** (max.ru) through a bot.
   endings (restore-time stale closers) by default.
 - Never breaks the profile: a bad/missing config only logs a warning and leaves
   the plugin inert.
+- Remote control: long-polls `GET /updates` and injects your messages into the
+  active session via `sessionController.prompt`; commands `/status`, `/stop`,
+  `/sessions`, `/use N`, `/current`, `/help`; inline buttons under answers.
+- Approvals and agent questions (`ask_user_question`) are answered from MAX
+  buttons or free text: the plugin prepends to the host waterfalls, delegates to
+  the Web GUI immediately and races both channels (`Promise.race`).
+- Live progress card (edited in place, `typing_on`) and `present` deliverables
+  uploaded as MAX attachments.
 
 ## Package layout
 
@@ -55,6 +65,33 @@ Set in `cordis.patch.yml` (or override the row by id from the profile's own
 | `dryRun` | `false` | Log instead of sending |
 | `requestTimeoutMs` / `maxRetries` / `minIntervalMs` | `15000` / `3` / `600` | Transport tuning |
 | `notifyOnStart` | `false` | One-shot "plugin connected" message |
+| `polling` / `pollTimeoutSec` | `true` / `25` | Long polling `GET /updates` (one poller per token) |
+| `interactive` | `true` | Accept chats/callbacks and commands |
+| `approvalChannel` / `questionChannel` | `both` | `both` (MAX+GUI race), `max`, `gui` |
+| `buttons` / `webUrl` | `true` / `DSH_WEB_URL` | Quick-action buttons + GUI link |
+| `progress` / `progressDelayMs` / `progressThrottleMs` / `typing` | `true` / `2500` / `2000` / `true` | Live progress card |
+| `deliverables` | `true` | Send `present` files as attachments |
+| `registerCommands` / `greetOnStart` | `true` / `true` | MAX command menu and Start greeting |
+| `stateFile` | `$DSH_HOME/max-notify/state.json` | Polling marker + active session (outside the repo) |
+
+## Remote control ("Пульт")
+
+Write to the bot in MAX — the text becomes the next prompt of the active
+session (default: most recent session; `/use N` to switch). Commands:
+
+| Command | Action |
+|---|---|
+| `/status` | Active session, state, model, folder, last update |
+| `/stop` | Cancel the active turn |
+| `/sessions` | List sessions (numbered) |
+| `/use N` | Switch the active session |
+| `/current` | Show the active session |
+| `/help` | Command help |
+
+Approvals and `ask_user_question` cards carry inline buttons; free text answers
+questions too (option number, option label or custom text; multiple questions —
+numbers separated by spaces). The plugin solves on the first channel to answer
+(MAX or Web GUI) and marks the other card accordingly.
 
 ## Recipient allowlist ("only me")
 
@@ -89,8 +126,11 @@ restart the profile's app (`systemctl restart dsh-web`). Remove with
 
 - MAX markdown has no lists/tables: `- item` renders literally.
 - 4000 chars per message; the plugin chunks long replies (up to 8 chunks).
-- Sending is one-way. Receiving needs a webhook (public HTTPS + Минцифры cert);
-  long polling is used only by `tools/pair.mjs`.
+- Receiving uses long polling: one poller per bot token (do not run
+  `tools/pair.mjs` while the plugin is polling). For production MAX recommends a
+  webhook (public HTTPS :443 + trusted cert) — then set `polling: false`.
+- The live progress card is deleted at turn end; if deletion fails it is edited
+  to "✅ Готово".
 - The allowlist check is cached per process; changing the recipient requires a
   plugin reload/restart of the profile.
 - `interrupted`/`forked` are skipped because they are restore-time synthetic

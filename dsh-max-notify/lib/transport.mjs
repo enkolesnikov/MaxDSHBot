@@ -13,8 +13,10 @@
  *    and pass it explicitly via https.request({ ca }).
  */
 import { readFileSync } from 'node:fs'
+import { basename, extname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import https from 'node:https'
+import { rootCertificates } from 'node:tls'
 
 export const MAX_API_BASE = 'https://platform-api2.max.ru'
 export const MAX_TEXT_LIMIT = 4000
@@ -133,7 +135,14 @@ export function createMaxClient(options = {}) {
     }
   }
 
-  const request = ({ method, path, query, body }) =>
+  // Trust both the bundled Russian chain (platform-api2.max.ru) and the system
+  // roots (MAX media upload URLs live on other hosts with public CAs).
+  const trustedCa =
+    caValue === undefined || insecureTls
+      ? caValue
+      : [...(Array.isArray(caValue) ? caValue : [caValue]), ...rootCertificates]
+
+  const request = ({ method, path, query, body, timeoutMs: callTimeoutMs }) =>
     new Promise((resolve, reject) => {
       let url
       try {
@@ -165,9 +174,9 @@ export function createMaxClient(options = {}) {
           port: url.port || undefined,
           path: `${url.pathname}${url.search}`,
           headers,
-          ca: caValue,
+          ca: trustedCa,
           rejectUnauthorized: !insecureTls,
-          timeout: timeoutMs,
+          timeout: callTimeoutMs ?? timeoutMs,
         },
         (res) => {
           const chunks = []
@@ -189,7 +198,9 @@ export function createMaxClient(options = {}) {
           res.on('error', reject)
         },
       )
-      req.on('timeout', () => req.destroy(new Error(`MAX API request timed out after ${timeoutMs}ms`)))
+      req.on('timeout', () =>
+        req.destroy(new Error(`MAX API request timed out after ${callTimeoutMs ?? timeoutMs}ms`)),
+      )
       req.on('error', reject)
       if (payload) req.write(payload)
       req.end()
@@ -230,11 +241,14 @@ export function createMaxClient(options = {}) {
 
   /** GET /updates — long polling for incoming updates (used by the pairing helper). */
   function getUpdates({ timeout = 0, limit = 100, marker, types } = {}) {
+    // A long poll keeps the HTTP request open for `timeout` seconds.
+    const callTimeoutMs = Math.max(timeoutMs, (Number(timeout) + 15) * 1000)
     return withRetry(() =>
       request({
         method: 'GET',
         path: 'updates',
         query: { timeout, limit, marker, types },
+        timeoutMs: callTimeoutMs,
       }),
     )
   }
@@ -284,7 +298,185 @@ export function createMaxClient(options = {}) {
     return results
   }
 
-  return { getMe, getUpdates, getChat, sendMessage, sendText, baseUrl, token }
+  /** PUT /messages?message_id= — edit one bot message (text/attachments/format). */
+  function editMessage({ messageId, text, format, attachments, notify, link, disableLinkPreview } = {}) {
+    if (!messageId) throw new Error('messageId is required')
+    const body = {}
+    if (text !== undefined) body.text = text
+    if (format !== undefined) body.format = format
+    // `attachments: []` removes all attachments (e.g. an inline keyboard).
+    if (attachments !== undefined) body.attachments = attachments
+    if (notify !== undefined) body.notify = notify
+    if (link !== undefined) body.link = link
+    const query = { message_id: messageId }
+    if (disableLinkPreview !== undefined) query.disable_link_preview = disableLinkPreview
+    return withRetry(() => request({ method: 'PUT', path: 'messages', query, body }))
+  }
+
+  /** DELETE /messages?message_id= — delete one bot message. */
+  function deleteMessage(messageId) {
+    if (!messageId) throw new Error('messageId is required')
+    return withRetry(() => request({ method: 'DELETE', path: 'messages', query: { message_id: messageId } }))
+  }
+
+  /** POST /answers?callback_id= — answer an inline-keyboard press. */
+  function answerCallback(callbackId, { message, notification } = {}) {
+    if (!callbackId) throw new Error('callbackId is required')
+    const body = {}
+    if (message !== undefined) body.message = message
+    if (notification !== undefined) body.notification = notification
+    return withRetry(() => request({ method: 'POST', path: 'answers', query: { callback_id: callbackId }, body }))
+  }
+
+  /** POST /chats/{chatId}/actions — e.g. `typing_on`. Works in dialogs (verified live). */
+  function sendAction(chatId, action = 'typing_on') {
+    if (chatId === undefined || chatId === null) throw new Error('chatId is required')
+    return withRetry(() =>
+      request({ method: 'POST', path: `chats/${encodeURIComponent(String(chatId))}/actions`, body: { action } }),
+    )
+  }
+
+  /** PATCH /me/commands — publish the bot command menu (≤32 commands). */
+  function setCommands(commands) {
+    if (!Array.isArray(commands)) throw new Error('commands must be an array')
+    return withRetry(() => request({ method: 'PATCH', path: 'me/commands', body: { commands } }))
+  }
+
+  /** POST to an absolute URL (media upload endpoints can live on another host). */
+  function postRaw(urlString, { body, contentType, contentLength } = {}) {
+    return new Promise((resolve, reject) => {
+      let url
+      try {
+        url = new URL(urlString)
+      } catch (error) {
+        reject(error)
+        return
+      }
+      const headers = {
+        Authorization: token,
+        'User-Agent': USER_AGENT,
+        'Content-Type': contentType,
+        'Content-Length': String(contentLength ?? body.length),
+      }
+      const req = https.request(
+        {
+          method: 'POST',
+          protocol: url.protocol,
+          hostname: url.hostname,
+          port: url.port || undefined,
+          path: `${url.pathname}${url.search}`,
+          headers,
+          ca: trustedCa,
+          rejectUnauthorized: !insecureTls,
+          timeout: Math.max(timeoutMs, 60000),
+        },
+        (res) => {
+          const chunks = []
+          res.on('data', (chunk) => chunks.push(chunk))
+          res.on('end', () => {
+            const raw = Buffer.concat(chunks).toString('utf8')
+            let json
+            try {
+              json = raw ? JSON.parse(raw) : undefined
+            } catch {
+              json = undefined
+            }
+            if (res.statusCode >= 200 && res.statusCode < 300) {
+              resolve(json ?? {})
+              return
+            }
+            reject(httpError(res.statusCode, raw, json))
+          })
+          res.on('error', reject)
+        },
+      )
+      req.on('timeout', () => req.destroy(new Error('MAX upload timed out')))
+      req.on('error', reject)
+      req.write(body)
+      req.end()
+    })
+  }
+
+  const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.tif', '.tiff', '.bmp', '.heic', '.webp'])
+
+  /** MAX upload responses vary by media type: {photos:{"0":{token}}}, {files:{...}}, {token}. */
+  function firstToken(value) {
+    if (typeof value === 'string' && value !== '') return value
+    if (!value || typeof value !== 'object') return undefined
+    if (typeof value.token === 'string' && value.token !== '') return value.token
+    for (const nested of Object.values(value)) {
+      const token = firstToken(nested)
+      if (token) return token
+    }
+    return undefined
+  }
+
+  /** Guess a MAX upload type from a file name. */
+  function uploadTypeFor(filePath) {
+    return IMAGE_EXTENSIONS.has(extname(String(filePath)).toLowerCase()) ? 'image' : 'file'
+  }
+
+  /**
+   * Upload a local file to MAX and return its attachment token.
+   * `POST /uploads?type=` → upload URL → multipart `data` → `{ token }`.
+   */
+  async function uploadMedia({ filePath, type, filename, buffer }) {
+    if (!filePath && !buffer) throw new Error('filePath or buffer is required')
+    const bytes = buffer ?? readFileSync(filePath)
+    const name = filename ?? (filePath ? basename(filePath) : 'file.bin')
+    const uploadType = type ?? uploadTypeFor(filePath ?? name)
+    const created = await withRetry(() =>
+      request({ method: 'POST', path: 'uploads', query: { type: uploadType } }),
+    )
+    if (!created?.url) throw new Error('MAX /uploads returned no upload URL')
+    const boundary = `----dshmax${Math.random().toString(16).slice(2)}${Date.now().toString(16)}`
+    const head = Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="data"; filename="${name.replace(/"/g, '')}"\r\nContent-Type: application/octet-stream\r\n\r\n`,
+    )
+    const tail = Buffer.from(`\r\n--${boundary}--\r\n`)
+    const multipart = Buffer.concat([head, bytes, tail])
+    const uploaded = await postRaw(created.url, {
+      body: multipart,
+      contentType: `multipart/form-data; boundary=${boundary}`,
+      contentLength: multipart.length,
+    })
+    const attachmentToken = firstToken(uploaded) ?? created.token
+    if (!attachmentToken) throw new Error('MAX upload returned no attachment token')
+    return { token: attachmentToken, type: uploadType, name }
+  }
+
+  /** Send a message with a retry for MAX's `attachment.not.ready` processing state. */
+  async function sendWithAttachments(params, { attempts = 4, delayMs = 1200 } = {}) {
+    let lastError
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        return await sendMessage(params)
+      } catch (error) {
+        lastError = error
+        if (error?.code !== 'attachment.not.ready' || attempt === attempts) throw error
+        await sleep(delayMs * attempt)
+      }
+    }
+    throw lastError
+  }
+
+  return {
+    getMe,
+    getUpdates,
+    getChat,
+    sendMessage,
+    sendText,
+    editMessage,
+    deleteMessage,
+    answerCallback,
+    sendAction,
+    setCommands,
+    uploadMedia,
+    sendWithAttachments,
+    uploadTypeFor,
+    baseUrl,
+    token,
+  }
 }
 
 /** Resolve a PEM CA chain path shipped with this package. */

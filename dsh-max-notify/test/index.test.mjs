@@ -1,6 +1,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { apply, normalizeConfig, isTopLevelSession } from '../index.js'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+// Keep test state away from the live plugin state file.
+process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'dsh-max-notify-test-home-'))
+
+const { apply, normalizeConfig, isTopLevelSession } = await import('../index.js')
 
 const tick = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms))
 

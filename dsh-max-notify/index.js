@@ -3,8 +3,12 @@
  * DSH agent turn to MAX messenger (max.ru) through a bot.
  *
  * It is a plain cordis function plugin: no build step, no runtime dependencies.
- * Hook shape: listen to `session/event`, remember the latest `assistant/message`
- * text per session, and send it once on the matching `turn/end`.
+ * Two halves:
+ *  - notifications: listen to `session/event`, remember the latest
+ *    `assistant/message` text per session, and send it once on `turn/end`;
+ *  - remote control ("Пульт"): long-poll MAX updates, inject prompts into the
+ *    active session, answer approvals/questions/commands from inline buttons,
+ *    show a live progress card, and forward `present` deliverables as files.
  *
  * Config (profile cordis.patch.yml row `config`, all optional):
  *   botToken, chatId, userId, baseUrl, caFile, format, notify,
@@ -14,10 +18,16 @@
  * Environment fallbacks: MAX_BOT_TOKEN, MAX_CHAT_ID, MAX_USER_ID, MAX_API_BASE,
  * MAX_CA_FILE, MAX_NOTIFY_DRY_RUN.
  */
+import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { createMaxClient, splitText, MAX_TEXT_LIMIT } from './lib/transport.mjs'
 import { extractAssistantText } from './lib/extract.mjs'
 import { formatNotification } from './lib/format.mjs'
+import { createState, resolveStateFile } from './lib/state.mjs'
+import { createInteractions } from './lib/interactions.mjs'
+import { createProgress } from './lib/progress.mjs'
+import { createDeliverables } from './lib/deliverables.mjs'
+import { createBot } from './lib/bot.mjs'
 
 export const name = 'dsh-max-notify'
 
@@ -48,6 +58,23 @@ const DEFAULTS = {
   requestTimeoutMs: 15000,
   maxRetries: 3,
   minIntervalMs: 600,
+  // remote control ("Пульт")
+  polling: true,
+  pollTimeoutSec: 25,
+  stateFile: undefined,
+  interactive: true,
+  approvalChannel: 'both',
+  questionChannel: 'both',
+  buttons: true,
+  webUrl: undefined,
+  progress: true,
+  progressDelayMs: 2500,
+  progressThrottleMs: 2000,
+  progressTextLimit: 400,
+  typing: true,
+  deliverables: true,
+  registerCommands: true,
+  greetOnStart: true,
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -109,10 +136,27 @@ export function normalizeConfig(raw = {}) {
     requestTimeoutMs: asInteger(merged.requestTimeoutMs, DEFAULTS.requestTimeoutMs, 1000, 120000),
     maxRetries: asInteger(merged.maxRetries, DEFAULTS.maxRetries, 0, 10),
     minIntervalMs: asInteger(merged.minIntervalMs, DEFAULTS.minIntervalMs, 0, 60000),
+    polling: asBoolean(merged.polling, DEFAULTS.polling),
+    pollTimeoutSec: asInteger(merged.pollTimeoutSec, DEFAULTS.pollTimeoutSec, 0, 90),
+    interactive: asBoolean(merged.interactive, DEFAULTS.interactive),
+    buttons: asBoolean(merged.buttons, DEFAULTS.buttons),
+    progress: asBoolean(merged.progress, DEFAULTS.progress),
+    typing: asBoolean(merged.typing, DEFAULTS.typing),
+    deliverables: asBoolean(merged.deliverables, DEFAULTS.deliverables),
+    registerCommands: asBoolean(merged.registerCommands, DEFAULTS.registerCommands),
+    greetOnStart: asBoolean(merged.greetOnStart, DEFAULTS.greetOnStart),
+    progressDelayMs: asInteger(merged.progressDelayMs, DEFAULTS.progressDelayMs, 0, 60000),
+    progressThrottleMs: asInteger(merged.progressThrottleMs, DEFAULTS.progressThrottleMs, 500, 60000),
+    progressTextLimit: asInteger(merged.progressTextLimit, DEFAULTS.progressTextLimit, 100, 3500),
+    stateFile: String(merged.stateFile || env.MAX_NOTIFY_STATE_FILE || '').trim() || undefined,
+    webUrl: String(merged.webUrl || env.DSH_WEB_URL || '').trim() || undefined,
   }
 
   const format = typeof config.format === 'string' ? config.format.trim().toLowerCase() : ''
   config.format = format === 'markdown' || format === 'html' ? format : undefined
+  const channel = (value) => (value === 'max' || value === 'gui' || value === 'both' ? value : 'both')
+  config.approvalChannel = channel(merged.approvalChannel)
+  config.questionChannel = channel(merged.questionChannel)
 
   config.allowedUserIds = asStringArray(merged.allowedUserIds ?? env.MAX_ALLOWED_USER_IDS, DEFAULTS.allowedUserIds)
   config.allowedChatIds = asStringArray(merged.allowedChatIds ?? env.MAX_ALLOWED_CHAT_IDS, DEFAULTS.allowedChatIds)
@@ -281,6 +325,168 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     }
   }
 
+  // ── host session/agent access for the remote control ("Пульт") ───────────
+  const getService = (serviceName) => {
+    try {
+      return ctx.get?.(serviceName)
+    } catch {
+      return undefined
+    }
+  }
+  const titleCache = new Map()
+  function titleOf(session) {
+    try {
+      const title = getService('sessionTitle')?.get?.(session)?.title
+      if (typeof title === 'string' && title.trim() !== '') {
+        if (session?.id) titleCache.set(String(session.id), title.trim())
+        return title.trim()
+      }
+    } catch {
+      // sessionTitle is an optional service
+    }
+    return session?.id ? titleCache.get(String(session.id)) : undefined
+  }
+  function titleFor(sessionOrId) {
+    if (typeof sessionOrId === 'string' || sessionOrId === undefined) {
+      const id = String(sessionOrId ?? '')
+      const agent = getService('agents')?.get?.(id)
+      if (agent) return titleOf(agent.session) ?? titleCache.get(id)
+      return titleCache.get(id)
+    }
+    return titleOf(sessionOrId)
+  }
+
+  async function listSessions() {
+    const controller = getService('sessionController')
+    if (!controller?.list) return []
+    const value = await controller.list({}, new AbortController().signal)
+    return (value?.items ?? [])
+      .filter((item) => item && !item.blank && item.origin !== 'subagent')
+      .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+      .slice(0, 10)
+      .map((item) => ({
+        sessionId: item.sessionId,
+        running: item.running === true,
+        cwd: item.cwd,
+        updatedAt: item.updatedAt,
+        title: titleFor(String(item.sessionId)),
+      }))
+  }
+
+  async function statusInfo(sessionId) {
+    let summary
+    try {
+      const controller = getService('sessionController')
+      const value = controller?.list ? await controller.list({}, new AbortController().signal) : undefined
+      summary = value?.items?.find((item) => item.sessionId === sessionId)
+    } catch {
+      summary = undefined
+    }
+    const agent = getService('agents')?.get?.(sessionId)
+    return {
+      sessionId,
+      title: titleFor(sessionId),
+      running: summary?.running === true || (agent ? agent.status !== 'idle' : false),
+      agentStatus: agent?.status,
+      model: agent?.options?.model,
+      provider: agent?.options?.provider,
+      cwd: summary?.cwd ?? agent?.session?.header?.cwd,
+      updatedAt: summary?.updatedAt,
+    }
+  }
+
+  async function promptSession(sessionId, text) {
+    const value = String(text ?? '').trim()
+    if (!value) return false
+    const controller = getService('sessionController')
+    if (controller?.prompt) {
+      const abort = new AbortController()
+      const timer = setTimeout(() => abort.abort(), 15000)
+      timer.unref?.()
+      try {
+        await controller.prompt(
+          { requestId: randomUUID(), sessionId, mode: 'queue', content: [{ type: 'text', text: value }] },
+          abort.signal,
+        )
+        return true
+      } catch (error) {
+        logger.warn('sessionController.prompt failed: %s', error?.message || String(error))
+      } finally {
+        clearTimeout(timer)
+      }
+    }
+    try {
+      const agent = getService('agents')?.get?.(sessionId)
+      if (!agent) return false
+      agent.followup({
+        id: randomUUID(),
+        role: 'user',
+        content: [{ type: 'text', text: value }],
+        source: { kind: 'user' },
+      })
+      return true
+    } catch (error) {
+      logger.warn('agent.followup failed: %s', error?.message || String(error))
+      return false
+    }
+  }
+
+  async function cancelSession(sessionId) {
+    const controller = getService('sessionController')
+    if (controller?.cancel) {
+      try {
+        const value = await controller.cancel({ sessionId })
+        return value?.accepted !== false
+      } catch (error) {
+        logger.warn('sessionController.cancel failed: %s', error?.message || String(error))
+      }
+    }
+    const agent = getService('agents')?.get?.(sessionId)
+    if (agent) {
+      try {
+        agent.cancel({ kind: 'user' })
+        return true
+      } catch {
+        // fall through
+      }
+    }
+    return false
+  }
+
+  const target = { chatId: config.chatId, userId: config.chatId === undefined ? config.userId : undefined }
+  const state = createState({ file: resolveStateFile(config), logger, chatId: config.chatId })
+  const interactions = createInteractions({
+    client,
+    config,
+    logger,
+    target,
+    resolveTitle: (session) => titleOf(session),
+  })
+  const progress = createProgress({ client, config, logger, target })
+  const deliverables = createDeliverables({ client, config, logger, target })
+  const bot = createBot({
+    client,
+    config,
+    logger,
+    state,
+    interactions,
+    runtime: { listSessions, statusInfo, promptSession, cancelSession, titleFor },
+  })
+
+  function finalKeyboard(session) {
+    if (!config.buttons) return undefined
+    const sessionId = String(session?.id ?? '')
+    if (!sessionId) return undefined
+    const rows = [
+      [
+        { type: 'callback', text: '▶️ Продолжить', payload: JSON.stringify({ t: 'qa', a: 'cont', s: sessionId }) },
+        { type: 'callback', text: '⏹ Стоп', payload: JSON.stringify({ t: 'qa', a: 'stop', s: sessionId }) },
+      ],
+    ]
+    if (config.webUrl) rows.push([{ type: 'link', text: '🖥 Открыть GUI', url: config.webUrl }])
+    return [{ type: 'inline_keyboard', payload: { buttons: rows } }]
+  }
+
   async function deliver(session, text, reason) {
     if (!(await ensureTargetAllowed())) return
     const payload = formatNotification({
@@ -298,7 +504,9 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       logger.info('[dry-run] would send %d chunk(s) to MAX: %s', chunks.length, chunks[0]?.slice(0, 120))
       return
     }
-    for (const chunk of chunks) {
+    const attachments = finalKeyboard(session)
+    for (const [index, chunk] of chunks.entries()) {
+      const isLast = index === chunks.length - 1
       const message = await client.sendMessage({
         chatId: config.chatId,
         userId: config.chatId === undefined ? config.userId : undefined,
@@ -306,10 +514,12 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
         format: config.format,
         notify: config.notify,
         disableLinkPreview: config.disableLinkPreview,
+        ...(isLast && attachments ? { attachments } : {}),
       })
       const mid = message?.message?.body?.mid
       logger.debug('MAX message sent%s', mid ? ` (mid ${mid})` : '')
     }
+    bot.noteSession?.(String(session.id))
   }
 
   function onSessionEvent(session, event) {
@@ -320,6 +530,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     switch (event.type) {
       case 'turn/start':
         pending.delete(id)
+        progress.onTurnStart(session)
         return
       case 'assistant/message': {
         const text = extractAssistantText(data.message)
@@ -329,6 +540,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
         return
       }
       case 'turn/end': {
+        progress.onTurnEnd(session)
         const record = pending.get(id)
         pending.delete(id)
         if (!record || record.turn !== data.turn) return
@@ -338,6 +550,16 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
         if (!text) return
         if (!config.includeSubagents && !isTopLevelSession(session)) return
         void enqueue(() => deliver(session, text, data.reason))
+        return
+      }
+      case 'deliverables/presented': {
+        if (!config.deliverables) return
+        if (!config.includeSubagents && !isTopLevelSession(session)) return
+        const files = Array.isArray(data.files) ? data.files : []
+        if (files.length === 0) return
+        void deliverables.send(files).catch((error) => {
+          logger.warn('cannot forward deliverables: %s', error?.message || String(error))
+        })
         return
       }
       default:
@@ -352,8 +574,59 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     }
   })
   ctx.on('session/disposed', (session) => {
-    if (session?.id) pending.delete(session.id)
+    if (session?.id) {
+      pending.delete(session.id)
+      progress.onTurnEnd(session)
+    }
   })
+
+  // Live progress from the model stream and the tool pipeline.
+  ctx.on('agent/assistant-stream', (payload) => {
+    try {
+      progress.onStream(payload?.agent?.session, payload?.frame)
+    } catch (error) {
+      logger.debug('progress stream handler failed: %s', error?.message || String(error))
+    }
+  })
+  ctx.on('tools/pre-execute', (execution, next) => {
+    try {
+      progress.onTool(execution?.agent?.session, execution)
+    } catch {
+      // observation only
+    }
+    return next()
+  })
+
+  // Interactive decisions: approvals and agent questions are answered from MAX
+  // (prepend, delegate to the GUI immediately, race both channels).
+  if (config.interactive) {
+    ctx.on(
+      'approval/request',
+      (request, next) => interactions.handleApproval(request, next),
+      { prepend: true },
+    )
+    ctx.on(
+      'user-questions/request',
+      (request, next) => interactions.handleQuestions(request, next),
+      { prepend: true },
+    )
+  }
+
+  // Start the MAX long-polling loop and tear everything down with the plugin.
+  // (A minimal test context has no fiber/effect support, so guard the call.)
+  if (typeof ctx.effect === 'function') {
+    ctx.effect(() => {
+      void bot.start()
+      return () => {
+        bot.stop()
+        progress.dispose()
+        interactions.dispose()
+        state.dispose()
+      }
+    })
+  } else {
+    void bot.start()
+  }
 
   const allowedLabels = [
     ...config.allowedUserIds.map((id) => `user ${id}`),
@@ -362,11 +635,12 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
   const restrictionLabel = allowedLabels.join(', ')
   const restriction = restrictionLabel ? `; only ${restrictionLabel}` : ''
   logger.info(
-    'forwarding each agent reply to MAX %s as %s%s%s',
+    'forwarding each agent reply to MAX %s as %s%s%s%s',
     config.chatId !== undefined ? `chat ${config.chatId}` : `user ${config.userId}`,
     config.format ?? 'plain text',
     config.dryRun ? ' (dry-run)' : '',
     restriction,
+    config.interactive ? '; remote control on' : '',
   )
 
   // Optional one-shot "plugin is alive" message, useful right after installation.
@@ -384,7 +658,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
         chatId: config.chatId,
         userId: config.chatId === undefined ? config.userId : undefined,
         text:
-          `🟢 DSH → MAX: плагин dsh-max-notify подключён${bot}. Дальше сюда будет приходить последнее сообщение агента после каждого хода.` +
+          `🟢 DSH → MAX: плагин dsh-max-notify подключён${bot}. Сюда приходит последнее сообщение агента после каждого хода; можно писать агенту прямо в этот чат и пользоваться /help.` +
           (config.allowedUserIds.length > 0 || config.allowedChatIds.length > 0
             ? ` Отправка ограничена: только ${restrictionLabel}.`
             : ''),

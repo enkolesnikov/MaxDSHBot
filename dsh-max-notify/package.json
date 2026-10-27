@@ -1,7 +1,7 @@
 {
   "name": "dsh-max-notify",
-  "version": "0.1.0",
-  "description": "Forward each DSH agent reply (last assistant message of a turn) to MAX messenger through a bot",
+  "version": "0.2.0",
+  "description": "DSH → MAX messenger plugin: forwards agent replies and provides remote control (chat, commands, approvals, questions, progress, files) over a MAX bot",
   "type": "module",
   "main": "index.js",
   "exports": {
@@ -19,7 +19,7 @@
   ],
   "scripts": {
     "test": "node --test \"test/**/*.test.mjs\"",
-    "check": "node --check index.js && node --check lib/transport.mjs && node --check lib/extract.mjs && node --check lib/format.mjs"
+    "check": "node --check index.js && node --check lib/transport.mjs && node --check lib/extract.mjs && node --check lib/format.mjs && node --check lib/state.mjs && node --check lib/cards.mjs && node --check lib/interactions.mjs && node --check lib/progress.mjs && node --check lib/deliverables.mjs && node --check lib/bot.mjs"
   },
   "engines": {
     "node": ">=20"

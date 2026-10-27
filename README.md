@@ -20,6 +20,22 @@
 - Плохой/отсутствующий конфиг не ломает профиль: плагин просто логирует
   предупреждение и остаётся выключенным.
 
+### Пульт управления (v0.2)
+
+- **Двусторонний чат**: текст, отправленный боту в MAX, уходит в активную
+  сессию (`sessionController.prompt`), ответ приходит обратно.
+- **Команды**: `/status`, `/stop`, `/sessions`, `/use N`, `/current`, `/help`
+  (меню команд регистрируется через `PATCH /me/commands`).
+- **Кнопки под ответом**: «Продолжить», «Стоп», «Открыть GUI».
+- **Live-прогресс**: одно сообщение редактируется во время работы
+  (инструмент, текст, таймер) + `typing_on`; удаляется в конце хода.
+- **Подтверждения и вопросы из MAX**: waterfall-перехват
+  `approval/request`/`user-questions/request` с `prepend`, гонка «MAX vs GUI»
+  (`Promise.race`): кто ответил первым — тот и прав, вторая сторона получает
+  «решено в другом месте». Таймаут/обрыв — fail-closed.
+- **Файлы**: `deliverables/presented` загружается в MAX (`POST /uploads`) и
+  приходит вложениями (изображения — фото, остальное — файлами).
+
 ## Быстрый старт
 
 ```bash
@@ -73,6 +89,14 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 | `enabled` / `dryRun` | `true` / `false` | выключатель / только лог |
 | `requestTimeoutMs` / `maxRetries` / `minIntervalMs` | `15000` / `3` / `600` | транспорт |
 | `notifyOnStart` | `false` | одноразовое «плагин подключён» в MAX |
+| `polling` / `pollTimeoutSec` | `true` / `25` | long polling `GET /updates` (один поллер на токен) |
+| `interactive` | `true` | приём сообщений/кнопок и команды |
+| `approvalChannel` / `questionChannel` | `both` | `both` (MAX + GUI гонка), `max`, `gui` |
+| `buttons` / `webUrl` | `true` / env `DSH_WEB_URL` | кнопки под ответом и ссылка на GUI |
+| `progress` / `progressDelayMs` / `progressThrottleMs` / `typing` | `true` / `2500` / `2000` / `true` | live-карточка прогресса |
+| `deliverables` | `true` | отправлять файлы из `present` вложениями |
+| `registerCommands` / `greetOnStart` | `true` / `true` | меню команд MAX и приветствие по Start |
+| `stateFile` | `$DSH_HOME/max-notify/state.json` | marker и активная сессия (вне репозитория) |
 
 ## Структура
 
@@ -84,17 +108,27 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 | `dsh-max-notify/lib/format.mjs` | заголовок и тело уведомления |
 | `dsh-max-notify/certs/ca-chain.pem` | Russian Trusted Sub CA + Root CA |
 | `dsh-max-notify/cordis.patch.yml` | bundle-patch: вставка строки `max-notify` |
+| `dsh-max-notify/lib/bot.mjs` | long polling, команды, маршрутизация сообщений |
+| `dsh-max-notify/lib/interactions.mjs` | approvals/вопросы/кнопки, гонка MAX vs GUI |
+| `dsh-max-notify/lib/progress.mjs` | live-карточка прогресса и typing |
+| `dsh-max-notify/lib/deliverables.mjs` | uploads файлов из `present` |
+| `dsh-max-notify/lib/state.mjs` | marker и активная сессия (вне репозитория) |
 | `dsh-max-notify/tools/` | `pair.mjs` (chat_id), `send-test.mjs` |
-| `dsh-max-notify/test/` | `node --test` (33 теста) |
+| `dsh-max-notify/test/` | `node --test` (67 тестов) |
 | `research/` | как писать плагины DSH, MAX Bot API, каталог фич |
 
 ## Ограничения
 
 - Пересылается только финальный текст хода (не стрим и не tool-шаги).
 - MAX markdown не поддерживает списки/таблицы: `- пункт` отрисуется текстом.
-- Отправка односторонняя; для приёма сообщений нужен webhook (публичный HTTPS
-  :443 с сертификатом, которому доверяет MAX) либо long polling в отдельном
-  цикле. Текущая версия использует long polling только в `tools/pair.mjs`.
+- Приём сообщений — long polling (`GET /updates`): **один поллер на токен**;
+  запущенный `tools/pair.mjs` конкурирует с плагином за события. Для
+  production MAX рекомендует webhook (публичный HTTPS :443 с сертификатом,
+  которому доверяет MAX) — тогда polling в плагине надо выключить (`polling: false`).
+- Approvals/вопросы в режиме `both` гоняются с Web GUI: кто ответил первым, тот
+  и прав; карточка в проигравшем канале помечается «решено в другом месте».
+- `interactive`/`polling` требуют `sessionController` (есть в web-профиле);
+  без него остаются уведомления и кнопки, но не команды/инъекция промптов.
 - **Всё, что агент пишет, уходит на серверы MAX.** Для чувствительных сессий —
   `enabled: false` или `dryRun: true`.
 - Один `chatId` на строку `max-notify`; для нескольких получателей — отдельные
@@ -103,7 +137,7 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 ## Проверка
 
 ```bash
-cd dsh-max-notify && npm test          # 33 unit tests
+cd dsh-max-notify && npm test          # 67 unit tests
 node tools/send-test.mjs "проверка"    # реальная отправка
 DSH_HOME=$HOME/.dsh dsh --profile web --dump-config | grep -A12 'id: max-notify'
 ```

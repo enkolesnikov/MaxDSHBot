@@ -11,6 +11,22 @@ Skill](https://github.com/max-messenger/max-agents-skill), а также наш�
 
 ---
 
+## 0.0 Статус реализации (v0.2.0, «Пульт»)
+
+Реализовано в `dsh-max-notify` (коммит «remote control»):
+
+- **1** двусторонний чат (MAX → `sessionController.prompt` → ответ обратно);
+- **2** команды `/status`, `/stop`, `/sessions`, `/use`, `/current`, `/help`
+  (+ меню `PATCH /me/commands`);
+- **3** кнопки под ответом: «Продолжить», «Стоп», «Открыть GUI»;
+- **4** live-прогресс (редактируемое сообщение + `typing_on`);
+- **6** approvals из MAX (prepend + `Promise.race` MAX↔GUI, fail-closed);
+- **7** вопросы `ask_user_question` кнопками/текстом;
+- **13** deliverables (`present`) вложениями (`POST /uploads`);
+- бонусы: `/status` с моделью/папкой, allowlist на входящие, состояние в
+  `$DSH_HOME/max-notify/state.json`, 67 тестов.
+- Не реализовано из каталога: 5/8/9/10/11/12/14–29 (см. ниже).
+
 ## 0. TL;DR
 
 Максимальная польза — не «ещё уведомления», а превратить бота в **пульт
