@@ -32,6 +32,7 @@ import { createPolicy } from './lib/policy.mjs'
 import { createObserver } from './lib/observer.mjs'
 import { collectMessageImages, extractImageReferences } from './lib/images.mjs'
 import { createIncoming } from './lib/incoming.mjs'
+import { archivedIdsOf, filterArchivedSessions } from './lib/sessions.mjs'
 
 export const name = 'dsh-max-notify'
 
@@ -410,8 +411,11 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     const controller = getService('sessionController')
     if (!controller?.list) return []
     const value = await controller.list({}, new AbortController().signal)
-    return (value?.items ?? [])
-      .filter((item) => item && !item.blank && item.origin !== 'subagent')
+    const items = (value?.items ?? []).filter(
+      (item) => item && !item.blank && item.origin !== 'subagent',
+    )
+    const archived = archivedIdsOf(getService('workspaceRegistry'))
+    return filterArchivedSessions(items, archived)
       .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
       .slice(0, 10)
       .map((item) => ({
