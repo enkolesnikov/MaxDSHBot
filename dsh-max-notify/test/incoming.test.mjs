@@ -27,7 +27,7 @@ function fakeClient() {
       if (bytes.length > (maxBytes ?? Infinity)) throw new Error('too big')
       writeFileSync(dest, bytes)
       downloads.push({ url, dest })
-      return { path: dest, bytes: bytes.length }
+      return { path: dest, bytes: bytes.length, contentType: 'image/png' }
     },
   }
 }
@@ -74,7 +74,7 @@ test('saves incoming file and image into the workspace inbox', async () => {
   assert.equal(client.downloads.length, 2)
   assert.ok(result.dir.startsWith(workspace))
   assert.ok(result.saved[0].path.includes('report.pdf'))
-  assert.ok(result.saved[1].path.endsWith('.jpg'))
+  assert.ok(result.saved[1].path.endsWith('.png'))
   assert.equal(readFileSync(result.saved[0].path, 'utf8'), 'content:https://iu.oneme.ru/uploadFile')
   assert.match(result.promptText, /Пользователь прислал файлы из MAX/)
   assert.match(result.promptText, /report\.pdf/)

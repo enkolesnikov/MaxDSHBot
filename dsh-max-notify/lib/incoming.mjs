@@ -2,12 +2,27 @@
  * Incoming files from MAX: download attachments sent by the allowlisted owner
  * into the session's workspace inbox and hand their paths to the agent.
  */
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, renameSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { basename, extname, isAbsolute, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 
-const TYPE_EXTENSION = { image: '.jpg', video: '.mp4', audio: '.mp3', file: '.bin' }
+const TYPE_EXTENSION = { image: '', video: '.mp4', audio: '.mp3', file: '.bin' }
+const CONTENT_TYPE_EXTENSION = {
+  'image/png': '.png',
+  'image/jpeg': '.jpg',
+  'image/jpg': '.jpg',
+  'image/webp': '.webp',
+  'image/gif': '.gif',
+  'image/bmp': '.bmp',
+  'image/tiff': '.tiff',
+  'image/heic': '.heic',
+}
+
+function extensionForContentType(contentType) {
+  const normalized = String(contentType ?? '').split(';')[0].trim().toLowerCase()
+  return CONTENT_TYPE_EXTENSION[normalized] ?? ''
+}
 const SAFE_CHARS = /[^A-Za-z0-9._ ()-]+/g
 
 /** Human-readable byte size. */
@@ -31,6 +46,8 @@ function describeAttachment(attachment) {
     (type === 'image' && payload.photo_id ? `image-${payload.photo_id}` : `attachment-${Date.now()}`)
   const size = attachment?.size ?? payload.size
   const fallbackExtension = TYPE_EXTENSION[type] ?? TYPE_EXTENSION.file
+  // Images keep their original extension when present; otherwise the correct one
+  // is derived from the download's Content-Type (or left off for signature sniffing).
   return { type, url, name: safeFileName(rawName, fallbackExtension), size }
 }
 
@@ -39,7 +56,7 @@ export function safeFileName(rawName, fallbackExtension = '.bin') {
   const base = basename(String(rawName ?? '').replace(/\\/g, '/'))
   let cleaned = base.replace(SAFE_CHARS, '_').replace(/^[.\s]+/, '').replace(/\s+/g, ' ').trim()
   if (cleaned === '') cleaned = 'file'
-  if (extname(cleaned) === '') cleaned += fallbackExtension
+  if (extname(cleaned) === '' && fallbackExtension !== '') cleaned += fallbackExtension
   if (cleaned.length > 80) {
     const ext = extname(cleaned)
     cleaned = `${cleaned.slice(0, 80 - ext.length)}${ext}`
@@ -124,8 +141,21 @@ export function createIncoming({ client, config, logger, resolveCwd } = {}) {
       const dest = join(dir, `${timestamp()}-${randomUUID().slice(0, 8)}-${meta.name}`)
       try {
         const result = await client.downloadToFile(meta.url, dest, { maxBytes })
-        saved.push({ path: dest, name: meta.name, type: meta.type, bytes: result.bytes })
-        logger?.info?.('saved MAX attachment %s (%d bytes)', dest, result.bytes)
+        let finalPath = dest
+        if (meta.type === 'image' && extensionForContentType(result.contentType) !== '') {
+          const extension = extensionForContentType(result.contentType)
+          if (!finalPath.toLowerCase().endsWith(extension)) {
+            const withExtension = `${finalPath}${extension}`
+            try {
+              renameSync(finalPath, withExtension)
+              finalPath = withExtension
+            } catch {
+              // keep the content-addressed name without the extension
+            }
+          }
+        }
+        saved.push({ path: finalPath, name: meta.name, type: meta.type, bytes: result.bytes })
+        logger?.info?.('saved MAX attachment %s (%d bytes)', finalPath, result.bytes)
       } catch (error) {
         errors.push(`${meta.name}: ${error?.message || String(error)}`)
         logger?.warn?.('cannot download MAX attachment %s: %s', meta.name, error?.message || String(error))
