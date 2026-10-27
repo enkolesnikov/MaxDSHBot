@@ -47,10 +47,14 @@
   «решено в другом месте». Таймаут/обрыв — fail-closed.
 - **Файлы**: `deliverables/presented` загружается в MAX (`POST /uploads`) и
   приходит вложениями (изображения — фото, остальное — файлами).
-- **Картинки из финального ответа** (v0.3.1): image-блоки сообщения и
-  изображения, упомянутые в тексте (`![alt](path)`, `./shot.png`,
-  `https://…/pic.png`), уходят в MAX фотографиями; код-фрагменты игнорируются,
-  дубли с `present` не отправляются.
+- **Картинки из финального ответа** (v0.3.1): image-блоки сообщения,
+  изображения из tool-результатов и упомянутые в тексте (`![alt](path)`,
+  `./shot.png`, `https://…/pic.png`) уходят в MAX фотографиями; код-фрагменты
+  игнорируются, дубли с `present` не отправляются.
+- **Приём файлов из MAX** (v0.4.0): файл/фото, отправленный боту, скачивается
+  в `<рабочая папка сессии>/max-inbox/`, агенту передаётся промпт с путями и
+  типами (read/read_image); лимиты размера/количества, безопасные имена,
+  отчёт об ошибках в чат.
 
 ## Быстрый старт
 
@@ -111,7 +115,10 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 | `buttons` / `webUrl` | `true` / env `DSH_WEB_URL` | кнопки под ответом и ссылка на GUI |
 | `progress` / `progressDelayMs` / `progressThrottleMs` / `typing` | `true` / `2500` / `2000` / `true` | live-карточка прогресса |
 | `deliverables` | `true` | отправлять файлы из `present` вложениями |
-| `forwardImages` / `maxImages` | `true` / `4` | картинки из финального ответа вложением |
+| `forwardImages` / `forwardToolImages` / `maxImages` | `true` / `true` / `4` | картинки из ответа и tool-результатов |
+| `receiveFiles` | `true` | принимать файлы/фото из MAX |
+| `inboxDir` | `<cwd>/max-inbox` | папка для входящих (поддерживает `%cwd%`) |
+| `maxIncomingFiles` / `maxIncomingBytes` | `4` / `25 MiB` | лимиты входящих вложений |
 | `registerCommands` / `greetOnStart` | `true` / `true` | меню команд MAX и приветствие по Start |
 | `notifySubagents` / `notifyJobs` / `notifyGoals` / `notifyErrors` | `true` | уведомления о событиях |
 | `todoProgress` | `true` | TODO-прогресс в MAX |
@@ -138,7 +145,7 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 | `dsh-max-notify/lib/policy.mjs` | режимы уведомлений и тихие часы |
 | `dsh-max-notify/lib/observer.mjs` | события, TODO-прогресс и дайджест |
 | `dsh-max-notify/tools/` | `pair.mjs` (chat_id), `send-test.mjs` |
-| `dsh-max-notify/test/` | `node --test` (96 тестов) |
+| `dsh-max-notify/test/` | `node --test` (107 тестов) |
 | `research/` | как писать плагины DSH, MAX Bot API, каталог фич |
 
 ## Ограничения
@@ -161,7 +168,7 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 ## Проверка
 
 ```bash
-cd dsh-max-notify && npm test          # 96 unit tests
+cd dsh-max-notify && npm test          # 107 unit tests
 node tools/send-test.mjs "проверка"    # реальная отправка
 DSH_HOME=$HOME/.dsh dsh --profile web --dump-config | grep -A12 'id: max-notify'
 ```

@@ -17,6 +17,7 @@ import {
   shortSessionId,
   truncate,
 } from './cards.mjs'
+import { formatBytes } from './incoming.mjs'
 
 const COMMANDS = [
   { name: 'help', description: 'Справка по командам' },
@@ -218,6 +219,49 @@ export function createBot({ client, config, logger, state, interactions, runtime
     }
   }
 
+  async function handleIncomingFiles({ chatId, attachments, text }) {
+    if (!config.receiveFiles) {
+      await reply(chatId, '📎 Приём файлов отключён (`receiveFiles: false`).')
+      return
+    }
+    const sessionId = await activeSession(chatId)
+    if (!sessionId) {
+      await reply(chatId, '📎 Нет активной сессии — файл не сохранён. Открой GUI или выбери сессию через `/sessions`.')
+      return
+    }
+    if (!runtime?.saveIncoming) {
+      await reply(chatId, '📎 Приём файлов недоступен.')
+      return
+    }
+    let result
+    try {
+      result = await runtime.saveIncoming(attachments, sessionId)
+    } catch (error) {
+      logger?.warn?.('cannot save incoming MAX files: %s', error?.message || String(error))
+      await reply(chatId, `❌ Не удалось сохранить файлы: ${error?.message || String(error)}`)
+      return
+    }
+    const saved = result?.saved ?? []
+    const errors = result?.errors ?? []
+    if (saved.length === 0) {
+      await reply(
+        chatId,
+        `❌ Не удалось сохранить файлы${errors.length > 0 ? `:\n• ${errors.join('\n• ')}` : '.'}`,
+      )
+      return
+    }
+    const filesText = saved.map((file) => `• ${file.path} (${file.type}, ${formatBytes(file.bytes)})`).join('\n')
+    const promptText = `${text ? `${text}\n\n` : ''}${result?.promptText ?? ''}`.trim()
+    const accepted = await runtime.promptSession?.(sessionId, promptText)
+    const tail = errors.length > 0 ? `\n⚠️ ${errors.join('; ')}` : ''
+    await reply(
+      chatId,
+      accepted
+        ? `📎 Сохранено: ${saved.length}\n${filesText}\n📨 Передано агенту${tail}`
+        : `📎 Сохранено: ${saved.length}\n${filesText}\n❌ Не удалось передать агенту${tail}`,
+    )
+  }
+
   async function handlePrompt(chatId, text) {
     const sessionId = await activeSession(chatId)
     if (!sessionId) {
@@ -299,12 +343,12 @@ export function createBot({ client, config, logger, state, interactions, runtime
     }
     const text = String(message.body?.text ?? '').trim()
     if (interactions?.tryAnswerText && (await interactions.tryAnswerText({ chatId, userId, text }))) return
-    if (text === '') {
-      if (Array.isArray(message.body?.attachments) && message.body.attachments.length > 0) {
-        await reply(chatId, '📎 Вложения пока не поддерживаются. Напиши текстом.')
-      }
+    const attachments = Array.isArray(message.body?.attachments) ? message.body.attachments : []
+    if (attachments.length > 0) {
+      await handleIncomingFiles({ chatId, attachments, text })
       return
     }
+    if (text === '') return
     if (text.startsWith('/')) {
       await handleCommand(text, { chatId, userId })
       return
