@@ -1,0 +1,22 @@
+# Секреты и локальные артефакты — не коммитить.
+.env
+.env.*
+!.env.example
+.max-pairing.json
+
+# Зависимости и кэши
+node_modules/
+.pnpm-store/
+.pnpm/
+npm-debug.log*
+
+# PoC/эксперименты и служебные логи
+scratch/
+*.log
+*.tmp
+
+# ОС/редакторы
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

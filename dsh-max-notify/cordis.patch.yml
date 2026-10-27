@@ -1,0 +1,32 @@
+# dsh-max-notify bundle patch.
+#
+# Inserted into the DSH profile when this package is listed in
+# `dsh.profile.bundles` (see install.sh / `dsh plugin --profile <p> add ...`).
+#
+# Private values (bot token file, chat id, allowlist) belong in the profile's
+# own cordis.patch.yml as an override row with the same id, or directly here
+# when you do not publish this repository:
+#
+#   - id: max-notify
+#     config: { botTokenFile: /path/to/.env, chatId: 123456789, allowedUserIds: [123456789] }
+#
+# A same-id override replaces this config object entirely.
+- insert:
+    - id: max-notify
+      name: dsh-max-notify
+      config:
+        # Either botToken or botTokenFile (file with MAX_BOT_TOKEN=...).
+        # botTokenFile: /path/to/.env
+        # Recipient: chatId (dialog/chat) or userId (dialog peer).
+        # chatId: 123456789
+        # Optional recipient allowlist (fail-closed):
+        # allowedUserIds: [123456789]
+        format: markdown
+        notify: true
+        disableLinkPreview: true
+        includeHeader: true
+        includeTitle: true
+        includeSessionId: false
+        includeSubagents: false
+        skipReasons: [interrupted, forked]
+        maxChars: 3800
