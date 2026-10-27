@@ -49,7 +49,7 @@ file deliverables.
 | `install.sh` | `dsh plugin --profile <name> add link:<this dir>` |
 | `tools/pair.mjs` | long-poll `GET /updates` to discover `chat_id` |
 | `tools/send-test.mjs` | manual send test |
-| `test/*.test.mjs` | `node --test test/*.test.mjs` (32 unit tests) |
+| `test/*.test.mjs` | `node --test test/*.test.mjs` (112 unit tests) |
 
 ## Config
 
