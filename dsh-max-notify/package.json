@@ -1,7 +1,7 @@
 {
   "name": "dsh-max-notify",
-  "version": "0.3.0",
-  "description": "DSH → MAX messenger plugin: agent replies, remote control (chat, commands, approvals, questions, progress, files) and observability (subagent/job/goal/error notifications, TODO progress, digest, quiet hours) over a MAX bot",
+  "version": "0.3.1",
+  "description": "DSH → MAX messenger plugin: agent replies with inline images, remote control (chat, commands, approvals, questions, progress, files), observability (events, TODO progress, quiet modes, digest)",
   "type": "module",
   "main": "index.js",
   "exports": {

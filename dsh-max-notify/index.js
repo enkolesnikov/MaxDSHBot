@@ -30,6 +30,7 @@ import { createDeliverables } from './lib/deliverables.mjs'
 import { createBot } from './lib/bot.mjs'
 import { createPolicy } from './lib/policy.mjs'
 import { createObserver } from './lib/observer.mjs'
+import { collectMessageImages, extractImageReferences } from './lib/images.mjs'
 
 export const name = 'dsh-max-notify'
 
@@ -88,6 +89,8 @@ const DEFAULTS = {
   mode: 'all',
   digestEnabled: false,
   digestTime: '21:00',
+  forwardImages: true,
+  maxImages: 4,
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -179,6 +182,8 @@ export function normalizeConfig(raw = {}) {
     notifyErrors: asBoolean(merged.notifyErrors, DEFAULTS.notifyErrors),
     todoProgress: asBoolean(merged.todoProgress, DEFAULTS.todoProgress),
     digestEnabled: asBoolean(merged.digestEnabled, DEFAULTS.digestEnabled),
+    forwardImages: asBoolean(merged.forwardImages, DEFAULTS.forwardImages),
+    maxImages: asInteger(merged.maxImages, DEFAULTS.maxImages, 0, 12),
     digestTime: /^\d{2}:\d{2}$/.test(String(merged.digestTime ?? '')) ? String(merged.digestTime) : DEFAULTS.digestTime,
     quietHours: normalizeQuietHours(merged.quietHours),
     mode: ['all', 'errors', 'mute'].includes(merged.mode) ? merged.mode : DEFAULTS.mode,
@@ -517,6 +522,64 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     runtime: { listSessions, statusInfo, promptSession, cancelSession, titleFor },
   })
 
+  /** Paths already sent to MAX by the deliverables pipeline (per session). */
+  const imagesSent = new Map()
+
+  function noteSentImages(sessionId, paths) {
+    if (!Array.isArray(paths) || paths.length === 0) return
+    const key = String(sessionId ?? '')
+    const set = imagesSent.get(key) ?? new Set()
+    for (const path of paths) set.add(String(path))
+    imagesSent.set(key, set)
+  }
+
+  /**
+   * Images from the final answer: assistant image blocks plus images referenced
+   * in the visible markdown (local files relative to the session cwd, or URLs).
+   */
+  async function collectFinalImages(session, text, message) {
+    if (!config.forwardImages || config.maxImages <= 0) return []
+    const max = config.maxImages
+    const key = String(session?.id ?? '')
+    const seen = imagesSent.get(key) ?? new Set()
+    const attachments = []
+
+    for (const ref of collectMessageImages(message)) {
+      if (attachments.length >= max) break
+      try {
+        const stored = await getService('attachments')?.readImage?.(ref)
+        if (!stored?.data) continue
+        const uploaded = await client.uploadMedia({
+          buffer: Buffer.from(stored.data),
+          filename: ref?.name ?? 'image.png',
+          type: 'image',
+        })
+        attachments.push({ type: 'image', payload: { token: uploaded.token } })
+      } catch (error) {
+        logger.warn('cannot forward an image from the final message: %s', error?.message || String(error))
+      }
+    }
+
+    const refs = extractImageReferences(text, session?.header?.cwd)
+    for (const file of refs.files) {
+      if (attachments.length >= max) break
+      if (seen.has(file)) continue
+      try {
+        const uploaded = await client.uploadMedia({ filePath: file, type: 'image' })
+        attachments.push({ type: 'image', payload: { token: uploaded.token } })
+        seen.add(file)
+      } catch (error) {
+        logger.warn('cannot forward image %s: %s', file, error?.message || String(error))
+      }
+    }
+    for (const url of refs.urls) {
+      if (attachments.length >= max) break
+      attachments.push({ type: 'image', payload: { url } })
+    }
+    imagesSent.set(key, seen)
+    return attachments
+  }
+
   function finalKeyboard(session) {
     if (!config.buttons) return undefined
     const sessionId = String(session?.id ?? '')
@@ -531,7 +594,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     return [{ type: 'inline_keyboard', payload: { buttons: rows } }]
   }
 
-  async function deliver(session, text, reason) {
+  async function deliver(session, text, reason, message) {
     if (!(await ensureTargetAllowed())) return
     const decision = policy.decide('final')
     if (!decision.send) {
@@ -553,7 +616,9 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       logger.info('[dry-run] would send %d chunk(s) to MAX: %s', chunks.length, chunks[0]?.slice(0, 120))
       return
     }
-    const attachments = finalKeyboard(session)
+    const keyboard = finalKeyboard(session)
+    const images = await collectFinalImages(session, text, message)
+    const attachments = images.length > 0 || keyboard ? [...images, ...(keyboard ?? [])] : undefined
     for (const [index, chunk] of chunks.entries()) {
       const isLast = index === chunks.length - 1
       const message = await client.sendMessage({
@@ -590,7 +655,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
         const text = extractAssistantText(data.message)
         if (!text) return
         // The last non-empty assistant message of the current turn wins.
-        pending.set(id, { turn: data.turn, text })
+        pending.set(id, { turn: data.turn, text, message: data.message })
         return
       }
       case 'turn/end': {
@@ -603,7 +668,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
         const text = record.text.trim()
         if (!text) return
         if (!config.includeSubagents && !isTopLevelSession(session)) return
-        void enqueue(() => deliver(session, text, data.reason))
+        void enqueue(() => deliver(session, text, data.reason, record.message))
         return
       }
       case 'deliverables/presented': {
@@ -611,9 +676,12 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
         if (!config.includeSubagents && !isTopLevelSession(session)) return
         const files = Array.isArray(data.files) ? data.files : []
         if (files.length === 0) return
-        void deliverables.send(files).catch((error) => {
-          logger.warn('cannot forward deliverables: %s', error?.message || String(error))
-        })
+        void deliverables
+          .send(files)
+          .then((sentPaths) => noteSentImages(session.id, sentPaths))
+          .catch((error) => {
+            logger.warn('cannot forward deliverables: %s', error?.message || String(error))
+          })
         return
       }
       default:

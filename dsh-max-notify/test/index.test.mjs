@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -41,11 +41,20 @@ function createFakeCtx({ sessionTitle } = {}) {
 
 function createFakeClient({ getChat } = {}) {
   const sent = []
+  const uploads = []
   return {
     sent,
+    uploads,
     getChat: getChat ?? (async () => {
       throw new Error('getChat was not expected in this test')
     }),
+    uploadTypeFor(filePath) {
+      return /\.(png|jpe?g|gif|webp)$/i.test(String(filePath)) ? 'image' : 'file'
+    },
+    async uploadMedia({ filePath, type }) {
+      uploads.push({ filePath, type })
+      return { token: `tok-${uploads.length}`, type }
+    },
     async sendMessage(params) {
       sent.push(params)
       return { message: { body: { mid: `mid-${sent.length}` } } }
@@ -363,4 +372,46 @@ test('numeric allowedUserIds from YAML are accepted (numbers, not just strings)'
   await tick()
 
   assert.equal(client.sent.length, 1)
+})
+
+test('images referenced in the final answer are attached to the MAX message', async () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'dsh-max-final-image-'))
+  const png = join(workspace, 'plot.png')
+  writeFileSync(png, Buffer.from('89504e470d0a1a0a', 'hex'))
+  const { ctx, emit } = createFakeCtx()
+  const client = createFakeClient()
+  apply(ctx, { botToken: 't', chatId: '1', forwardImages: true, buttons: false }, { createClient: () => client })
+  const s = session('session-image', { cwd: workspace })
+
+  emit('session/event', s, evt('turn/start', { turn: 1 }))
+  emit('session/event', s, assistantEvent(1, 1, `Готово:\n\n![график](${png})`))
+  emit('session/event', s, evt('turn/end', { turn: 1, reason: { kind: 'completed' } }))
+  await tick(60)
+
+  assert.equal(client.sent.length, 1)
+  assert.deepEqual(client.uploads, [{ filePath: png, type: 'image' }])
+  const attachments = client.sent[0].attachments ?? []
+  assert.ok(
+    attachments.some((item) => item.type === 'image' && item.payload?.token === 'tok-1'),
+    'image attachment expected',
+  )
+})
+
+test('images inside code fences are not forwarded', async () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'dsh-max-final-image-code-'))
+  const png = join(workspace, 'plot.png')
+  writeFileSync(png, Buffer.from('89504e470d0a1a0a', 'hex'))
+  const { ctx, emit } = createFakeCtx()
+  const client = createFakeClient()
+  apply(ctx, { botToken: 't', chatId: '1', forwardImages: true, buttons: false }, { createClient: () => client })
+  const s = session('session-image-code', { cwd: workspace })
+
+  emit('session/event', s, evt('turn/start', { turn: 1 }))
+  emit('session/event', s, assistantEvent(1, 1, 'пример кода:\n\n```\n![x](plot.png)\n```'))
+  emit('session/event', s, evt('turn/end', { turn: 1, reason: { kind: 'completed' } }))
+  await tick(60)
+
+  assert.equal(client.sent.length, 1)
+  assert.equal(client.uploads.length, 0)
+  assert.equal(client.sent[0].attachments, undefined)
 })
