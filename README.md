@@ -20,6 +20,18 @@
 - Плохой/отсутствующий конфиг не ломает профиль: плагин просто логирует
   предупреждение и остаётся выключенным.
 
+### Наблюдатель (v0.3)
+
+- **События**: уведомления о завершении дочернего агента (с итогом), фоновых
+  задач (`ctx.jobs`), изменении цели (`goal/changed`), ошибках агента.
+- **TODO-прогресс**: «📋 2/5» при изменении числа выполненных задач
+  (`todo_write`), без спама на промежуточных статусах.
+- **Режимы уведомлений**: `/mode all|errors|mute`, `/mute 30m|2h`, `/unmute`;
+  `quietHours` («не будить ночью»): некритичные уведомления приходят без push,
+  критичные (подтверждения/вопросы/ошибки) — всегда.
+- **Дайджест**: ежедневно в `digestTime` (или `/digest` вручную) — активные
+  сессии, live-токены, цели, прогресс задач; дата отправки хранится в state.
+
 ### Пульт управления (v0.2)
 
 - **Двусторонний чат**: текст, отправленный боту в MAX, уходит в активную
@@ -96,6 +108,11 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 | `progress` / `progressDelayMs` / `progressThrottleMs` / `typing` | `true` / `2500` / `2000` / `true` | live-карточка прогресса |
 | `deliverables` | `true` | отправлять файлы из `present` вложениями |
 | `registerCommands` / `greetOnStart` | `true` / `true` | меню команд MAX и приветствие по Start |
+| `notifySubagents` / `notifyJobs` / `notifyGoals` / `notifyErrors` | `true` | уведомления о событиях |
+| `todoProgress` | `true` | TODO-прогресс в MAX |
+| `quietHours` | — | `{start: '23:00', end: '08:00'}` — без push ночью |
+| `digestEnabled` / `digestTime` | `false` / `21:00` | ежедневный дайджест |
+| `mode` | `all` | стартовый режим: `all`, `errors`, `mute` |
 | `stateFile` | `$DSH_HOME/max-notify/state.json` | marker и активная сессия (вне репозитория) |
 
 ## Структура
@@ -112,9 +129,11 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 | `dsh-max-notify/lib/interactions.mjs` | approvals/вопросы/кнопки, гонка MAX vs GUI |
 | `dsh-max-notify/lib/progress.mjs` | live-карточка прогресса и typing |
 | `dsh-max-notify/lib/deliverables.mjs` | uploads файлов из `present` |
-| `dsh-max-notify/lib/state.mjs` | marker и активная сессия (вне репозитория) |
+| `dsh-max-notify/lib/state.mjs` | marker, активная сессия, режим, дата дайджеста (вне репозитория) |
+| `dsh-max-notify/lib/policy.mjs` | режимы уведомлений и тихие часы |
+| `dsh-max-notify/lib/observer.mjs` | события, TODO-прогресс и дайджест |
 | `dsh-max-notify/tools/` | `pair.mjs` (chat_id), `send-test.mjs` |
-| `dsh-max-notify/test/` | `node --test` (67 тестов) |
+| `dsh-max-notify/test/` | `node --test` (88 тестов) |
 | `research/` | как писать плагины DSH, MAX Bot API, каталог фич |
 
 ## Ограничения
@@ -137,7 +156,7 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 ## Проверка
 
 ```bash
-cd dsh-max-notify && npm test          # 67 unit tests
+cd dsh-max-notify && npm test          # 88 unit tests
 node tools/send-test.mjs "проверка"    # реальная отправка
 DSH_HOME=$HOME/.dsh dsh --profile web --dump-config | grep -A12 'id: max-notify'
 ```

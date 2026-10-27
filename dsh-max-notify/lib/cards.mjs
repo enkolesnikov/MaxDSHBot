@@ -119,6 +119,9 @@ export function formatHelpCard() {
     '`/sessions` — список сессий',
     '`/use N` — выбрать сессию',
     '`/current` — текущая сессия',
+    '`/mode [all|errors|mute]` — режим уведомлений',
+    '`/mute [30m|2h]` — тишина, `/unmute` — вернуть',
+    '`/digest` — дайджест сейчас',
     '`/help` — эта справка',
     '',
     'Просто текст — отправится агенту как следующее сообщение. Под ответом есть кнопки «Продолжить»/«Стоп».',
@@ -138,4 +141,100 @@ export function formatDeliverablesCard({ files } = {}) {
 /** A short "prompt accepted" confirmation. */
 export function formatAccepted({ title, text } = {}) {
   return `📨 Отправлено в ${title ? `«${truncate(title, 80)}»` : 'сессию'}:\n\n${truncate(text, 500)}`
+}
+
+// ── notifications ("Наблюдатель") ──────────────────────────────────────────
+
+const TODO_ICON = { completed: '✅', in_progress: '🔄', pending: '⬜' }
+const GOAL_ICON = { active: '🎯', paused: '⏸️', blocked: '⛔', complete: '✅' }
+
+/** Subagent finished running. */
+export function formatSubagentCard({ title, childId, stopReason, excerpt } = {}) {
+  const lines = ['🤖 **Дочерний агент завершён**', '']
+  if (title) lines.push(`🗂 Родитель: ${truncate(title, 120)}`)
+  if (childId) lines.push(`🧩 Дочерний: \`${truncate(String(childId), 40)}\``)
+  if (stopReason) lines.push(`🏁 Итог: \`${truncate(String(stopReason), 60)}\``)
+  if (excerpt) lines.push('', `💬 ${truncate(excerpt, 500)}`)
+  return lines.join('\n')
+}
+
+/** Background job settled. */
+export function formatJobCard({ job } = {}) {
+  const status = job?.status ?? 'settled'
+  const icon = status === 'completed' ? '✅' : status === 'killed' ? '⏹' : status === 'failed' ? '❌' : 'ℹ️'
+  const lines = [`${icon} **Фоновая задача: ${status}**`, '']
+  if (job?.label) lines.push(`🏷 ${truncate(job.label, 120)}`)
+  if (job?.id) lines.push(`🆔 \`${truncate(String(job.id), 60)}\``)
+  if (job?.detail) lines.push(`📝 ${truncate(job.detail, 300)}`)
+  return lines.join('\n')
+}
+
+/** Goal lifecycle change. */
+export function formatGoalCard({ title, goal, operation } = {}) {
+  const phase = goal?.phase ?? 'active'
+  const icon = GOAL_ICON[phase] ?? '🎯'
+  const lines = [`${icon} **Цель: ${phase}**${operation ? ` (${operation})` : ''}`, '']
+  if (goal?.objective) lines.push(`🎯 ${truncate(goal.objective, 500)}`)
+  if (goal?.maxGoalRounds !== undefined) {
+    lines.push(`🔁 Раундов: ${goal.roundsStarted ?? 0}/${goal.maxGoalRounds}`)
+  }
+  if (goal?.blockedReason?.message) lines.push(`⛔ ${truncate(goal.blockedReason.message, 300)}`)
+  if (title) lines.push(`🗂 Сессия: ${truncate(title, 120)}`)
+  return lines.join('\n')
+}
+
+/** Agent failure. */
+export function formatErrorCard({ title, turn, step, error } = {}) {
+  const message =
+    typeof error === 'string' ? error : (error && (error.message || error.toString?.())) || 'неизвестная ошибка'
+  const lines = ['❌ **Ошибка агента**', '']
+  if (turn !== undefined || step !== undefined) lines.push(`📍 Ход ${turn ?? '?'}, шаг ${step ?? '?'}`)
+  if (title) lines.push(`🗂 Сессия: ${truncate(title, 120)}`)
+  lines.push('', `\`${truncate(message, 800)}\``)
+  return lines.join('\n')
+}
+
+/** TODO list progress. */
+export function formatTodoCard({ title, todos } = {}) {
+  const items = Array.isArray(todos) ? todos : []
+  const completed = items.filter((item) => item?.status === 'completed').length
+  const lines = [`📋 **TODO: ${completed}/${items.length}**`, '']
+  if (title) lines.push(`🗂 ${truncate(title, 120)}`, '')
+  for (const item of items.slice(0, 10)) {
+    const icon = TODO_ICON[item?.status] ?? '⬜'
+    lines.push(`${icon} ${truncate(item?.content ?? '', 200)}`)
+  }
+  if (items.length > 10) lines.push(`… ещё ${items.length - 10}`)
+  return lines.join('\n')
+}
+
+/** Daily digest. */
+export function formatDigestCard({ date, sessions = [], usage, goals = [], todos = [] } = {}) {
+  const lines = [`📊 **Дайджест DSH** · ${date ?? ''}`, '']
+  lines.push(`🗂 Активных сессий за сутки: ${sessions.length}`)
+  for (const session of sessions.slice(0, 4)) {
+    const mark = session.running ? ' 🟢' : ''
+    lines.push(`• ${truncate(session.title || shortSessionId(session.sessionId), 80)}${mark}`)
+  }
+  if (usage && (usage.input || usage.output || usage.total)) {
+    const total = usage.total || usage.input + usage.output
+    lines.push('', `🧮 Токены (live): in ${usage.input ?? 0} · out ${usage.output ?? 0} · всего ${total}`)
+  }
+  const activeGoals = goals.filter((goal) => goal?.phase && goal.phase !== 'complete')
+  if (activeGoals.length > 0) {
+    lines.push('', `🎯 Цели: ${activeGoals.length}`)
+    for (const goal of activeGoals.slice(0, 3)) {
+      lines.push(`• ${GOAL_ICON[goal.phase] ?? '🎯'} ${truncate(goal.objective ?? '', 120)}`)
+    }
+  }
+  const todoSummaries = todos.filter((entry) => entry.todos?.length > 0)
+  if (todoSummaries.length > 0) {
+    lines.push('', '📋 Задачи:')
+    for (const entry of todoSummaries.slice(0, 3)) {
+      const completed = entry.todos.filter((item) => item?.status === 'completed').length
+      lines.push(`• ${truncate(entry.title || '—', 80)}: ${completed}/${entry.todos.length}`)
+    }
+  }
+  lines.push('', 'Подробнее: `/status`, `/sessions`.')
+  return lines.join('\n')
 }

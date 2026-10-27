@@ -25,12 +25,16 @@ const COMMANDS = [
   { name: 'sessions', description: 'Список сессий' },
   { name: 'use', description: 'Выбрать сессию: /use N' },
   { name: 'current', description: 'Текущая сессия' },
+  { name: 'mode', description: 'Режим уведомлений: all|errors|mute' },
+  { name: 'mute', description: 'Тишина: /mute 30m или /mute 2h' },
+  { name: 'unmute', description: 'Вернуть уведомления' },
+  { name: 'digest', description: 'Дайджест сейчас' },
 ]
 
 const UPDATE_TYPES = 'message_created,message_callback,bot_started,bot_added,bot_removed'
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
-export function createBot({ client, config, logger, state, interactions, runtime } = {}) {
+export function createBot({ client, config, logger, state, interactions, runtime, policy, observer } = {}) {
   let running = false
   let disposed = false
   /** chatKey -> ordered session ids for `/use N` */
@@ -99,6 +103,14 @@ export function createBot({ client, config, logger, state, interactions, runtime
     return formatStatusCard(info)
   }
 
+  function parseDurationMs(value, fallbackMs) {
+    const match = /^(\d+)\s*([mh])?$/i.exec(String(value ?? '').trim())
+    if (!match) return fallbackMs
+    const amount = Number(match[1])
+    const unit = (match[2] ?? 'm').toLowerCase()
+    return amount * (unit === 'h' ? 60 : 1) * 60 * 1000
+  }
+
   async function handleCommand(text, { chatId } = {}) {
     const match = /^\/([a-z0-9_-]+)/i.exec(text)
     if (!match) return false
@@ -155,6 +167,48 @@ export function createBot({ client, config, logger, state, interactions, runtime
         const sessionId = items[index]
         state?.setSession?.(chatId, sessionId)
         await reply(chatId, `▶️ Активная сессия: \`${shortSessionId(sessionId)}\``)
+        return true
+      }
+      case 'mode': {
+        if (!policy) {
+          await reply(chatId, 'Режимы уведомлений недоступны (нет policy).')
+          return true
+        }
+        const requested = arg.toLowerCase()
+        if (requested === 'all' || requested === 'errors' || requested === 'mute') {
+          policy.setMode(requested)
+          await reply(chatId, policy.describe())
+          return true
+        }
+        await reply(chatId, `${policy.describe()}\n\nИспользование: /mode all|errors|mute`)
+        return true
+      }
+      case 'mute': {
+        if (!policy) {
+          await reply(chatId, 'Режимы уведомлений недоступны (нет policy).')
+          return true
+        }
+        const durationMs = parseDurationMs(arg, 2 * 60 * 60 * 1000)
+        policy.setMode('mute', durationMs)
+        await reply(chatId, policy.describe())
+        return true
+      }
+      case 'unmute': {
+        if (!policy) {
+          await reply(chatId, 'Режимы уведомлений недоступны (нет policy).')
+          return true
+        }
+        policy.setMode('all')
+        await reply(chatId, policy.describe())
+        return true
+      }
+      case 'digest': {
+        if (!observer?.sendDigest) {
+          await reply(chatId, 'Дайджест недоступен.')
+          return true
+        }
+        await observer.sendDigest()
+        await reply(chatId, '📊 Дайджест отправлен.')
         return true
       }
       default: {

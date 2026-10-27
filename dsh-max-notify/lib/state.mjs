@@ -24,11 +24,17 @@ export function createState({ file, logger, chatId } = {}) {
     marker: undefined,
     sessions: {},
     startedAt: Date.now(),
+    mode: undefined,
+    muteUntil: undefined,
+    digestDate: undefined,
   }
   try {
     const parsed = JSON.parse(readFileSync(file, 'utf8'))
     if (parsed && typeof parsed === 'object') {
       if (parsed.marker !== undefined) state.marker = parsed.marker
+      if (parsed.mode === 'all' || parsed.mode === 'errors' || parsed.mode === 'mute') state.mode = parsed.mode
+      if (typeof parsed.muteUntil === 'number') state.muteUntil = parsed.muteUntil
+      if (typeof parsed.digestDate === 'string') state.digestDate = parsed.digestDate
       if (parsed.sessions && typeof parsed.sessions === 'object') {
         // Keep only the configured chat's session: a shared state file may hold
         // leftovers from tests or other targets.
@@ -51,7 +57,20 @@ export function createState({ file, logger, chatId } = {}) {
     try {
       mkdirSync(dirname(file), { recursive: true })
       const tmp = `${file}.${process.pid}.tmp`
-      writeFileSync(tmp, `${JSON.stringify({ marker: state.marker, sessions: state.sessions }, null, 2)}\n`)
+      writeFileSync(
+        tmp,
+        `${JSON.stringify(
+          {
+            marker: state.marker,
+            sessions: state.sessions,
+            mode: state.mode,
+            muteUntil: state.muteUntil,
+            digestDate: state.digestDate,
+          },
+          null,
+          2,
+        )}\n`,
+      )
       renameSync(tmp, file)
     } catch (error) {
       logger?.warn?.('cannot persist MAX state to %s: %s', file, error?.message || String(error))
@@ -87,6 +106,27 @@ export function createState({ file, logger, chatId } = {}) {
     },
     forgetSession(chatId) {
       delete state.sessions[String(chatId)]
+      saveSoon()
+    },
+    getMode() {
+      return state.mode
+    },
+    setMode(mode) {
+      state.mode = mode
+      saveSoon()
+    },
+    getMuteUntil() {
+      return state.muteUntil
+    },
+    setMuteUntil(value) {
+      state.muteUntil = value
+      saveSoon()
+    },
+    getDigestDate() {
+      return state.digestDate
+    },
+    setDigestDate(value) {
+      state.digestDate = value
       saveSoon()
     },
     save,

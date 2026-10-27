@@ -12,7 +12,7 @@ function isTopLevelSession(session) {
   return !(Number(header.delegationDepth ?? 0) > 0)
 }
 
-export function createProgress({ client, config, logger, target } = {}) {
+export function createProgress({ client, config, logger, target, policy } = {}) {
   /** sessionId -> { session, startedAt, text, tool, messageId, timers... } */
   const active = new Map()
   let disposed = false
@@ -94,6 +94,7 @@ export function createProgress({ client, config, logger, target } = {}) {
 
   function onTurnStart(session) {
     if (!config.progress || disposed) return
+    if (policy && !policy.decide('progress').send) return
     if (!isTopLevelSession(session) || !session?.id) return
     const id = String(session.id)
     if (active.has(id)) return
