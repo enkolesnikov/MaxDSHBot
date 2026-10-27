@@ -20,3 +20,6 @@ scratch/
 Thumbs.db
 .idea/
 .vscode/
+
+# Входящие файлы из MAX
+max-inbox/
