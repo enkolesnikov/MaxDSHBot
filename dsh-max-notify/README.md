@@ -100,7 +100,7 @@ session (default: most recent session; `/use N` to switch). Commands:
 |---|---|
 | `/status` | Active session, state, model, folder, last update |
 | `/stop` | Cancel the active turn |
-| `/sessions` | List sessions (numbered) |
+| `/sessions` | List sessions (numbered); archived sessions are hidden |
 | `/use N` | Switch the active session |
 | `/current` | Show the active session |
 | `/help` | Command help |
