@@ -28,6 +28,8 @@ import { createInteractions } from './lib/interactions.mjs'
 import { createProgress } from './lib/progress.mjs'
 import { createDeliverables } from './lib/deliverables.mjs'
 import { createBot } from './lib/bot.mjs'
+import { createPolicy } from './lib/policy.mjs'
+import { createObserver } from './lib/observer.mjs'
 
 export const name = 'dsh-max-notify'
 
@@ -75,6 +77,17 @@ const DEFAULTS = {
   deliverables: true,
   registerCommands: true,
   greetOnStart: true,
+  // notifications ("Наблюдатель")
+  notifySubagents: true,
+  notifyJobs: true,
+  notifyAwaitedJobs: false,
+  notifyGoals: true,
+  notifyErrors: true,
+  todoProgress: true,
+  quietHours: undefined,
+  mode: 'all',
+  digestEnabled: false,
+  digestTime: '21:00',
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -107,6 +120,15 @@ function asInteger(value, fallback, min, max) {
   if (!Number.isFinite(parsed)) return fallback
   const rounded = Math.trunc(parsed)
   return Math.min(max, Math.max(min, rounded))
+}
+
+function normalizeQuietHours(value) {
+  if (!value || typeof value !== 'object') return undefined
+  const start = String(value.start ?? '').trim()
+  const end = String(value.end ?? '').trim()
+  const pattern = /^\d{1,2}:\d{2}$/
+  if (!pattern.test(start) || !pattern.test(end)) return undefined
+  return { start, end }
 }
 
 /** Normalize user config + environment fallbacks into a complete runtime config. */
@@ -150,6 +172,16 @@ export function normalizeConfig(raw = {}) {
     progressTextLimit: asInteger(merged.progressTextLimit, DEFAULTS.progressTextLimit, 100, 3500),
     stateFile: String(merged.stateFile || env.MAX_NOTIFY_STATE_FILE || '').trim() || undefined,
     webUrl: String(merged.webUrl || env.DSH_WEB_URL || '').trim() || undefined,
+    notifySubagents: asBoolean(merged.notifySubagents, DEFAULTS.notifySubagents),
+    notifyJobs: asBoolean(merged.notifyJobs, DEFAULTS.notifyJobs),
+    notifyAwaitedJobs: asBoolean(merged.notifyAwaitedJobs, DEFAULTS.notifyAwaitedJobs),
+    notifyGoals: asBoolean(merged.notifyGoals, DEFAULTS.notifyGoals),
+    notifyErrors: asBoolean(merged.notifyErrors, DEFAULTS.notifyErrors),
+    todoProgress: asBoolean(merged.todoProgress, DEFAULTS.todoProgress),
+    digestEnabled: asBoolean(merged.digestEnabled, DEFAULTS.digestEnabled),
+    digestTime: /^\d{2}:\d{2}$/.test(String(merged.digestTime ?? '')) ? String(merged.digestTime) : DEFAULTS.digestTime,
+    quietHours: normalizeQuietHours(merged.quietHours),
+    mode: ['all', 'errors', 'mute'].includes(merged.mode) ? merged.mode : DEFAULTS.mode,
   }
 
   const format = typeof config.format === 'string' ? config.format.trim().toLowerCase() : ''
@@ -455,6 +487,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
 
   const target = { chatId: config.chatId, userId: config.chatId === undefined ? config.userId : undefined }
   const state = createState({ file: resolveStateFile(config), logger, chatId: config.chatId })
+  const policy = createPolicy({ config, state, logger })
   const interactions = createInteractions({
     client,
     config,
@@ -462,14 +495,25 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     target,
     resolveTitle: (session) => titleOf(session),
   })
-  const progress = createProgress({ client, config, logger, target })
-  const deliverables = createDeliverables({ client, config, logger, target })
+  const progress = createProgress({ client, config, logger, target, policy })
+  const deliverables = createDeliverables({ client, config, logger, target, policy })
+  const observer = createObserver({
+    client,
+    config,
+    logger,
+    target,
+    policy,
+    state,
+    runtime: { listSessions, titleFor },
+  })
   const bot = createBot({
     client,
     config,
     logger,
     state,
     interactions,
+    policy,
+    observer,
     runtime: { listSessions, statusInfo, promptSession, cancelSession, titleFor },
   })
 
@@ -489,6 +533,11 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
 
   async function deliver(session, text, reason) {
     if (!(await ensureTargetAllowed())) return
+    const decision = policy.decide('final')
+    if (!decision.send) {
+      logger.debug('final reply suppressed (%s)', decision.reason)
+      return
+    }
     const payload = formatNotification({
       text,
       cwd: session?.header?.cwd,
@@ -512,7 +561,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
         userId: config.chatId === undefined ? config.userId : undefined,
         text: chunk,
         format: config.format,
-        notify: config.notify,
+        notify: decision.notify,
         disableLinkPreview: config.disableLinkPreview,
         ...(isLast && attachments ? { attachments } : {}),
       })
@@ -527,6 +576,11 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     const id = session.id
     // Session events are enveloped as { type, seq, time, data }.
     const data = event.data ?? {}
+    try {
+      observer.onSessionEvent(session, event)
+    } catch (error) {
+      logger.debug('observer failed: %s', error?.message || String(error))
+    }
     switch (event.type) {
       case 'turn/start':
         pending.delete(id)
@@ -597,6 +651,45 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     return next()
   })
 
+  // "Наблюдатель": subagent/job/goal/error notifications.
+  ctx.on('subagent/end', (info) => {
+    try {
+      observer.onSubagentEnd(info)
+    } catch (error) {
+      logger.debug('subagent notification failed: %s', error?.message || String(error))
+    }
+  })
+  ctx.on('agent/error', (payload) => {
+    try {
+      observer.onAgentError(payload)
+    } catch (error) {
+      logger.debug('error notification failed: %s', error?.message || String(error))
+    }
+  })
+  ctx.on('goal/changed', (payload) => {
+    try {
+      observer.onGoalChanged(payload)
+    } catch (error) {
+      logger.debug('goal notification failed: %s', error?.message || String(error))
+    }
+  })
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['jobs'], (jobsCtx) => {
+      const jobs = jobsCtx?.get?.('jobs') ?? jobsCtx?.jobs
+      if (!jobs?.events?.subscribe) return
+      jobsCtx.effect(() => {
+        const dispose = jobs.events.subscribe({ owners: 'all' }, (event) => {
+          try {
+            observer.onJobEvent(event)
+          } catch (error) {
+            logger.debug('job notification failed: %s', error?.message || String(error))
+          }
+        })
+        return () => dispose()
+      })
+    })
+  }
+
   // Interactive decisions: approvals and agent questions are answered from MAX
   // (prepend, delegate to the GUI immediately, race both channels).
   if (config.interactive) {
@@ -617,8 +710,10 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
   if (typeof ctx.effect === 'function') {
     ctx.effect(() => {
       void bot.start()
+      observer.start()
       return () => {
         bot.stop()
+        observer.dispose()
         progress.dispose()
         interactions.dispose()
         state.dispose()
@@ -635,12 +730,13 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
   const restrictionLabel = allowedLabels.join(', ')
   const restriction = restrictionLabel ? `; only ${restrictionLabel}` : ''
   logger.info(
-    'forwarding each agent reply to MAX %s as %s%s%s%s',
+    'forwarding each agent reply to MAX %s as %s%s%s%s%s',
     config.chatId !== undefined ? `chat ${config.chatId}` : `user ${config.userId}`,
     config.format ?? 'plain text',
     config.dryRun ? ' (dry-run)' : '',
     restriction,
     config.interactive ? '; remote control on' : '',
+    config.digestEnabled ? `; digest at ${config.digestTime}` : '',
   )
 
   // Optional one-shot "plugin is alive" message, useful right after installation.
@@ -658,7 +754,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
         chatId: config.chatId,
         userId: config.chatId === undefined ? config.userId : undefined,
         text:
-          `🟢 DSH → MAX: плагин dsh-max-notify подключён${bot}. Сюда приходит последнее сообщение агента после каждого хода; можно писать агенту прямо в этот чат и пользоваться /help.` +
+          `🟢 DSH → MAX: плагин dsh-max-notify подключён${bot}. Сюда приходит последнее сообщение агента после каждого хода; можно писать агенту прямо в этот чат, пользоваться /help и /mode.` +
           (config.allowedUserIds.length > 0 || config.allowedChatIds.length > 0
             ? ` Отправка ограничена: только ${restrictionLabel}.`
             : ''),

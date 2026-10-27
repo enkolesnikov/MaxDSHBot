@@ -9,7 +9,7 @@ const IMAGE_LIMIT_BYTES = 50 * 1024 * 1024
 const FILE_LIMIT_BYTES = 4 * 1024 * 1024 * 1024
 const MAX_ATTACHMENTS = 12
 
-export function createDeliverables({ client, config, logger, target } = {}) {
+export function createDeliverables({ client, config, logger, target, policy } = {}) {
   const targetQuery = () =>
     target?.chatId !== undefined ? { chatId: target.chatId } : { userId: target?.userId }
 
@@ -37,6 +37,8 @@ export function createDeliverables({ client, config, logger, target } = {}) {
   /** Upload and send the declared files; failures are logged, never thrown. */
   async function send(files) {
     if (!config.deliverables || !Array.isArray(files) || files.length === 0) return
+    const decision = policy?.decide?.('deliverables') ?? { send: true, notify: config.notify }
+    if (!decision.send) return
     const images = []
     const documents = []
     for (const raw of files) {
@@ -59,7 +61,7 @@ export function createDeliverables({ client, config, logger, target } = {}) {
           ...targetQuery(),
           text,
           format: config.format,
-          notify: config.notify,
+          notify: decision.notify,
           disableLinkPreview: true,
           attachments: images.slice(0, MAX_ATTACHMENTS).map((image) => ({
             type: 'image',
@@ -76,7 +78,7 @@ export function createDeliverables({ client, config, logger, target } = {}) {
           ...targetQuery(),
           text: document.description ? `📎 ${document.description}` : text,
           format: config.format,
-          notify: config.notify,
+          notify: decision.notify,
           disableLinkPreview: true,
           attachments: [{ type: 'file', payload: { token: document.token } }],
         })

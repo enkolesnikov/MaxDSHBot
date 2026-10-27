@@ -25,6 +25,8 @@ file deliverables.
   the Web GUI immediately and races both channels (`Promise.race`).
 - Live progress card (edited in place, `typing_on`) and `present` deliverables
   uploaded as MAX attachments.
+- Observability: subagent/job/goal/error notifications, TODO progress, daily
+  digest, notification modes (`/mode`, `/mute`, `/unmute`) and quiet hours.
 
 ## Package layout
 
@@ -72,7 +74,12 @@ Set in `cordis.patch.yml` (or override the row by id from the profile's own
 | `progress` / `progressDelayMs` / `progressThrottleMs` / `typing` | `true` / `2500` / `2000` / `true` | Live progress card |
 | `deliverables` | `true` | Send `present` files as attachments |
 | `registerCommands` / `greetOnStart` | `true` / `true` | MAX command menu and Start greeting |
-| `stateFile` | `$DSH_HOME/max-notify/state.json` | Polling marker + active session (outside the repo) |
+| `stateFile` | `$DSH_HOME/max-notify/state.json` | Polling marker, active session, mode, digest date |
+| `notifySubagents` / `notifyJobs` / `notifyGoals` / `notifyErrors` | `true` | Event notifications |
+| `notifyAwaitedJobs` | `false` | Also notify jobs the agent already waited for |
+| `todoProgress` | `true` | TODO progress notifications |
+| `quietHours` | — | `{start, end}`: non-critical delivered without push |
+| `mode` / `digestEnabled` / `digestTime` | `all` / `false` / `21:00` | Notification mode and daily digest |
 
 ## Remote control ("Пульт")
 
@@ -87,6 +94,9 @@ session (default: most recent session; `/use N` to switch). Commands:
 | `/use N` | Switch the active session |
 | `/current` | Show the active session |
 | `/help` | Command help |
+| `/mode [all\|errors\|mute]` | Notification mode |
+| `/mute [30m\|2h]`, `/unmute` | Mute/unmute non-critical notifications |
+| `/digest` | Send the digest now |
 
 Approvals and `ask_user_question` cards carry inline buttons; free text answers
 questions too (option number, option label or custom text; multiple questions —

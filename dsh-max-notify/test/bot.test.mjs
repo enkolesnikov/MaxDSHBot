@@ -114,6 +114,8 @@ function makeBot(overrides = {}) {
     state,
     interactions: overrides.interactions,
     runtime,
+    policy: overrides.policy,
+    observer: overrides.observer,
   })
   return { bot, client, state, runtime, calls }
 }
@@ -260,4 +262,50 @@ test('bot registers the command menu', async () => {
   await bot.registerCommands()
   assert.equal(client.commands.length, 1)
   assert.ok(client.commands[0].some((command) => command.name === 'status'))
+})
+
+function fakePolicy(initial = 'all') {
+  let mode = initial
+  const calls = []
+  return {
+    calls,
+    setMode(next, durationMs) {
+      mode = next
+      calls.push({ mode: next, durationMs })
+      return true
+    },
+    describe() {
+      return `POLICY:${mode}`
+    },
+  }
+}
+
+test('/mode shows and switches the notification mode', async () => {
+  const policy = fakePolicy()
+  const { bot, client } = makeBot({ policy })
+  await bot.handleUpdate(messageUpdate({ text: '/mode' }))
+  assert.match(client.sent[0].text, /POLICY:all/)
+  await bot.handleUpdate(messageUpdate({ text: '/mode errors' }))
+  assert.deepEqual(policy.calls.at(-1), { mode: 'errors', durationMs: undefined })
+  assert.match(client.sent[1].text, /POLICY:errors/)
+})
+
+test('/mute uses the requested duration and /unmute restores notifications', async () => {
+  const policy = fakePolicy()
+  const { bot, client } = makeBot({ policy })
+  await bot.handleUpdate(messageUpdate({ text: '/mute 30m' }))
+  assert.deepEqual(policy.calls.at(-1), { mode: 'mute', durationMs: 30 * 60 * 1000 })
+  await bot.handleUpdate(messageUpdate({ text: '/mute' }))
+  assert.deepEqual(policy.calls.at(-1), { mode: 'mute', durationMs: 2 * 60 * 60 * 1000 })
+  await bot.handleUpdate(messageUpdate({ text: '/unmute' }))
+  assert.deepEqual(policy.calls.at(-1), { mode: 'all', durationMs: undefined })
+})
+
+test('/digest triggers the observer digest', async () => {
+  let calls = 0
+  const observer = { sendDigest: async () => { calls += 1 } }
+  const { bot, client } = makeBot({ observer })
+  await bot.handleUpdate(messageUpdate({ text: '/digest' }))
+  assert.equal(calls, 1)
+  assert.match(client.sent[0].text, /Дайджест отправлен/)
 })
