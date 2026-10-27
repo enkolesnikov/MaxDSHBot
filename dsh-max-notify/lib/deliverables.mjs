@@ -41,6 +41,7 @@ export function createDeliverables({ client, config, logger, target, policy } = 
     if (!decision.send) return
     const images = []
     const documents = []
+    const sentPaths = []
     for (const raw of files) {
       const record = fileRecord(raw)
       if (!record.path) continue
@@ -49,6 +50,7 @@ export function createDeliverables({ client, config, logger, target, policy } = 
         if (!uploaded) continue
         if (uploaded.type === 'image') images.push(uploaded)
         else documents.push(uploaded)
+        sentPaths.push(record.path)
       } catch (error) {
         logger?.warn?.('cannot upload deliverable %s to MAX: %s', record.path, error?.message || String(error))
       }
@@ -86,6 +88,7 @@ export function createDeliverables({ client, config, logger, target, policy } = 
         logger?.warn?.('cannot send file deliverable to MAX: %s', error?.message || String(error))
       }
     }
+    return sentPaths
   }
 
   return { send }

@@ -25,6 +25,10 @@ file deliverables.
   the Web GUI immediately and races both channels (`Promise.race`).
 - Live progress card (edited in place, `typing_on`) and `present` deliverables
   uploaded as MAX attachments.
+- Images from the final answer: assistant image blocks and images referenced in
+  the visible markdown (local paths relative to the session cwd, or http(s)
+  URLs) are uploaded and attached to the MAX message; code samples are ignored
+  and files already sent by `present` are not duplicated.
 - Observability: subagent/job/goal/error notifications, TODO progress, daily
   digest, notification modes (`/mode`, `/mute`, `/unmute`) and quiet hours.
 
@@ -73,6 +77,7 @@ Set in `cordis.patch.yml` (or override the row by id from the profile's own
 | `buttons` / `webUrl` | `true` / `DSH_WEB_URL` | Quick-action buttons + GUI link |
 | `progress` / `progressDelayMs` / `progressThrottleMs` / `typing` | `true` / `2500` / `2000` / `true` | Live progress card |
 | `deliverables` | `true` | Send `present` files as attachments |
+| `forwardImages` / `maxImages` | `true` / `4` | Attach images from the final answer |
 | `registerCommands` / `greetOnStart` | `true` / `true` | MAX command menu and Start greeting |
 | `stateFile` | `$DSH_HOME/max-notify/state.json` | Polling marker, active session, mode, digest date |
 | `notifySubagents` / `notifyJobs` / `notifyGoals` / `notifyErrors` | `true` | Event notifications |

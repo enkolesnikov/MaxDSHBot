@@ -47,6 +47,10 @@
   «решено в другом месте». Таймаут/обрыв — fail-closed.
 - **Файлы**: `deliverables/presented` загружается в MAX (`POST /uploads`) и
   приходит вложениями (изображения — фото, остальное — файлами).
+- **Картинки из финального ответа** (v0.3.1): image-блоки сообщения и
+  изображения, упомянутые в тексте (`![alt](path)`, `./shot.png`,
+  `https://…/pic.png`), уходят в MAX фотографиями; код-фрагменты игнорируются,
+  дубли с `present` не отправляются.
 
 ## Быстрый старт
 
@@ -107,6 +111,7 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 | `buttons` / `webUrl` | `true` / env `DSH_WEB_URL` | кнопки под ответом и ссылка на GUI |
 | `progress` / `progressDelayMs` / `progressThrottleMs` / `typing` | `true` / `2500` / `2000` / `true` | live-карточка прогресса |
 | `deliverables` | `true` | отправлять файлы из `present` вложениями |
+| `forwardImages` / `maxImages` | `true` / `4` | картинки из финального ответа вложением |
 | `registerCommands` / `greetOnStart` | `true` / `true` | меню команд MAX и приветствие по Start |
 | `notifySubagents` / `notifyJobs` / `notifyGoals` / `notifyErrors` | `true` | уведомления о событиях |
 | `todoProgress` | `true` | TODO-прогресс в MAX |
@@ -133,7 +138,7 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 | `dsh-max-notify/lib/policy.mjs` | режимы уведомлений и тихие часы |
 | `dsh-max-notify/lib/observer.mjs` | события, TODO-прогресс и дайджест |
 | `dsh-max-notify/tools/` | `pair.mjs` (chat_id), `send-test.mjs` |
-| `dsh-max-notify/test/` | `node --test` (88 тестов) |
+| `dsh-max-notify/test/` | `node --test` (96 тестов) |
 | `research/` | как писать плагины DSH, MAX Bot API, каталог фич |
 
 ## Ограничения
@@ -156,7 +161,7 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 ## Проверка
 
 ```bash
-cd dsh-max-notify && npm test          # 88 unit tests
+cd dsh-max-notify && npm test          # 96 unit tests
 node tools/send-test.mjs "проверка"    # реальная отправка
 DSH_HOME=$HOME/.dsh dsh --profile web --dump-config | grep -A12 'id: max-notify'
 ```
