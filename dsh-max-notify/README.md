@@ -49,7 +49,7 @@ file deliverables.
 | `install.sh` | `dsh plugin --profile <name> add link:<this dir>` |
 | `tools/pair.mjs` | long-poll `GET /updates` to discover `chat_id` |
 | `tools/send-test.mjs` | manual send test |
-| `test/*.test.mjs` | `node --test test/*.test.mjs` (112 unit tests) |
+| `test/*.test.mjs` | `node --test test/*.test.mjs` (121 unit tests) |
 
 ## Config
 
@@ -82,6 +82,7 @@ Set in `cordis.patch.yml` (or override the row by id from the profile's own
 | `progress` / `progressDelayMs` / `progressThrottleMs` / `typing` | `true` / `2500` / `2000` / `true` | Live progress card |
 | `deliverables` | `true` | Send `present` files as attachments |
 | `forwardImages` / `forwardToolImages` / `maxImages` | `true` / `true` / `4` | Attach images from the final answer and tool results |
+| `newSessionDir` | — | Default folder for `/new` (active session cwd when unset) |
 | `receiveFiles` / `inboxDir` / `maxIncomingFiles` / `maxIncomingBytes` | `true` / `<cwd>/max-inbox` / `4` / `25 MiB` | Incoming MAX attachments |
 | `registerCommands` / `greetOnStart` | `true` / `true` | MAX command menu and Start greeting |
 | `stateFile` | `$DSH_HOME/max-notify/state.json` | Polling marker, active session, mode, digest date |
@@ -107,6 +108,7 @@ session (default: most recent session; `/use N` to switch). Commands:
 | `/mode [all\|errors\|mute]` | Notification mode |
 | `/mute [30m\|2h]`, `/unmute` | Mute/unmute non-critical notifications |
 | `/digest` | Send the digest now |
+| `/new [folder]` | Create a new session (folder is created if missing; relative to the active session's cwd) |
 
 Approvals and `ask_user_question` cards carry inline buttons; free text answers
 questions too (option number, option label or custom text; multiple questions —

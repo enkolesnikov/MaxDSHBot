@@ -19,7 +19,8 @@
  * MAX_CA_FILE, MAX_NOTIFY_DRY_RUN.
  */
 import { randomUUID } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync } from 'node:fs'
+
 import { createMaxClient, splitText, MAX_TEXT_LIMIT } from './lib/transport.mjs'
 import { extractAssistantText } from './lib/extract.mjs'
 import { formatNotification } from './lib/format.mjs'
@@ -32,6 +33,7 @@ import { createPolicy } from './lib/policy.mjs'
 import { createObserver } from './lib/observer.mjs'
 import { collectMessageImages, extractImageReferences } from './lib/images.mjs'
 import { createIncoming } from './lib/incoming.mjs'
+import { resolveSessionDir } from './lib/create-session.mjs'
 import { archivedIdsOf, filterArchivedSessions } from './lib/sessions.mjs'
 
 export const name = 'dsh-max-notify'
@@ -98,6 +100,7 @@ const DEFAULTS = {
   inboxDir: undefined,
   maxIncomingFiles: 4,
   maxIncomingBytes: 25 * 1024 * 1024,
+  newSessionDir: undefined,
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -196,6 +199,7 @@ export function normalizeConfig(raw = {}) {
     inboxDir: String(merged.inboxDir || env.MAX_NOTIFY_INBOX_DIR || '').trim() || undefined,
     maxIncomingFiles: asInteger(merged.maxIncomingFiles, DEFAULTS.maxIncomingFiles, 1, 12),
     maxIncomingBytes: asInteger(merged.maxIncomingBytes, DEFAULTS.maxIncomingBytes, 1024, 1024 * 1024 * 1024),
+    newSessionDir: String(merged.newSessionDir || env.MAX_NOTIFY_NEW_SESSION_DIR || '').trim() || undefined,
     digestTime: /^\d{2}:\d{2}$/.test(String(merged.digestTime ?? '')) ? String(merged.digestTime) : DEFAULTS.digestTime,
     quietHours: normalizeQuietHours(merged.quietHours),
     mode: ['all', 'errors', 'mute'].includes(merged.mode) ? merged.mode : DEFAULTS.mode,
@@ -485,6 +489,30 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     }
   }
 
+  async function createSession(sessionId, sessionArg) {
+    const controller = getService('sessionController')
+    if (!controller?.create) return { ok: false, error: 'sessionController недоступен' }
+    const baseCwd = sessionId ? (await statusInfo(sessionId))?.cwd : undefined
+    const cwd = resolveSessionDir({
+      arg: sessionArg,
+      baseCwd,
+      configuredDir: config.newSessionDir,
+      fallbackCwd: process.cwd(),
+    })
+    try {
+      mkdirSync(cwd, { recursive: true })
+    } catch (error) {
+      return { ok: false, error: `не удалось создать папку ${cwd}: ${error?.message || String(error)}` }
+    }
+    try {
+      const value = await controller.create({ cwd })
+      return { ok: true, sessionId: value?.sessionId, cwd }
+    } catch (error) {
+      logger.warn('sessionController.create failed: %s', error?.message || String(error))
+      return { ok: false, error: error?.message || String(error) }
+    }
+  }
+
   async function cancelSession(sessionId) {
     const controller = getService('sessionController')
     if (controller?.cancel) {
@@ -550,6 +578,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       cancelSession,
       titleFor,
       saveIncoming: (attachments, sessionId) => incomingLocal.save(attachments, sessionId),
+      createSession: (sessionId, sessionArg) => createSession(sessionId, sessionArg),
     },
   })
 
