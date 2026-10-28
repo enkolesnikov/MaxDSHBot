@@ -98,6 +98,11 @@ function runtimeStub(overrides = {}) {
         return true
       },
       titleFor: (id) => (String(id) === 'session-aaaaaaaa' ? 'Рабочая' : 'Старая'),
+      createSession: async (sessionId, sessionArg) => {
+        calls.created = calls.created ?? []
+        calls.created.push({ sessionId, sessionArg })
+        return { ok: true, sessionId: 'session-created', cwd: '/work/app/max' }
+      },
       saveIncoming: async (attachments, sessionId) => {
         calls.incoming.push({ attachments, sessionId })
         return {
@@ -355,4 +360,27 @@ test('incoming files are refused when receiveFiles is off', async () => {
   })
   assert.equal(calls.incoming.length, 0)
   assert.match(client.sent[0].text, /Приём файлов отключён/)
+})
+
+test('/new creates a session in the active folder and makes it active', async () => {
+  const { bot, client, state, calls } = makeBot()
+  await bot.handleUpdate(messageUpdate({ text: '/new' }))
+  assert.deepEqual(calls.created, [{ sessionId: 'session-aaaaaaaa', sessionArg: undefined }])
+  assert.equal(state.sessionFor(123456789), 'session-created')
+  assert.match(client.sent[0].text, /Сессия создана/)
+  assert.match(client.sent[0].text, /\/work\/app\/max/)
+})
+
+test('/new max creates a session in a subfolder', async () => {
+  const { bot, calls } = makeBot()
+  await bot.handleUpdate(messageUpdate({ text: '/new max' }))
+  assert.deepEqual(calls.created, [{ sessionId: 'session-aaaaaaaa', sessionArg: 'max' }])
+})
+
+test('/sessions includes the active blank session', async () => {
+  const { bot, client, state } = makeBot()
+  state.setSession(123456789, 'session-blank')
+  await bot.handleUpdate(messageUpdate({ text: '/sessions' }))
+  assert.match(client.sent[0].text, /Сессии/)
+  assert.match(client.sent[0].text, /▶️ 1\)/)
 })

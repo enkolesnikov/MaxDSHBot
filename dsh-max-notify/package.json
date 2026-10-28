@@ -1,6 +1,6 @@
 {
   "name": "dsh-max-notify",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "DSH → MAX messenger plugin: agent replies with images, remote control, observability, and two-way file exchange (incoming MAX attachments → workspace, present/tool images → MAX)",
   "type": "module",
   "main": "index.js",

@@ -36,7 +36,7 @@
 
 - **Двусторонний чат**: текст, отправленный боту в MAX, уходит в активную
   сессию (`sessionController.prompt`), ответ приходит обратно.
-- **Команды**: `/status`, `/stop`, `/sessions`, `/use N`, `/current`, `/help`
+- **Команды**: `/status`, `/stop`, `/sessions`, `/use N`, `/current`, `/new [папка]`, `/help`
   (архивные сессии из Workspace в списке и дайджесте не показываются)
   (меню команд регистрируется через `PATCH /me/commands`).
 - **Кнопки под ответом**: «Продолжить», «Стоп», «Открыть GUI».
@@ -121,6 +121,7 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 | `inboxDir` | `<cwd>/max-inbox` | папка для входящих (поддерживает `%cwd%`) |
 | `maxIncomingFiles` / `maxIncomingBytes` | `4` / `25 MiB` | лимиты входящих вложений |
 | `registerCommands` / `greetOnStart` | `true` / `true` | меню команд MAX и приветствие по Start |
+| `newSessionDir` | — | папка для `/new` (по умолчанию — папка активной сессии) |
 | `notifySubagents` / `notifyJobs` / `notifyGoals` / `notifyErrors` | `true` | уведомления о событиях |
 | `todoProgress` | `true` | TODO-прогресс в MAX |
 | `quietHours` | — | `{start: '23:00', end: '08:00'}` — без push ночью |
@@ -146,7 +147,7 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 | `dsh-max-notify/lib/policy.mjs` | режимы уведомлений и тихие часы |
 | `dsh-max-notify/lib/observer.mjs` | события, TODO-прогресс и дайджест |
 | `dsh-max-notify/tools/` | `pair.mjs` (chat_id), `send-test.mjs` |
-| `dsh-max-notify/test/` | `node --test` (112 тестов) |
+| `dsh-max-notify/test/` | `node --test` (121 тестов) |
 | `research/` | как писать плагины DSH, MAX Bot API, каталог фич |
 
 ## Ограничения
@@ -169,7 +170,7 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 ## Проверка
 
 ```bash
-cd dsh-max-notify && npm test          # 112 unit tests
+cd dsh-max-notify && npm test          # 121 unit tests
 node tools/send-test.mjs "проверка"    # реальная отправка
 DSH_HOME=$HOME/.dsh dsh --profile web --dump-config | grep -A12 'id: max-notify'
 ```

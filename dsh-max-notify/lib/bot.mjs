@@ -30,6 +30,7 @@ const COMMANDS = [
   { name: 'mute', description: 'Тишина: /mute 30m или /mute 2h' },
   { name: 'unmute', description: 'Вернуть уведомления' },
   { name: 'digest', description: 'Дайджест сейчас' },
+  { name: 'new', description: 'Новая сессия: /new [папка]' },
 ]
 
 const UPDATE_TYPES = 'message_created,message_callback,bot_started,bot_added,bot_removed'
@@ -147,8 +148,21 @@ export function createBot({ client, config, logger, state, interactions, runtime
         return true
       }
       case 'sessions': {
-        const items = await listSessions()
+        let items = await listSessions()
         const active = state?.sessionFor?.(chatId) ?? (await activeSession(chatId))
+        if (active && !items.some((item) => String(item.sessionId) === String(active))) {
+          const info = (await runtime.statusInfo?.(active)) ?? {}
+          items = [
+            {
+              sessionId: active,
+              title: info.title,
+              running: info.running ?? false,
+              cwd: info.cwd,
+              updatedAt: info.updatedAt ?? Date.now(),
+            },
+            ...items,
+          ]
+        }
         choices.set(chatKey(chatId), items.map((item) => item.sessionId))
         await reply(chatId, formatSessionsCard({ items, activeId: active }))
         return true
@@ -201,6 +215,20 @@ export function createBot({ client, config, logger, state, interactions, runtime
         }
         policy.setMode('all')
         await reply(chatId, policy.describe())
+        return true
+      }
+      case 'new': {
+        const active = await activeSession(chatId)
+        const created = await runtime.createSession?.(active, arg.trim() || undefined)
+        if (!created?.ok) {
+          await reply(chatId, `❌ Не удалось создать сессию: ${created?.error || 'неизвестная ошибка'}`)
+          return true
+        }
+        state?.setSession?.(chatId, created.sessionId)
+        await reply(
+          chatId,
+          `🆕 Сессия создана: \`${shortSessionId(created.sessionId)}\`\n📁 ${created.cwd}\n\nНапиши задачу — она уйдёт в эту сессию.`,
+        )
         return true
       }
       case 'digest': {
