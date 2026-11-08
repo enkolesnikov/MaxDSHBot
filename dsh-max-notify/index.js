@@ -33,6 +33,14 @@ import { createPolicy } from './lib/policy.mjs'
 import { createObserver } from './lib/observer.mjs'
 import { collectMessageImages, extractImageReferences } from './lib/images.mjs'
 import { buildTableFiles } from './lib/tables.mjs'
+import {
+  createSettingsApi,
+  loadSettings,
+  mergeSettings,
+  resolveSettingsFile,
+} from './lib/settings.mjs'
+import { readImageParts } from './lib/media.mjs'
+import { transcribeAudio, voiceConfigured, voicePromptText } from './lib/voice.mjs'
 import { createIncoming } from './lib/incoming.mjs'
 import { resolveSessionDir } from './lib/create-session.mjs'
 import { archivedIdsOf, filterArchivedSessions } from './lib/sessions.mjs'
@@ -94,6 +102,15 @@ const DEFAULTS = {
   threads: true,
   tableFiles: true,
   tableMaxFiles: 4,
+  nativeIncomingImages: true,
+  settingsPage: true,
+  settingsFile: undefined,
+  voiceTranscribe: false,
+  voiceEndpoint: undefined,
+  voiceApiKey: undefined,
+  voiceApiKeyFile: undefined,
+  voiceModel: 'whisper-1',
+  voiceLanguage: undefined,
   webUrl: undefined,
   progress: true,
   progressDelayMs: 2500,
@@ -251,6 +268,15 @@ export function normalizeConfig(raw = {}) {
     threads: asBoolean(merged.threads, DEFAULTS.threads),
     tableFiles: asBoolean(merged.tableFiles, DEFAULTS.tableFiles),
     tableMaxFiles: asInteger(merged.tableMaxFiles, DEFAULTS.tableMaxFiles, 0, 8),
+    nativeIncomingImages: asBoolean(merged.nativeIncomingImages, DEFAULTS.nativeIncomingImages),
+    settingsPage: asBoolean(merged.settingsPage, DEFAULTS.settingsPage),
+    settingsFile: String(merged.settingsFile || env.MAX_NOTIFY_SETTINGS_FILE || '').trim() || undefined,
+    voiceTranscribe: asBoolean(merged.voiceTranscribe, DEFAULTS.voiceTranscribe),
+    voiceEndpoint: String(merged.voiceEndpoint || env.MAX_NOTIFY_VOICE_ENDPOINT || '').trim() || undefined,
+    voiceApiKey: String(merged.voiceApiKey || env.MAX_NOTIFY_VOICE_API_KEY || '').trim() || undefined,
+    voiceApiKeyFile: String(merged.voiceApiKeyFile || env.MAX_NOTIFY_VOICE_API_KEY_FILE || '').trim() || undefined,
+    voiceModel: String(merged.voiceModel || DEFAULTS.voiceModel).trim() || DEFAULTS.voiceModel,
+    voiceLanguage: String(merged.voiceLanguage || env.MAX_NOTIFY_VOICE_LANGUAGE || '').trim() || undefined,
     progress: asBoolean(merged.progress, DEFAULTS.progress),
     typing: asBoolean(merged.typing, DEFAULTS.typing),
     deliverables: asBoolean(merged.deliverables, DEFAULTS.deliverables),
@@ -376,7 +402,9 @@ export function readTokenFile(path) {
  * @param {object} [deps] - test seams (`createClient`).
  */
 export function apply(ctx, rawConfig = {}, deps = {}) {
-  const config = normalizeConfig(rawConfig)
+  const baseConfig = normalizeConfig(rawConfig)
+  const settingsFilePath = resolveSettingsFile(baseConfig)
+  let config = mergeSettings(baseConfig, loadSettings(settingsFilePath))
   const logger = wrapLogger(ctx.logger('max-notify'))
   const createClient = deps.createClient ?? createMaxClient
 
@@ -385,6 +413,13 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       config.botToken = readTokenFile(config.botTokenFile)
     } catch (error) {
       logger.warn('cannot read botTokenFile %s: %s', config.botTokenFile, error?.message || String(error))
+    }
+  }
+  if (config.enabled && !config.voiceApiKey && config.voiceApiKeyFile) {
+    try {
+      config.voiceApiKey = readTokenFile(config.voiceApiKeyFile)
+    } catch (error) {
+      logger.warn('cannot read voiceApiKeyFile %s: %s', config.voiceApiKeyFile, error?.message || String(error))
     }
   }
 
@@ -857,28 +892,79 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     }
   }
 
+  function settingsValues() {
+    return {
+      mode: config.mode,
+      digestEnabled: config.digestEnabled,
+      digestTime: config.digestTime,
+      quietHours: config.quietHours,
+      notify: config.notify,
+      progress: config.progress,
+      typing: config.typing,
+      threads: config.threads,
+      tableFiles: config.tableFiles,
+      tableMaxFiles: config.tableMaxFiles,
+      approvalTimeoutMs: config.approvalTimeoutMs,
+      receiveFiles: config.receiveFiles,
+      nativeIncomingImages: config.nativeIncomingImages,
+      voiceTranscribe: config.voiceTranscribe,
+      voiceEndpoint: config.voiceEndpoint,
+      voiceModel: config.voiceModel,
+      buttonsPresets: config.buttonsPresets,
+    }
+  }
+
+  function settingsStatus() {
+    return {
+      version: VERSION,
+      transport: webhookActive ? 'webhook' : 'polling',
+      webhookSubscribed,
+      interactive: config.interactive,
+      allowlist: { users: config.allowedUserIds.length, chats: config.allowedChatIds.length },
+    }
+  }
+
   let preferredWorkspacePath
 
   function setPreferredWorkspace(path) {
     preferredWorkspacePath = typeof path === 'string' && path !== '' ? path : undefined
   }
 
-  async function promptSession(sessionId, text) {
+  async function promptSessionRich(sessionId, text, { imagePaths = [] } = {}) {
     const value = String(text ?? '').trim()
-    if (!value) return false
+    let imageParts = []
+    if (config.nativeIncomingImages && Array.isArray(imagePaths) && imagePaths.length > 0) {
+      const result = readImageParts(imagePaths, { maxParts: 4, maxBytes: 8 * 1024 * 1024 })
+      imageParts = result.parts
+      for (const error of result.errors) logger.warn('cannot attach incoming image %s: %s', error.path, error.error)
+    }
+    if (value === '' && imageParts.length === 0) return false
+    const content = []
+    if (value !== '') content.push({ type: 'text', text: value })
+    for (const part of imageParts) content.push(part)
+
     const controller = getService('sessionController')
     if (controller?.prompt) {
       const abort = new AbortController()
       const timer = setTimeout(() => abort.abort(), 15000)
       timer.unref?.()
       try {
-        await controller.prompt(
-          { requestId: randomUUID(), sessionId, mode: 'queue', content: [{ type: 'text', text: value }] },
-          abort.signal,
-        )
+        await controller.prompt({ requestId: randomUUID(), sessionId, mode: 'queue', content }, abort.signal)
         return true
       } catch (error) {
         logger.warn('sessionController.prompt failed: %s', error?.message || String(error))
+        if (imageParts.length > 0 && value !== '') {
+          // A text-only route/model may reject image parts; fall back to the path prompt.
+          try {
+            await controller.prompt(
+              { requestId: randomUUID(), sessionId, mode: 'queue', content: [{ type: 'text', text: value }] },
+              abort.signal,
+            )
+            return true
+          } catch (fallbackError) {
+            logger.warn('sessionController.prompt fallback failed: %s', fallbackError?.message || String(fallbackError))
+          }
+        }
       } finally {
         clearTimeout(timer)
       }
@@ -886,17 +972,58 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     try {
       const agent = getService('agents')?.get?.(sessionId)
       if (!agent) return false
-      agent.followup({
-        id: randomUUID(),
-        role: 'user',
-        content: [{ type: 'text', text: value }],
-        source: { kind: 'user' },
-      })
+      agent.followup({ id: randomUUID(), role: 'user', content, source: { kind: 'user' } })
       return true
     } catch (error) {
       logger.warn('agent.followup failed: %s', error?.message || String(error))
       return false
     }
+  }
+
+  async function promptSession(sessionId, text) {
+    return promptSessionRich(sessionId, text)
+  }
+
+  const AUDIO_EXTENSIONS = /\.(mp3|ogg|oga|opus|wav|m4a|webm|flac)$/i
+
+  /** Prompt from incoming MAX attachments; images become native image parts and audio can be transcribed. */
+  async function promptIncoming(sessionId, text, savedFiles = []) {
+    const files = Array.isArray(savedFiles) ? savedFiles : []
+    const imagePaths = files
+      .filter((file) => file && String(file.type) === 'image' && typeof file.path === 'string')
+      .map((file) => file.path)
+    let promptText = String(text ?? '')
+    const warnings = []
+    let transcript
+    if (config.voiceTranscribe) {
+      const check = voiceConfigured(config)
+      if (!check.ok) {
+        warnings.push(`голос: ${check.reason}`)
+      } else {
+        const audio = files.find(
+          (file) => file && typeof file.path === 'string' && (String(file.type) === 'audio' || AUDIO_EXTENSIONS.test(file.path)),
+        )
+        if (audio) {
+          const result = await transcribeAudio({
+            filePath: audio.path,
+            endpoint: config.voiceEndpoint,
+            apiKey: config.voiceApiKey,
+            model: config.voiceModel,
+            language: config.voiceLanguage,
+          })
+          if (result.ok) {
+            transcript = result.text
+            const formatted = voicePromptText(result.text)
+            promptText = promptText.trim() === '' ? formatted : `${promptText}\n\n${formatted}`
+          } else {
+            warnings.push(`голос: ${result.error}`)
+            logger.warn('cannot transcribe incoming audio: %s', result.error)
+          }
+        }
+      }
+    }
+    const accepted = await promptSessionRich(sessionId, promptText, { imagePaths })
+    return { accepted, transcript, warnings }
   }
 
   async function createSession(sessionId, sessionArg) {
@@ -1018,6 +1145,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       cancelSession,
       titleFor,
       saveIncoming: (attachments, sessionId) => incomingLocal.save(attachments, sessionId),
+      promptIncoming,
       createSession: (sessionId, sessionArg) => createSession(sessionId, sessionArg),
       listModels,
       currentModel,
@@ -1128,6 +1256,48 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
   }
 
   webhookActive = setupWebhook()
+
+  let settingsRouteDispose
+  function setupSettingsPage() {
+    if (!config.settingsPage || !config.interactive) return
+    const webServer = getService('webServer')
+    if (!webServer?.register) {
+      logger.debug('settings page disabled: webServer is unavailable')
+      return
+    }
+    const connection = getService('connection')
+    const api = createSettingsApi({
+      file: settingsFilePath,
+      getValues: settingsValues,
+      getStatus: settingsStatus,
+      getVersion: () => VERSION,
+      logger,
+    })
+    try {
+      settingsRouteDispose = webServer.register({
+        kind: 'exact',
+        path: '/max-notify/settings.json',
+        handler: async (req, res) => {
+          let rejection
+          try {
+            rejection = connection?.requestRejection ? await connection.requestRejection(req) : 403
+          } catch {
+            rejection = 403
+          }
+          if (rejection !== undefined && rejection !== null) {
+            res.statusCode = rejection
+            res.end(rejection === 401 ? 'unauthorized' : 'forbidden')
+            return
+          }
+          await api(req, res)
+        },
+      })
+      logger.info('settings page API ready: /max-notify/settings.json')
+    } catch (error) {
+      logger.warn('cannot register the settings page route: %s', error?.message || String(error))
+    }
+  }
+  setupSettingsPage()
 
   async function startWebhookSubscription() {
     if (!webhookActive || !config.webhookAutoSubscribe) return
@@ -1510,6 +1680,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
           clearInterval(webhookRetryTimer)
           webhookRetryTimer = undefined
         }
+        settingsRouteDispose?.()
         webhookRouteDispose?.()
         if (webhookActive && config.webhookRemoveOnStop && config.webhookPublicUrl) {
           void removeWebhookSubscription({ client, url: config.webhookPublicUrl, logger })

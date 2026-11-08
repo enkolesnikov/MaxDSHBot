@@ -57,3 +57,11 @@
         # threads: true
         # tableFiles: true
         # tableMaxFiles: 4
+        # nativeIncomingImages: true
+        # settingsPage: true
+        # settingsFile: $DSH_HOME/max-notify/config.json
+        # voiceTranscribe: false
+        # voiceEndpoint: https://api.openai.com/v1
+        # voiceApiKeyFile: /path/to/voice.key
+        # voiceModel: whisper-1
+        # voiceLanguage: ru

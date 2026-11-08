@@ -4,6 +4,38 @@ All notable changes to `dsh-max-notify` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] — 2026-11-09
+
+GUI-настройки, голос и нативные изображения.
+
+### Added
+
+- **Страница настроек в GUI DSH**: тонкий клиентский плагин без сборки
+  (`client/client.js`, слот `plugins.bundle.config`) + host-маршрут
+  `/max-notify/settings.json`, защищённый `connection.requestRejection`
+  (та же cookie/Origin-проверка, что у панели). Правки сохраняются в
+  `$DSH_HOME/max-notify/config.json` (0600, atomic) и применяются после
+  перезагрузки строки; секреты страница не редактирует.
+- **Нативные входящие изображения**: при `nativeIncomingImages` картинки из MAX
+  передаются агенту image-партами (base64, mediaType по сигнатуре), с fallback
+  на текстовый prompt, если route/модель не принимает изображения.
+- **Голосовая расшифровка (STT)**: опциональный OpenAI-совместимый endpoint
+  (`voiceTranscribe`, `voiceEndpoint`, `voiceApiKey`/`voiceApiKeyFile`,
+  `voiceModel`, `voiceLanguage`); аудио из MAX расшифровывается и уходит агенту
+  как текст, ошибки не блокируют передачу файла.
+- `settingsPage`/`settingsFile` в конфиге; `settingsSummary` расширен.
+- Пакет: `dsh.client` metadata, `exports["./client"]`, `files` включает `client/`;
+  клиентский бандл проверен в boot-графе живого DSH.
+
+### Tests
+
+315 unit/integration tests (was 249): media (13), voice (22), settings (4),
+settings API route, native-image prompt, плюс существующее покрытие.
+
+### Deferred to 1.2
+
+TTS (озвучка ответов), внешний каталог плагинов, multi-chat/roles.
+
 ## [1.0.0] — 2026-11-09
 
 Первый стабильный релиз: «чат как пульт» стал полноценным рабочим местом.

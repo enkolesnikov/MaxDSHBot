@@ -768,12 +768,17 @@ export function createBot({
     }
     const filesText = saved.map((file) => `• ${file.path} (${file.type}, ${formatBytes(file.bytes)})`).join('\n')
     const promptText = `${text ? `${text}\n\n` : ''}${result?.promptText ?? ''}`.trim()
-    const accepted = await runtime.promptSession?.(sessionId, promptText)
-    const tail = errors.length > 0 ? `\n⚠️ ${errors.join('; ')}` : ''
+    const promptResult = runtime.promptIncoming
+      ? await runtime.promptIncoming(sessionId, promptText, saved)
+      : await runtime.promptSession?.(sessionId, promptText)
+    const accepted = typeof promptResult === 'boolean' ? promptResult : promptResult?.accepted === true
+    const transcript = typeof promptResult === 'object' && promptResult !== null ? promptResult.transcript : undefined
+    const warnings = [...errors, ...(typeof promptResult === 'object' && promptResult !== null ? promptResult.warnings ?? [] : [])]
+    const tail = warnings.length > 0 ? `\n⚠️ ${warnings.join('; ')}` : ''
     await reply(
       chatId,
       accepted
-        ? `📎 Сохранено: ${saved.length}\n${filesText}\n📨 Передано агенту${tail}`
+        ? `📎 Сохранено: ${saved.length}\n${filesText}\n${transcript ? `🎤 Расшифровано: ${truncate(transcript, 500)}\n` : ''}📨 Передано агенту${tail}`
         : `📎 Сохранено: ${saved.length}\n${filesText}\n❌ Не удалось передать агенту${tail}`,
     )
   }

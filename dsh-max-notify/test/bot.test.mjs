@@ -808,3 +808,33 @@ test('/settings renders effective settings', async () => {
   assert.match(client.sent[0].text, /reply-ветки: вкл/)
   assert.match(client.sent[0].text, /пресетов: 2/)
 })
+
+test('an incoming image is passed through promptIncoming', async () => {
+  const promptIncomingCalls = []
+  const { bot, client } = makeBot({
+    runtime: {
+      saveIncoming: async () => ({
+        saved: [{ path: '/work/max-inbox/shot.png', name: 'shot.png', type: 'image', bytes: 100 }],
+        errors: [],
+        dir: '/work/max-inbox',
+        promptText: 'Пользователь прислал файлы из MAX:\n• /work/max-inbox/shot.png (image, 100 B)',
+      }),
+      promptIncoming: async (sessionId, text, files) => {
+        promptIncomingCalls.push({ sessionId, text, files })
+        return true
+      },
+    },
+  })
+  await bot.handleUpdate({
+    update_type: 'message_created',
+    chat_id: 123456789,
+    message: {
+      sender: { user_id: 987654321 },
+      recipient: { chat_id: 123456789 },
+      body: { text: 'что на картинке?', mid: 'img-mid', attachments: [{ type: 'image', payload: { url: 'https://example.test/i.png' } }] },
+    },
+  })
+  assert.equal(promptIncomingCalls.length, 1)
+  assert.equal(promptIncomingCalls[0].files[0].path, '/work/max-inbox/shot.png')
+  assert.match(client.sent.at(-1).text, /Передано агенту/)
+})

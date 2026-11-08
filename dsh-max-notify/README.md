@@ -99,7 +99,11 @@ Published on npm: https://www.npmjs.com/package/dsh-max-notify
 | `lib/webhook.mjs` | webhook handler, secret verification, MAX subscription |
 | `lib/tables.mjs` | Markdown tables → CSV/Markdown |
 | `lib/schedules.mjs` | `/schedules` helpers |
-| `test/*.test.mjs` | `node --test` (249 unit tests) |
+| `lib/media.mjs` | incoming images → native image parts |
+| `lib/voice.mjs` | optional STT transcription |
+| `lib/settings.mjs` | GUI settings validation/overlay/API |
+| `client/client.js` | hand-written settings page bundle |
+| `test/*.test.mjs` | `node --test` (315 unit tests) |
 
 ## Config
 
@@ -160,6 +164,9 @@ Set in `cordis.patch.yml` (or override the row by id from the profile's own
 | `webhookQueueMax` | `200` | Durable incoming-update queue limit |
 | `threads` | `true` | Reply threads for session answers |
 | `tableFiles` / `tableMaxFiles` | `true` / `4` | Markdown tables as CSV/MD attachments |
+| `nativeIncomingImages` | `true` | Incoming images as native image parts |
+| `voiceTranscribe` / `voiceEndpoint` / `voiceApiKey` | `false` / — / env | Optional STT for MAX audio |
+| `settingsPage` / `settingsFile` | `true` / `$DSH_HOME/max-notify/config.json` | GUI settings overlay |
 
 ## Remote control ("Пульт")
 

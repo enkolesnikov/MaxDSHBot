@@ -642,9 +642,9 @@ test('webhook transport registers a route and processes an update idempotently',
     { createClient: () => client },
   )
 
-  assert.equal(routes.length, 1)
-  assert.equal(routes[0].kind, 'exact')
-  assert.equal(routes[0].path, '/max/webhook')
+  const webhookRoute = routes.find((route) => route.path === '/max/webhook')
+  assert.ok(webhookRoute)
+  assert.equal(webhookRoute.kind, 'exact')
 
   const update = {
     update_type: 'message_created',
@@ -656,20 +656,20 @@ test('webhook transport registers a route and processes an update idempotently',
     },
   }
   const first = webhookResponse()
-  await routes[0].handler(webhookRequest({ secret: 's3cret', update }), first)
+  await webhookRoute.handler(webhookRequest({ secret: 's3cret', update }), first)
   await tick(40)
   assert.equal(first.statusCode, 200)
   assert.equal(prompts.length, 1)
   assert.equal(prompts[0].content[0].text, 'привет из вебхука')
 
   const replay = webhookResponse()
-  await routes[0].handler(webhookRequest({ secret: 's3cret', update }), replay)
+  await webhookRoute.handler(webhookRequest({ secret: 's3cret', update }), replay)
   await tick(40)
   assert.equal(replay.statusCode, 200)
   assert.equal(prompts.length, 1)
 
   const rejected = webhookResponse()
-  await routes[0].handler(webhookRequest({ secret: 'wrong', update }), rejected)
+  await webhookRoute.handler(webhookRequest({ secret: 'wrong', update }), rejected)
   assert.equal(rejected.statusCode, 401)
   assert.equal(prompts.length, 1)
 })
@@ -728,4 +728,50 @@ test('markdown tables are attached as CSV and Markdown files', async () => {
   assert.deepEqual(client.uploads.map((item) => item.type), ['file', 'file'])
   const attachments = client.sent[0].attachments ?? []
   assert.equal(attachments.filter((item) => item.type === 'file').length, 2)
+})
+
+test('the settings API route is registered and persists the overlay', async () => {
+  const routes = []
+  const services = {
+    webServer: {
+      register(route) {
+        routes.push(route)
+        return () => {}
+      },
+    },
+    connection: {
+      requestRejection: () => undefined,
+    },
+  }
+  const { ctx } = createFakeCtx({ services })
+  const client = createFakeClient()
+  apply(ctx, { botToken: 't', chatId: '1', allowedUserIds: ['987654321'] }, { createClient: () => client })
+
+  const route = routes.find((item) => item.path === '/max-notify/settings.json')
+  assert.ok(route)
+  assert.equal(route.kind, 'exact')
+
+  const getRes = webhookResponse()
+  const getReq = new EventEmitter()
+  getReq.method = 'GET'
+  await route.handler(getReq, getRes)
+  const payload = JSON.parse(getRes.body)
+  assert.equal(payload.ok, true)
+  assert.equal(payload.values.threads, true)
+  assert.equal(payload.values.nativeIncomingImages, true)
+
+  const postRes = webhookResponse()
+  const postReq = new EventEmitter()
+  postReq.method = 'POST'
+  postReq.destroy = () => {}
+  setTimeout(() => {
+    postReq.emit('data', Buffer.from(JSON.stringify({ mode: 'mute', threads: false })))
+    postReq.emit('end')
+  }, 10)
+  await route.handler(postReq, postRes)
+  assert.equal(postRes.statusCode, 200)
+  const saved = JSON.parse(postRes.body)
+  assert.equal(saved.restartRequired, true)
+  assert.equal(saved.values.mode, 'mute')
+  assert.equal(saved.values.threads, false)
 })
