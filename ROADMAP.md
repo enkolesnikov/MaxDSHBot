@@ -1,6 +1,6 @@
 # Дорожная карта `dsh-max-notify`
 
-Текущая версия: **0.8.0** (надёжность, управление, стоимость и бюджет). План рассчитан на
+Текущая версия: **0.9.0** (надёжность, управление, стоимость, webhook и npm). План рассчитан на
 DSH 0.2.x (проверено на 0.2.2-rc.1, Node 24.9+).
 
 Цель: из «уведомлятора + пульта» сделать надёжный продукт: доставка без
@@ -14,7 +14,7 @@ DSH 0.2.x (проверено на 0.2.2-rc.1, Node 24.9+).
 | **0.6** | Надёжность и безопасность | outbox, dedupe, глобальный лимитер, таймаут approvals, fail-closed, `/health`, manifest | ✅ реализовано |
 | **0.7** | Полное управление | `/model`, `/rename`, `/fork`, `/compact`, `/plan` + review, `/search`, `/archive`, `/pin`, `/workspace`, кнопки-пресеты | ✅ реализовано |
 | **0.8** | Стоимость и бюджет | read-only адаптер `cost-meter` ledger, `/budget`, стоимость в `/status` и дайджесте, алерты 80/100 % | ✅ реализовано |
-| **0.9** | Production-транспорт и публикация | webhook через `webServer`, npm-пакет, locale/icon, маркет, GitHub release | планируется |
+| **0.9** | Production-транспорт и публикация | webhook через `webServer`, npm-пакет, locale/icon, GitHub release | ✅ реализовано |
 | **1.0** | UX-продукт | настройки в GUI, таблицы→файлы, reply-ветки сессий, forwarded, native-картинки, голос STT/TTS, `/schedules` | планируется |
 | 1.1+ | Backlog | несколько чатов/роли, MAX Mini App, proxy, unattended read-only/auto, `/diff`, отправка локальных файлов, локальный whisper | backlog |
 
@@ -54,10 +54,10 @@ DSH 0.2.x (проверено на 0.2.2-rc.1, Node 24.9+).
 
 ## 0.9 — production-транспорт и публикация
 
-**npm-пакет опубликован:** `dsh-max-notify@0.8.0` — установка
-`dsh plugin --profile web add dsh-max-notify`; добавлены `icon.svg`,
-`locale/{en,zh,ru}.json`, `publishConfig`. Осталось: webhook, заявка в каталог,
-GitHub release с npm-ссылкой.
+**Реализовано:** npm-пакет `dsh-max-notify@0.9.0`; webhook-транспорт
+(`transport: webhook`, secret, durable queue, авто-подписка, CLI
+`tools/webhook.mjs`); health; `icon.svg`, `locale/{en,zh,ru}.json`. Осталось:
+заявка в внешний каталог плагинов (после релиза).
 
 1. Webhook: `webServer.register('/max/webhook')`, secret constant-time, ack
    <1 с, очередь+dedupe, `POST/DELETE /subscriptions`, `update_types`,

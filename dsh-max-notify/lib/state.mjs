@@ -45,6 +45,8 @@ export function createState({ file, logger, chatId } = {}) {
     approvalRules: [],
     /** periodKey:threshold -> timestamp of the last sent budget alert */
     budgetAlerts: {},
+    /** Durable webhook updates: [{ key, update, at }] */
+    webhookQueue: [],
   }
 
   try {
@@ -61,6 +63,11 @@ export function createState({ file, logger, chatId } = {}) {
       if (Array.isArray(parsed.pendingCards)) {
         state.pendingCards = parsed.pendingCards.filter(
           (entry) => entry && typeof entry.token === 'string' && (entry.kind === 'approval' || entry.kind === 'question'),
+        )
+      }
+      if (Array.isArray(parsed.webhookQueue)) {
+        state.webhookQueue = parsed.webhookQueue.filter(
+          (entry) => entry && typeof entry === 'object' && entry.update && typeof entry.update === 'object',
         )
       }
       if (parsed.budgetAlerts && typeof parsed.budgetAlerts === 'object' && !Array.isArray(parsed.budgetAlerts)) {
@@ -122,6 +129,7 @@ export function createState({ file, logger, chatId } = {}) {
             pendingCards: state.pendingCards,
             approvalRules: state.approvalRules,
             budgetAlerts: state.budgetAlerts,
+            webhookQueue: state.webhookQueue,
           },
           null,
           2,
@@ -228,6 +236,14 @@ export function createState({ file, logger, chatId } = {}) {
       if (name === '' || !Number.isFinite(until)) return
       state.approvalRules = state.approvalRules.filter((rule) => rule.tool !== name && rule.until > Date.now())
       state.approvalRules.push({ tool: name, until, createdAt: Date.now() })
+      saveSoon()
+    },
+    getWebhookQueue() {
+      return state.webhookQueue.map((entry) => ({ ...entry }))
+    },
+    setWebhookQueue(queue) {
+      const list = Array.isArray(queue) ? queue.filter((entry) => entry && entry.update) : []
+      state.webhookQueue = list.slice(-200)
       saveSoon()
     },
     getBudgetAlerts() {

@@ -121,3 +121,19 @@ test('budget alert timestamps persist across reloads', () => {
   assert.deepEqual(second.getBudgetAlerts(), { '2026-11:80': 123 })
   second.dispose()
 })
+
+test('webhook updates are persisted in a durable queue', () => {
+  const file = join(workspace, 'webhook-queue.json')
+  const first = createState({ file, logger: { warn() {} } })
+  const update = { update_type: 'message_created', message: { body: { mid: 'm1' } } }
+  first.setWebhookQueue([{ key: 'msg:1:m1', update, at: 123 }])
+  first.save()
+  first.dispose()
+
+  const second = createState({ file, logger: { warn() {} } })
+  const queue = second.getWebhookQueue()
+  assert.equal(queue.length, 1)
+  assert.equal(queue[0].key, 'msg:1:m1')
+  assert.equal(queue[0].update.update_type, 'message_created')
+  second.dispose()
+})

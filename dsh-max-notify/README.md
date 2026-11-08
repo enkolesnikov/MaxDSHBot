@@ -64,6 +64,13 @@ Published on npm: https://www.npmjs.com/package/dsh-max-notify
   plan is attached as `plan.md` and the agent receives either an approval or
   free-text feedback.
 - `/sessions` resolves titles of cold sessions through the projection cache.
+- **Webhook transport (v0.9, opt-in)**: `transport: webhook` registers an exact
+  route in DSH's `webServer`, verifies `X-Max-Bot-Api-Secret` in constant time,
+  persists each update to a durable state queue before answering `200`, processes
+  it idempotently (shared dedupe with long polling), and manages the MAX
+  subscription (`webhookPublicUrl`, `webhookSecret`, `webhookAutoSubscribe`).
+  `tools/webhook.mjs status|subscribe|unsubscribe` manages it manually; if the
+  web server/secret/URL is unavailable the plugin falls back to long polling.
 - **Cost & budget (v0.8)**: `/budget` (`/cost`) reads the `dsh-cost-meter`
   ledger read-only and reports spend today/month/total plus budget
   spent/remaining/percent; `/status` and the daily digest include cost lines;
@@ -89,7 +96,8 @@ Published on npm: https://www.npmjs.com/package/dsh-max-notify
 | `lib/audit.mjs` | metadata-only JSONL audit of approvals/commands (0600) |
 | `lib/redact.mjs` | token/credential redaction for log sinks |
 | `lib/cost-meter.mjs` | read-only dsh-cost-meter ledger adapter (cost/budget) |
-| `test/*.test.mjs` | `node --test` (187 unit tests) |
+| `lib/webhook.mjs` | webhook handler, secret verification, MAX subscription |
+| `test/*.test.mjs` | `node --test` (200 unit tests) |
 
 ## Config
 
@@ -142,6 +150,12 @@ Set in `cordis.patch.yml` (or override the row by id from the profile's own
 | `heartbeatFile` | — | JSON health snapshot for external monitoring |
 | `costMeterEnabled` / `costMeterFile` | `true` / `$DSH_HOME/storages/cost-meter/ledger.json` | Read-only cost ledger adapter |
 | `budgetAlertEnabled` / `budgetAlertThresholds` | `true` / `[80, 100]` | Budget threshold alerts (once per period) |
+| `transport` | `polling` | `polling` or `webhook` |
+| `webhookPath` / `webhookPublicUrl` | `/max/webhook` / — | Route and public HTTPS URL |
+| `webhookSecret` | env `MAX_NOTIFY_WEBHOOK_SECRET` | Required secret header for webhook mode |
+| `webhookUpdateTypes` | message_created,… | Subscription update types |
+| `webhookAutoSubscribe` / `webhookRemoveOnStop` | `true` / `false` | Automatic subscription management |
+| `webhookQueueMax` | `200` | Durable incoming-update queue limit |
 
 ## Remote control ("Пульт")
 

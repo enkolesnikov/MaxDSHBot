@@ -1,7 +1,7 @@
 {
   "name": "dsh-max-notify",
-  "version": "0.8.0",
-  "description": "DSH → MAX messenger plugin: reliable agent replies, full session control, cost/budget tracking from dsh-cost-meter, approvals with timeouts and audit, observability, images and two-way file exchange",
+  "version": "0.9.0",
+  "description": "DSH → MAX messenger plugin: reliable agent replies, full remote control, webhook transport, cost/budget, approvals, observability, files",
   "type": "module",
   "main": "index.js",
   "exports": {
@@ -22,7 +22,7 @@
   ],
   "scripts": {
     "test": "node --test \"test/**/*.test.mjs\"",
-    "check": "node --check index.js && node --check lib/transport.mjs && node --check lib/extract.mjs && node --check lib/format.mjs && node --check lib/state.mjs && node --check lib/cards.mjs && node --check lib/interactions.mjs && node --check lib/progress.mjs && node --check lib/deliverables.mjs && node --check lib/bot.mjs && node --check lib/policy.mjs && node --check lib/observer.mjs && node --check lib/images.mjs && node --check lib/incoming.mjs && node --check lib/sessions.mjs && node --check lib/create-session.mjs && node --check lib/limits.mjs && node --check lib/outbox.mjs && node --check lib/health.mjs && node --check lib/audit.mjs && node --check lib/redact.mjs && node --check lib/cost-meter.mjs"
+    "check": "node --check index.js && node --check lib/transport.mjs && node --check lib/extract.mjs && node --check lib/format.mjs && node --check lib/state.mjs && node --check lib/cards.mjs && node --check lib/interactions.mjs && node --check lib/progress.mjs && node --check lib/deliverables.mjs && node --check lib/bot.mjs && node --check lib/policy.mjs && node --check lib/observer.mjs && node --check lib/images.mjs && node --check lib/incoming.mjs && node --check lib/sessions.mjs && node --check lib/create-session.mjs && node --check lib/limits.mjs && node --check lib/outbox.mjs && node --check lib/health.mjs && node --check lib/audit.mjs && node --check lib/redact.mjs && node --check lib/cost-meter.mjs && node --check lib/webhook.mjs"
   },
   "engines": {
     "node": ">=20",

@@ -586,9 +586,35 @@ export function createMaxClient(options = {}) {
     })
   }
 
+  /** GET /subscriptions — active webhook subscriptions for this bot. */
+  function getSubscriptions() {
+    return withRetry(() => request({ method: 'GET', path: 'subscriptions' }))
+  }
+
+  /** POST /subscriptions — subscribe or update the webhook URL/secret/types. */
+  function subscribeWebhook({ url, secret, updateTypes } = {}) {
+    if (typeof url !== 'string' || url.trim() === '') throw new Error('url is required')
+    const body = { url: url.trim() }
+    if (secret) body.secret = secret
+    if (Array.isArray(updateTypes) && updateTypes.length > 0) body.update_types = updateTypes
+    else if (typeof updateTypes === 'string' && updateTypes.trim() !== '') {
+      body.update_types = updateTypes.split(',').map((item) => item.trim()).filter(Boolean)
+    }
+    return withRetry(() => request({ method: 'POST', path: 'subscriptions', body }))
+  }
+
+  /** DELETE /subscriptions?url=... — remove one webhook subscription. */
+  function unsubscribeWebhook(url) {
+    if (typeof url !== 'string' || url.trim() === '') throw new Error('url is required')
+    return withRetry(() => request({ method: 'DELETE', path: 'subscriptions', query: { url: url.trim() } }))
+  }
+
   return {
     getMe,
     getUpdates,
+    getSubscriptions,
+    subscribeWebhook,
+    unsubscribeWebhook,
     getChat,
     sendMessage,
     sendText,

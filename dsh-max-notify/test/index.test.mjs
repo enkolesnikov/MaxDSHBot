@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -579,4 +580,96 @@ test('cost/budget config keys normalize with safe defaults', () => {
   const custom = normalizeConfig({ botToken: 't', chatId: '1', budgetAlertThresholds: ['90', 50, 50], costMeterFile: '/tmp/l.json' })
   assert.deepEqual(custom.budgetAlertThresholds, [50, 90])
   assert.equal(custom.costMeterFile, '/tmp/l.json')
+})
+
+function webhookRequest({ secret, update, method = 'POST' } = {}) {
+  const req = new EventEmitter()
+  req.method = method
+  req.headers = secret === undefined ? {} : { 'x-max-bot-api-secret': secret }
+  req.destroy = () => {}
+  queueMicrotask(() => {
+    req.emit('data', Buffer.from(JSON.stringify(update)))
+    req.emit('end')
+  })
+  return req
+}
+
+function webhookResponse() {
+  return {
+    statusCode: 0,
+    headers: {},
+    body: '',
+    setHeader(name, value) {
+      this.headers[name] = value
+    },
+    end(value) {
+      this.body = String(value ?? '')
+    },
+  }
+}
+
+test('webhook transport registers a route and processes an update idempotently', async () => {
+  const routes = []
+  const prompts = []
+  const services = {
+    webServer: {
+      register(route) {
+        routes.push(route)
+        return () => {}
+      },
+    },
+    sessionController: {
+      async list() {
+        return { items: [{ sessionId: 'session-webhook', running: true, blank: false, cwd: '/work', updatedAt: 1 }] }
+      },
+      async prompt(request) {
+        prompts.push(request)
+      },
+    },
+  }
+  const { ctx } = createFakeCtx({ services })
+  const client = createFakeClient()
+  apply(
+    ctx,
+    {
+      botToken: 't',
+      chatId: '1',
+      allowedUserIds: ['987654321'],
+      transport: 'webhook',
+      webhookSecret: 's3cret',
+      webhookPublicUrl: 'https://example.test/max/webhook',
+    },
+    { createClient: () => client },
+  )
+
+  assert.equal(routes.length, 1)
+  assert.equal(routes[0].kind, 'exact')
+  assert.equal(routes[0].path, '/max/webhook')
+
+  const update = {
+    update_type: 'message_created',
+    chat_id: 1,
+    message: {
+      sender: { user_id: 987654321 },
+      recipient: { chat_id: 1 },
+      body: { text: 'привет из вебхука', mid: 'wh-mid-1', attachments: [] },
+    },
+  }
+  const first = webhookResponse()
+  await routes[0].handler(webhookRequest({ secret: 's3cret', update }), first)
+  await tick(40)
+  assert.equal(first.statusCode, 200)
+  assert.equal(prompts.length, 1)
+  assert.equal(prompts[0].content[0].text, 'привет из вебхука')
+
+  const replay = webhookResponse()
+  await routes[0].handler(webhookRequest({ secret: 's3cret', update }), replay)
+  await tick(40)
+  assert.equal(replay.statusCode, 200)
+  assert.equal(prompts.length, 1)
+
+  const rejected = webhookResponse()
+  await routes[0].handler(webhookRequest({ secret: 'wrong', update }), rejected)
+  assert.equal(rejected.statusCode, 401)
+  assert.equal(prompts.length, 1)
 })

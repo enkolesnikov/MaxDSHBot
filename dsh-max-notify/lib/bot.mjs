@@ -75,6 +75,7 @@ export function createBot({
 } = {}) {
   let running = false
   let disposed = false
+  let commandsRegistered = false
   /** chatKey -> ordered session ids for `/use N` */
   const choices = new Map()
   /** chatKey -> numbered model list for `/model N` */
@@ -140,6 +141,7 @@ export function createBot({
     const lines = [
       `🩺 *dsh-max-notify* v${version ?? '?'}`,
       `⏱ uptime: ${formatDuration(snapshot.uptimeMs)}`,
+      `📡 transport: ${snapshot.transport === 'webhook' || snapshot.webhookActive ? 'webhook' : 'long polling'}`,
       `📡 polling: ${snapshot.pollStopped ? `остановлен (${snapshot.pollStoppedReason ?? 'ошибка'})` : 'работает'}`,
       `🕒 последний poll: ${formatRelative(snapshot.lastPollAt)}`,
       `📥 последнее обновление: ${formatRelative(snapshot.lastUpdateAt)}`,
@@ -148,6 +150,12 @@ export function createBot({
       `🛡 allowlist: ${(config.allowedUserIds ?? []).length} users / ${(config.allowedChatIds ?? []).length} chats`,
       `🧩 режим: ${policy?.describe?.() ?? '—'}`,
     ]
+    if (snapshot.webhookActive) {
+      lines.push(
+        `🔗 webhook: ${snapshot.webhookSubscribed ? 'подписан' : 'подписка не подтверждена'} · очередь ${snapshot.webhookQueueDepth ?? 0}`,
+      )
+      if (snapshot.webhookSubscriptionError) lines.push(`⚠️ webhook: ${truncate(snapshot.webhookSubscriptionError, 300)}`)
+    }
     if (snapshot.lastError) lines.push(`⚠️ последняя ошибка: ${truncate(snapshot.lastError, 300)}`)
     return lines.join('\n')
   }
@@ -822,11 +830,13 @@ export function createBot({
   }
 
   async function registerCommands() {
-    if (!config.registerCommands) return
+    if (!config.registerCommands || commandsRegistered) return
+    commandsRegistered = true
     try {
       await client.setCommands(COMMANDS)
       logger?.info?.('registered %d MAX bot commands', COMMANDS.length)
     } catch (error) {
+      commandsRegistered = false
       logger?.debug?.('cannot register MAX bot commands: %s', error?.message || String(error))
     }
   }
@@ -854,6 +864,15 @@ export function createBot({
     }
   }
 
+  /** Apply one update with persisted dedupe (used by polling and webhook). */
+  async function applyUpdate(update) {
+    const key = updateKey(update)
+    if (key && state?.hasProcessed?.(key)) return false
+    await handleUpdate(update)
+    if (key) state?.markProcessed?.(key)
+    return true
+  }
+
   /** One long-poll iteration; returns `{primed, count, handled}` (exposed for tests). */
   async function pollOnce() {
     const params = {
@@ -873,13 +892,9 @@ export function createBot({
     const updates = Array.isArray(response?.updates) ? response.updates : []
     let handled = 0
     for (const update of updates) {
-      const key = updateKey(update)
-      if (key && state?.hasProcessed?.(key)) continue
       // A handler failure must leave the marker untouched: the batch is retried
       // and already handled updates are skipped by their dedupe keys.
-      await handleUpdate(update)
-      if (key) state?.markProcessed?.(key)
-      handled += 1
+      if (await applyUpdate(update)) handled += 1
     }
     if (response?.marker !== undefined) state?.setMarker?.(response.marker)
     if (updates.length > 0) runtime?.healthUpdate?.({ lastUpdateAt: Date.now() })
@@ -921,13 +936,17 @@ export function createBot({
   }
 
   async function start() {
-    if (disposed || !config.polling || config.interactive === false) return
+    if (disposed || config.interactive === false) return
     if (!config.botToken) return
     if (config.chatId === undefined && config.userId === undefined) return
+    void registerCommands()
+    if (!config.polling) {
+      logger?.info?.('MAX long polling is disabled (webhook transport)')
+      return
+    }
     if (typeof client.getUpdates !== 'function') return
     if (running) return
     running = true
-    void registerCommands()
     void pollLoop()
     logger?.info?.('MAX polling started (long poll)')
   }
@@ -948,6 +967,8 @@ export function createBot({
     stop,
     pollOnce,
     handleUpdate,
+    applyUpdate,
+    updateKey,
     handleCommand,
     noteSession,
     isAllowed,

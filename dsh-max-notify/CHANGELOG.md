@@ -4,6 +4,37 @@ All notable changes to `dsh-max-notify` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] — 2026-11-09
+
+«Production-транспорт»: webhook-режим MAX + публикация npm.
+
+### Added
+
+- **Webhook-транспорт** (opt-in, `transport: webhook`): маршрут
+  `/max/webhook` регистрируется через `webServer.register`, secret
+  `X-Max-Bot-Api-Secret` проверяется в constant-time, тело ограничено 1 МиБ,
+  ответ `200` после durable-записи обновления.
+- **Durable webhook queue** в `state.json`: обновление сохраняется до ответа,
+  обрабатывается идемпотентно (общий dedupe с polling), очередь переживает
+  reload/рестарт; при ошибке MAX получает `503` и повторяет доставку.
+- **Управление подпиской**: `GET/POST /subscriptions` в транспорте; авто-подписка
+  на старте (`webhookPublicUrl`, `webhookSecret`, `webhookAutoSubscribe`),
+  опциональная отписка на остановке; CLI `tools/webhook.mjs status|subscribe|unsubscribe`.
+- `/health` показывает transport, состояние webhook-подписки и глубину очереди.
+- `bot_admin_permissions_changed` в update_types; fallback на long polling, если
+  webServer/secret/URL не сконфигурированы.
+- **npm**: `dsh-max-notify@0.9.0` (публикация 0.8.0 выполнена ранее).
+
+### Changed
+
+- `package.json` 0.9.0; в пакет добавлены `lib/webhook.mjs` и `tools/webhook.mjs`.
+
+### Tests
+
+200 unit/integration tests (was 187): webhook handler (secret/method/body/limits/
+503), durable queue, index route registration + idempotent processing, subscription
+helpers.
+
 ## [0.8.0] — 2026-11-09
 
 «Стоимость и бюджет»: read-only интеграция с `dsh-cost-meter`.

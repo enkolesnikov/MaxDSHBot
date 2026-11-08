@@ -40,6 +40,7 @@ import { createOutbox, resolveOutboxFile } from './lib/outbox.mjs'
 import { createHealth } from './lib/health.mjs'
 import { createAudit, resolveAuditFile } from './lib/audit.mjs'
 import { createCostMeter, resolveCostLedgerFile } from './lib/cost-meter.mjs'
+import { createWebhookHandler, ensureWebhookSubscription, removeWebhookSubscription } from './lib/webhook.mjs'
 import { wrapLogger } from './lib/redact.mjs'
 
 export const name = 'dsh-max-notify'
@@ -138,6 +139,15 @@ const DEFAULTS = {
   costMeterFile: undefined,
   budgetAlertEnabled: true,
   budgetAlertThresholds: [80, 100],
+  // transport (v0.9)
+  transport: 'polling',
+  webhookPath: '/max/webhook',
+  webhookSecret: undefined,
+  webhookPublicUrl: undefined,
+  webhookUpdateTypes: 'message_created,message_callback,bot_started,bot_added,bot_removed,bot_admin_permissions_changed',
+  webhookAutoSubscribe: true,
+  webhookRemoveOnStop: false,
+  webhookQueueMax: 200,
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -281,6 +291,16 @@ export function normalizeConfig(raw = {}) {
     costMeterFile: String(merged.costMeterFile || env.MAX_NOTIFY_COST_FILE || '').trim() || undefined,
     budgetAlertEnabled: asBoolean(merged.budgetAlertEnabled, DEFAULTS.budgetAlertEnabled),
     budgetAlertThresholds: asIntArray(merged.budgetAlertThresholds, DEFAULTS.budgetAlertThresholds),
+    transport: merged.transport === 'webhook' ? 'webhook' : 'polling',
+    webhookSecret: String(merged.webhookSecret || env.MAX_NOTIFY_WEBHOOK_SECRET || '').trim() || undefined,
+    webhookPublicUrl: String(merged.webhookPublicUrl || env.MAX_NOTIFY_WEBHOOK_URL || '').trim() || undefined,
+    webhookUpdateTypes:
+      typeof merged.webhookUpdateTypes === 'string' && merged.webhookUpdateTypes.trim() !== ''
+        ? merged.webhookUpdateTypes.trim()
+        : DEFAULTS.webhookUpdateTypes,
+    webhookAutoSubscribe: asBoolean(merged.webhookAutoSubscribe, DEFAULTS.webhookAutoSubscribe),
+    webhookRemoveOnStop: asBoolean(merged.webhookRemoveOnStop, DEFAULTS.webhookRemoveOnStop),
+    webhookQueueMax: asInteger(merged.webhookQueueMax, DEFAULTS.webhookQueueMax, 1, 5000),
   }
 
   const format = typeof config.format === 'string' ? config.format.trim().toLowerCase() : ''
@@ -288,6 +308,10 @@ export function normalizeConfig(raw = {}) {
   const channel = (value) => (value === 'max' || value === 'gui' || value === 'both' ? value : 'both')
   config.approvalChannel = channel(merged.approvalChannel)
   config.questionChannel = channel(merged.questionChannel)
+
+  const rawWebhookPath = String(merged.webhookPath ?? '').trim() || DEFAULTS.webhookPath
+  const withSlash = rawWebhookPath.startsWith('/') ? rawWebhookPath : `/${rawWebhookPath}`
+  config.webhookPath = withSlash.replace(/\/+$/, '') || DEFAULTS.webhookPath
 
   config.allowedUserIds = asStringArray(merged.allowedUserIds ?? env.MAX_ALLOWED_USER_IDS, DEFAULTS.allowedUserIds)
   config.allowedChatIds = asStringArray(merged.allowedChatIds ?? env.MAX_ALLOWED_CHAT_IDS, DEFAULTS.allowedChatIds)
@@ -991,6 +1015,105 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     },
   })
 
+  // ── webhook transport (v0.9) ────────────────────────────────────────────
+  let webhookRouteDispose
+  let webhookActive = false
+  let webhookDraining = false
+  let webhookRetryTimer
+  let webhookSubscribed = false
+  let webhookSubscriptionError
+
+  async function drainWebhookQueue() {
+    if (webhookDraining || !webhookActive) return
+    webhookDraining = true
+    try {
+      for (;;) {
+        const queue = state.getWebhookQueue()
+        if (queue.length === 0) break
+        const entry = queue[0]
+        try {
+          await bot.applyUpdate(entry.update)
+        } catch (error) {
+          logger.warn('cannot process a webhook update: %s', error?.message || String(error))
+          health.fail(error)
+          break
+        }
+        const next = state.getWebhookQueue()
+        next.shift()
+        state.setWebhookQueue(next)
+        state.save()
+        health.update({ webhookQueueDepth: next.length, webhookLastProcessedAt: Date.now() })
+      }
+    } finally {
+      webhookDraining = false
+      health.update({ webhookQueueDepth: state.getWebhookQueue().length })
+    }
+  }
+
+  /** Persist one MAX update durably, then answer 200; processing follows. */
+  async function acceptWebhookUpdate(update) {
+    const key = bot.updateKey?.(update)
+    if (key && state.hasProcessed(key)) return
+    const queue = state.getWebhookQueue()
+    if (key && queue.some((entry) => entry.key === key)) return
+    if (queue.length >= config.webhookQueueMax) throw new Error('webhook queue is full')
+    queue.push({ key, update, at: Date.now() })
+    state.setWebhookQueue(queue)
+    state.save()
+    health.update({ webhookLastAt: Date.now(), webhookQueueDepth: queue.length })
+    void drainWebhookQueue()
+  }
+
+  function setupWebhook() {
+    if (config.transport !== 'webhook') return false
+    if (!config.interactive) {
+      logger.info('webhook transport skipped: interactive remote control is off')
+      return false
+    }
+    if (!config.webhookSecret) {
+      logger.warn('webhook transport requested without webhookSecret; falling back to long polling')
+      return false
+    }
+    const webServer = getService('webServer')
+    if (!webServer?.register) {
+      logger.warn('webhook transport requested but the DSH webServer service is unavailable; falling back to long polling')
+      return false
+    }
+    try {
+      const handler = createWebhookHandler({
+        secret: config.webhookSecret,
+        accept: acceptWebhookUpdate,
+        logger,
+      })
+      webhookRouteDispose = webServer.register({ kind: 'exact', path: config.webhookPath, handler })
+      webhookActive = true
+      config.polling = false
+      health.update({ transport: 'webhook', webhookPath: config.webhookPath, webhookActive: true })
+      logger.info('MAX webhook route registered: %s', config.webhookPath)
+      return true
+    } catch (error) {
+      logger.warn('cannot register the MAX webhook route %s: %s; falling back to long polling', config.webhookPath, error?.message || String(error))
+      config.polling = true
+      return false
+    }
+  }
+
+  webhookActive = setupWebhook()
+
+  async function startWebhookSubscription() {
+    if (!webhookActive || !config.webhookAutoSubscribe) return
+    const result = await ensureWebhookSubscription({
+      client,
+      url: config.webhookPublicUrl,
+      secret: config.webhookSecret,
+      updateTypes: config.webhookUpdateTypes,
+      logger,
+    })
+    webhookSubscribed = result.ok === true
+    webhookSubscriptionError = result.ok ? undefined : result.reason
+    health.update({ webhookSubscribed, webhookSubscriptionError })
+  }
+
   /** Paths already sent to MAX by the deliverables pipeline (per session). */
   const imagesSent = new Map()
 
@@ -1303,12 +1426,28 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     ctx.effect(() => {
       outbox?.start()
       void bot.start()
+      if (webhookActive) {
+        void drainWebhookQueue()
+        void startWebhookSubscription()
+        webhookRetryTimer = setInterval(() => {
+          void drainWebhookQueue()
+        }, 30_000)
+        webhookRetryTimer.unref?.()
+      }
       observer.start()
       writeHeartbeat()
       const healthTimer = setInterval(writeHeartbeat, 60_000)
       healthTimer.unref?.()
       return () => {
         clearInterval(healthTimer)
+        if (webhookRetryTimer) {
+          clearInterval(webhookRetryTimer)
+          webhookRetryTimer = undefined
+        }
+        webhookRouteDispose?.()
+        if (webhookActive && config.webhookRemoveOnStop && config.webhookPublicUrl) {
+          void removeWebhookSubscription({ client, url: config.webhookPublicUrl, logger })
+        }
         bot.stop()
         observer.dispose()
         progress.dispose()
@@ -1338,6 +1477,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     config.interactive ? '; remote control on' : '; remote control off',
     config.outboxEnabled ? '; outbox on' : '',
     config.costMeterEnabled ? '; cost-meter on' : '',
+    webhookActive ? `; webhook ${config.webhookPath}` : '; long polling',
     config.digestEnabled ? `; digest at ${config.digestTime}` : '',
   )
 

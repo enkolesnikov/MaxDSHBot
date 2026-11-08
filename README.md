@@ -18,7 +18,7 @@
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/enkolesnikov/MaxDSHBot?style=flat-square"/></a>
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img alt="DSH" src="https://img.shields.io/badge/DSH-0.2.x-6C5CE7?style=flat-square"/></a>
   <a href="https://max.ru"><img alt="MAX" src="https://img.shields.io/badge/MAX-messenger-8B5CF6?style=flat-square"/></a>
-  <img alt="Tests" src="https://img.shields.io/badge/tests-187%20passed-2ecc71?style=flat-square"/>
+  <img alt="Tests" src="https://img.shields.io/badge/tests-200%20passed-2ecc71?style=flat-square"/>
   <a href="https://nodejs.org"><img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A524.9-339933?style=flat-square&logo=nodedotjs&logoColor=white"/></a>
   <img alt="Runtime dependencies" src="https://img.shields.io/badge/runtime%20deps-0-brightgreen?style=flat-square"/>
   <a href="https://github.com/enkolesnikov/MaxDSHBot/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/enkolesnikov/MaxDSHBot?style=flat-square"/></a>
@@ -155,6 +155,34 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 Текст без `/` уходит агенту как следующее сообщение. Под финальным ответом —
 кнопки «Продолжить», «Стоп», «Открыть GUI» и настраиваемые пресеты.
 
+## Webhook (production-транспорт)
+
+По умолчанию работает long polling. Для production можно включить webhook —
+MAX будет сам присылать обновления на публичный HTTPS-эндпоинт:
+
+```yaml
+- id: max-notify
+  config:
+    transport: webhook
+    webhookPath: /max/webhook
+    webhookPublicUrl: https://example.com/max/webhook
+    webhookSecret: ${MAX_NOTIFY_WEBHOOK_SECRET}   # 5–256 символов [A-Za-z0-9_-]
+    webhookAutoSubscribe: true
+```
+
+1. `webServer.register` добавляет точный маршрут в уже работающий DSH HTTP-сервер
+   (nginx с Let's Encrypt терминирует 443 и проксирует на DSH).
+2. MAX проверяет TLS-цепочку, домен и secret-заголовок; каждое обновление
+   сначала сохраняется в durable-очередь `state.json`, потом отвечаем `200`.
+3. Обработка идемпотентная (общий dedupe с polling), при сбое — `503`, MAX
+   повторит; после 8 часов неудач отписка автоматическая.
+4. Подписка управляется автоматически (`GET/POST /subscriptions`), вручную:
+   `node tools/webhook.mjs status|subscribe|unsubscribe --env ../.env`.
+
+Если webServer/secret/public URL не сконфигурированы, плагин откатывается на
+long polling и пишет warning в лог. Официальная документация MAX:
+[webhooks](https://dev.max.ru/docs-api/methods/POST/subscriptions).
+
 ## Надёжность и безопасность
 
 - **Durable outbox** — финальные ответы и уведомления переживают недоступность MAX и reload; retry с backoff, TTL, приоритеты, дедуп по `session:turn:seq`.
@@ -211,6 +239,12 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 | `heartbeatFile` | — | JSON здоровья для мониторинга |
 | `costMeterEnabled` / `costMeterFile` | `true` / `$DSH_HOME/storages/cost-meter/ledger.json` | read-only адаптер стоимости |
 | `budgetAlertEnabled` / `budgetAlertThresholds` | `true` / `[80, 100]` | алерты бюджета (раз за период) |
+| `transport` | `polling` | `polling` или `webhook` |
+| `webhookPath` / `webhookPublicUrl` | `/max/webhook` / — | маршрут и публичный HTTPS URL |
+| `webhookSecret` | env `MAX_NOTIFY_WEBHOOK_SECRET` | secret-заголовок MAX (обязателен для webhook) |
+| `webhookUpdateTypes` | message_created,… | список типов обновлений для подписки |
+| `webhookAutoSubscribe` / `webhookRemoveOnStop` | `true` / `false` | авто-подписка/отписка MAX |
+| `webhookQueueMax` | `200` | durable-очередь входящих webhook-обновлений |
 
 </details>
 
@@ -230,10 +264,11 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 | `lib/outbox.mjs`, `lib/limits.mjs` | durable-очередь и лимитер |
 | `lib/state.mjs`, `lib/health.mjs`, `lib/audit.mjs`, `lib/redact.mjs` | состояние, health, аудит, секреты |
 | `lib/cost-meter.mjs` | read-only ledger `dsh-cost-meter` |
+| `lib/webhook.mjs` | webhook-обработчик, secret, подписка MAX |
 | `lib/observer.mjs`, `lib/policy.mjs` | события, дайджест, режимы, алерты бюджета |
 | `certs/ca-chain.pem` | Russian Trusted Sub CA + Root CA |
 | `test/` | 187 тестов (`node --test`) |
-| `tools/` | `pair.mjs`, `send-test.mjs`, `smoke.mjs` |
+| `tools/` | `pair.mjs`, `send-test.mjs`, `smoke.mjs`, `webhook.mjs` |
 
 </details>
 
@@ -256,7 +291,7 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 ## Проверка
 
 ```bash
-cd dsh-max-notify && npm test          # 187 unit tests
+cd dsh-max-notify && npm test          # 200 unit tests
 npm run check                          # синтаксис всех модулей
 node tools/smoke.mjs --env ../.env     # read-only: GET /me, state, outbox
 node tools/send-test.mjs "проверка"    # реальная отправка

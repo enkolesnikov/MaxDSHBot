@@ -48,3 +48,9 @@
         # costMeterFile: $DSH_HOME/storages/cost-meter/ledger.json
         # budgetAlertEnabled: true
         # budgetAlertThresholds: [80, 100]
+        # transport: webhook
+        # webhookPath: /max/webhook
+        # webhookPublicUrl: https://example.com/max/webhook
+        # webhookSecret: ${MAX_NOTIFY_WEBHOOK_SECRET}
+        # webhookAutoSubscribe: true
+        # webhookUpdateTypes: message_created,message_callback,bot_started,bot_added,bot_removed,bot_admin_permissions_changed
