@@ -104,6 +104,11 @@ test('SETTINGS_KEYS exposes exactly the safe allowlist with defaults', () => {
     'voiceEndpoint',
     'voiceModel',
     'voiceTranscribe',
+    'voiceTts',
+    'voiceTtsMaxChars',
+    'voiceTtsMode',
+    'voiceTtsModel',
+    'voiceTtsVoice',
   ])
   assert.deepEqual(SETTINGS_KEYS.mode.values, ['all', 'errors', 'mute'])
   assert.equal(SETTINGS_KEYS.tableMaxFiles.min, 0)
@@ -116,6 +121,8 @@ test('SETTINGS_KEYS exposes exactly the safe allowlist with defaults', () => {
   assert.equal(SETTINGS_DEFAULTS.approvalTimeoutMs, 120000)
   assert.equal(SETTINGS_DEFAULTS.nativeIncomingImages, true)
   assert.equal(SETTINGS_DEFAULTS.voiceModel, 'whisper-1')
+  assert.equal(SETTINGS_DEFAULTS.voiceTts, false)
+  assert.equal(SETTINGS_DEFAULTS.voiceTtsMode, 'short')
   assert.deepEqual(SETTINGS_DEFAULTS.buttonsPresets, [])
 })
 
@@ -623,4 +630,33 @@ test('legacy createSettingsApi stays compatible with the DSH client integration'
 test('resolveSettingsFile honors settingsFile and falls back outside the repository', () => {
   assert.equal(resolveSettingsFile({ settingsFile: '/tmp/custom-settings.json' }), '/tmp/custom-settings.json')
   assert.match(resolveSettingsFile({}), /max-notify[\\/]config\.json$/)
+})
+
+test('TTS settings validate and onSave applies them live', async (t) => {
+  const file = join(tempDir(t), 'config.json')
+  const applied = []
+  const api = createSettingsApi({
+    file,
+    getValues: () => ({ voiceTts: false }),
+    onSave: async (values) => {
+      applied.push(values)
+      return { applied: values, restartRequired: false }
+    },
+  })
+  const res = fakeResponse()
+  await api(fakeRequest({
+    method: 'POST',
+    body: { voiceTts: true, voiceTtsMode: 'always', voiceTtsVoice: 'alloy', voiceTtsMaxChars: 900 },
+  }), res)
+  assert.equal(res.statusCode, 200)
+  const payload = JSON.parse(res.body)
+  assert.equal(payload.restartRequired, false)
+  assert.deepEqual(payload.applied, {
+    voiceTts: true,
+    voiceTtsMode: 'always',
+    voiceTtsVoice: 'alloy',
+    voiceTtsMaxChars: 900,
+  })
+  assert.equal(applied.length, 1)
+  assert.equal(loadSettings(file).voiceTts, true)
 })

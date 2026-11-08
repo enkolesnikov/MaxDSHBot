@@ -65,3 +65,10 @@
         # voiceApiKeyFile: /path/to/voice.key
         # voiceModel: whisper-1
         # voiceLanguage: ru
+        # voiceTts: false
+        # voiceTtsMode: short
+        # voiceTtsEndpoint: https://api.openai.com/v1
+        # voiceTtsApiKeyFile: /path/to/tts.key
+        # voiceTtsVoice: alloy
+        # voiceTtsMaxChars: 600
+        # fileSendAllowOutside: false

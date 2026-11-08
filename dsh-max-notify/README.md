@@ -77,6 +77,17 @@ Published on npm: https://www.npmjs.com/package/dsh-max-notify
   budget alerts (80/100 by default) fire once per period and survive reloads.
   `costMeterFile`, `budgetAlertEnabled`, `budgetAlertThresholds` configure it.
 
+## Voice, files and live settings (v1.2)
+
+- **TTS**: `voiceTts` + OpenAI-compatible `/audio/speech`; `/say <text>` and
+  optional auto-speech for short final answers (`voiceTtsMode: off|short|always`).
+  Audio is sent as a separate MAX message; TTS errors never block text.
+- **`/diff [--staged] [path]`**: git diff of the session cwd as `diff.patch`.
+- **`/send <path>`**: send a file from the session cwd (outside the cwd is
+  rejected by default; 25 MiB limit; image/audio/file detected by extension).
+- **Live settings**: allowlisted GUI changes apply without a row restart;
+  transport/webhook/secrets still require a reload.
+
 ## Package layout
 
 | File | Role |
@@ -101,9 +112,11 @@ Published on npm: https://www.npmjs.com/package/dsh-max-notify
 | `lib/schedules.mjs` | `/schedules` helpers |
 | `lib/media.mjs` | incoming images → native image parts |
 | `lib/voice.mjs` | optional STT transcription |
+| `lib/tts.mjs` | TTS synthesis, speakable text, endpoint/key |
+| `lib/workspace-tools.mjs` | git diff and safe file send |
 | `lib/settings.mjs` | GUI settings validation/overlay/API |
 | `client/client.js` | hand-written settings page bundle |
-| `test/*.test.mjs` | `node --test` (316 unit tests) |
+| `test/*.test.mjs` | `node --test` (330 unit tests) |
 
 ## Config
 
@@ -167,8 +180,14 @@ Set in `cordis.patch.yml` (or override the row by id from the profile's own
 | `nativeIncomingImages` | `true` | Incoming images as native image parts |
 | `voiceTranscribe` / `voiceEndpoint` / `voiceApiKey` | `false` / — / env | Optional STT for MAX audio |
 | `settingsPage` / `settingsFile` | `true` / `$DSH_HOME/max-notify/config.json` | GUI settings overlay |
+| `voiceTts` / `voiceTtsMode` | `false` / `short` | Auto TTS mode |
+| `voiceTtsEndpoint` / `voiceTtsApiKey` | env `MAX_NOTIFY_TTS_*` | OpenAI-compatible TTS |
+| `voiceTtsVoice` / `voiceTtsModel` / `voiceTtsMaxChars` | `alloy` / `gpt-4o-mini-tts` / `600` | Voice/model/limit |
+| `fileSendAllowOutside` | `false` | Allow `/send` outside the session cwd |
 
 ## Remote control ("Пульт")
+
+New in 1.2: `/say <text>`, `/diff [--staged] [path]`, `/send <path>`.
 
 Write to the bot in MAX — the text becomes the next prompt of the active
 session (default: most recent session; `/use N` to switch). Commands:

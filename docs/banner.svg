@@ -59,7 +59,7 @@
 
       <rect x="808" y="158" width="300" height="58" rx="14" fill="#1c2140"/>
       <text x="824" y="181" fill="#c9c4ea" font-size="13">Агент · turn 42</text>
-      <text x="824" y="202" fill="#ffffff" font-size="14">готово: тесты 316/316 ✓</text>
+      <text x="824" y="202" fill="#ffffff" font-size="14">готово: тесты 330/330 ✓</text>
 
       <rect x="892" y="230" width="296" height="46" rx="14" fill="#2a1d54" stroke="#6d4bd6"/>
       <text x="908" y="258" fill="#e6ddff" font-size="14">/budget → ¥6.43 · 6.4%</text>
@@ -73,7 +73,7 @@
     </g>
 
     <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
-      <text x="72" y="404" fill="#6f6a91" font-size="13">v1.1.0 · 316 tests · runtime deps 0 · Node ≥24.9 · DSH 0.2.x</text>
+      <text x="72" y="404" fill="#6f6a91" font-size="13">v1.2.0 · 330 tests · runtime deps 0 · Node ≥24.9 · DSH 0.2.x</text>
       <text x="1208" y="404" fill="#6f6a91" font-size="13" text-anchor="end">github.com/enkolesnikov/MaxDSHBot</text>
     </g>
   </g>

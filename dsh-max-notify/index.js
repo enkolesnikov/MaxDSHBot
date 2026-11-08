@@ -41,6 +41,8 @@ import {
 } from './lib/settings.mjs'
 import { readImageParts } from './lib/media.mjs'
 import { transcribeAudio, voiceConfigured, voicePromptText } from './lib/voice.mjs'
+import { shouldSpeak, speakableText, synthesizeSpeech, ttsConfigured } from './lib/tts.mjs'
+import { classifyUploadType, formatBytes, resolveSendFile, runGitDiff } from './lib/workspace-tools.mjs'
 import { createIncoming } from './lib/incoming.mjs'
 import { resolveSessionDir } from './lib/create-session.mjs'
 import { archivedIdsOf, filterArchivedSessions } from './lib/sessions.mjs'
@@ -111,6 +113,17 @@ const DEFAULTS = {
   voiceApiKeyFile: undefined,
   voiceModel: 'whisper-1',
   voiceLanguage: undefined,
+  voiceTts: false,
+  voiceTtsMode: 'short',
+  voiceTtsEndpoint: undefined,
+  voiceTtsApiKey: undefined,
+  voiceTtsApiKeyFile: undefined,
+  voiceTtsModel: 'gpt-4o-mini-tts',
+  voiceTtsVoice: 'alloy',
+  voiceTtsFormat: 'mp3',
+  voiceTtsMaxChars: 600,
+  voiceTtsSpeed: undefined,
+  fileSendAllowOutside: false,
   webUrl: undefined,
   progress: true,
   progressDelayMs: 2500,
@@ -277,6 +290,17 @@ export function normalizeConfig(raw = {}) {
     voiceApiKeyFile: String(merged.voiceApiKeyFile || env.MAX_NOTIFY_VOICE_API_KEY_FILE || '').trim() || undefined,
     voiceModel: String(merged.voiceModel || DEFAULTS.voiceModel).trim() || DEFAULTS.voiceModel,
     voiceLanguage: String(merged.voiceLanguage || env.MAX_NOTIFY_VOICE_LANGUAGE || '').trim() || undefined,
+    voiceTts: asBoolean(merged.voiceTts, DEFAULTS.voiceTts),
+    voiceTtsMode: ['off', 'short', 'always'].includes(merged.voiceTtsMode) ? merged.voiceTtsMode : DEFAULTS.voiceTtsMode,
+    voiceTtsEndpoint: String(merged.voiceTtsEndpoint || env.MAX_NOTIFY_TTS_ENDPOINT || '').trim() || undefined,
+    voiceTtsApiKey: String(merged.voiceTtsApiKey || env.MAX_NOTIFY_TTS_API_KEY || '').trim() || undefined,
+    voiceTtsApiKeyFile: String(merged.voiceTtsApiKeyFile || env.MAX_NOTIFY_TTS_API_KEY_FILE || '').trim() || undefined,
+    voiceTtsModel: String(merged.voiceTtsModel || DEFAULTS.voiceTtsModel).trim() || DEFAULTS.voiceTtsModel,
+    voiceTtsVoice: String(merged.voiceTtsVoice || DEFAULTS.voiceTtsVoice).trim() || DEFAULTS.voiceTtsVoice,
+    voiceTtsFormat: ['mp3', 'opus', 'aac', 'flac', 'wav'].includes(merged.voiceTtsFormat) ? merged.voiceTtsFormat : DEFAULTS.voiceTtsFormat,
+    voiceTtsMaxChars: asInteger(merged.voiceTtsMaxChars, DEFAULTS.voiceTtsMaxChars, 20, 2000),
+    voiceTtsSpeed: Number.isFinite(Number(merged.voiceTtsSpeed)) ? Math.min(4, Math.max(0.25, Number(merged.voiceTtsSpeed))) : undefined,
+    fileSendAllowOutside: asBoolean(merged.fileSendAllowOutside, DEFAULTS.fileSendAllowOutside),
     progress: asBoolean(merged.progress, DEFAULTS.progress),
     typing: asBoolean(merged.typing, DEFAULTS.typing),
     deliverables: asBoolean(merged.deliverables, DEFAULTS.deliverables),
@@ -413,6 +437,13 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       config.botToken = readTokenFile(config.botTokenFile)
     } catch (error) {
       logger.warn('cannot read botTokenFile %s: %s', config.botTokenFile, error?.message || String(error))
+    }
+  }
+  if (config.enabled && !config.voiceTtsApiKey && config.voiceTtsApiKeyFile) {
+    try {
+      config.voiceTtsApiKey = readTokenFile(config.voiceTtsApiKeyFile)
+    } catch (error) {
+      logger.warn('cannot read voiceTtsApiKeyFile %s: %s', config.voiceTtsApiKeyFile, error?.message || String(error))
     }
   }
   if (config.enabled && !config.voiceApiKey && config.voiceApiKeyFile) {
@@ -885,6 +916,9 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       tableFiles: config.tableFiles,
       approvalTimeoutMs: config.approvalTimeoutMs,
       receiveFiles: config.receiveFiles,
+      voiceTranscribe: config.voiceTranscribe,
+      voiceTts: config.voiceTts,
+      voiceTtsMode: config.voiceTtsMode,
       outboxEnabled: config.outboxEnabled,
       costMeterEnabled: config.costMeterEnabled,
       budgetAlertEnabled: config.budgetAlertEnabled,
@@ -910,6 +944,11 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       voiceTranscribe: config.voiceTranscribe,
       voiceEndpoint: config.voiceEndpoint,
       voiceModel: config.voiceModel,
+      voiceTts: config.voiceTts,
+      voiceTtsMode: config.voiceTtsMode,
+      voiceTtsVoice: config.voiceTtsVoice,
+      voiceTtsModel: config.voiceTtsModel,
+      voiceTtsMaxChars: config.voiceTtsMaxChars,
       buttonsPresets: config.buttonsPresets,
     }
   }
@@ -928,6 +967,130 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
 
   function setPreferredWorkspace(path) {
     preferredWorkspacePath = typeof path === 'string' && path !== '' ? path : undefined
+  }
+
+  function targetParams(extra = {}) {
+    return {
+      chatId: config.chatId,
+      userId: config.chatId === undefined ? config.userId : undefined,
+      format: config.format,
+      notify: config.notify,
+      disableLinkPreview: config.disableLinkPreview,
+      ...extra,
+    }
+  }
+
+  async function uploadAndSendAudio({ buffer, format = 'mp3', caption = '🔊', dedupeKey } = {}) {
+    const uploaded = await client.uploadMedia({ buffer, filename: `speech.${format}`, type: 'audio' })
+    if (!uploaded?.token) return { ok: false, error: 'MAX upload returned no audio token' }
+    try {
+      if (config.chatId !== undefined && typeof client.sendAction === 'function') {
+        await client.sendAction(config.chatId, 'sending_audio')
+      }
+    } catch {
+      // action is cosmetic
+    }
+    const params = targetParams({
+      text: caption,
+      attachments: [{ type: 'audio', payload: { token: uploaded.token } }],
+    })
+    if (outbox) {
+      const result = await outbox.deliverNow(params, { dedupeKey, kind: 'tts' })
+      return result?.queued ? { ok: false, error: result.error, queued: true } : { ok: true }
+    }
+    await client.sendMessage(params)
+    return { ok: true }
+  }
+
+  async function say(text) {
+    const value = String(text ?? '').trim()
+    if (value === '') return { ok: false, error: 'пустой текст' }
+    const check = ttsConfigured(config)
+    if (!check.ok) return { ok: false, error: `TTS не настроен: ${check.reason}` }
+    const result = await synthesizeSpeech({
+      text: value,
+      endpoint: config.voiceTtsEndpoint || config.voiceEndpoint,
+      apiKey: config.voiceTtsApiKey || config.voiceApiKey,
+      model: config.voiceTtsModel,
+      voice: config.voiceTtsVoice,
+      format: config.voiceTtsFormat,
+      speed: config.voiceTtsSpeed,
+      maxChars: Math.max(1000, config.voiceTtsMaxChars),
+    })
+    if (!result.ok) return { ok: false, error: result.error }
+    try {
+      return await uploadAndSendAudio({ buffer: result.buffer, format: config.voiceTtsFormat, caption: '🔊' })
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) }
+    }
+  }
+
+  async function diffSession(sessionId, { staged = false, path } = {}) {
+    const info = await statusInfo(sessionId)
+    if (!info?.cwd) return { ok: false, error: 'рабочая папка сессии недоступна' }
+    const result = await runGitDiff({ cwd: info.cwd, staged, path })
+    if (!result.ok) return result
+    if (result.empty) return { ok: true, empty: true }
+    try {
+      const uploaded = await client.uploadMedia({
+        buffer: Buffer.from(result.diff, 'utf8'),
+        filename: 'diff.patch',
+        type: 'file',
+      })
+      await client.sendMessage(targetParams({
+        text: `📄 git diff${staged ? ' (staged)' : ''}: ${result.bytes} байт${result.truncated ? ' (усечён)' : ''}`,
+        attachments: [{ type: 'file', payload: { token: uploaded.token } }],
+      }))
+      return { ok: true, bytes: result.bytes, truncated: result.truncated }
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) }
+    }
+  }
+
+  async function sendFileFromSession(sessionId, arg) {
+    const info = await statusInfo(sessionId)
+    if (!info?.cwd) return { ok: false, error: 'рабочая папка сессии недоступна' }
+    const resolved = resolveSendFile({ cwd: info.cwd, arg, allowOutside: config.fileSendAllowOutside })
+    if (!resolved.ok) return resolved
+    try {
+      const uploaded = await client.uploadMedia({
+        filePath: resolved.path,
+        filename: resolved.name,
+        type: resolved.type,
+      })
+      await client.sendMessage(targetParams({
+        text: `📎 ${resolved.name} · ${formatBytes(resolved.bytes)}`,
+        attachments: [{
+          type: resolved.type === 'image' ? 'image' : resolved.type === 'audio' ? 'audio' : 'file',
+          payload: { token: uploaded.token },
+        }],
+      }))
+      return { ok: true, name: resolved.name, bytes: resolved.bytes }
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) }
+    }
+  }
+
+  /** Apply allowlisted settings to the live config without a row restart. */
+  function applyRuntimeSettings(values = {}) {
+    const safe = [
+      'mode', 'digestEnabled', 'digestTime', 'quietHours', 'notify', 'progress', 'typing',
+      'threads', 'tableFiles', 'tableMaxFiles', 'approvalTimeoutMs', 'receiveFiles',
+      'nativeIncomingImages', 'voiceTranscribe', 'voiceTts', 'voiceTtsMode', 'voiceTtsVoice',
+      'voiceTtsModel', 'voiceTtsMaxChars', 'buttonsPresets',
+    ]
+    const applied = {}
+    const restartRequired = []
+    for (const key of Object.keys(values)) {
+      if (!safe.includes(key)) {
+        restartRequired.push(key)
+        continue
+      }
+      config[key] = values[key]
+      applied[key] = values[key]
+      if (key === 'mode') state.setMode?.(values[key])
+    }
+    return { applied, restartRequired: restartRequired.length > 0 }
   }
 
   async function promptSessionRich(sessionId, text, { imagePaths = [] } = {}) {
@@ -1166,6 +1329,9 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       setApprovalPolicy,
       scheduleService: () => getService('schedule'),
       settingsSummary,
+      say,
+      diffSession,
+      sendFileFromSession,
       costSnapshot: () => costMeter?.snapshot(),
       costForSession: (sessionId) => costMeter?.sessionCost(sessionId),
       budgetStatus: () => costMeter?.budgetStatus(),
@@ -1271,6 +1437,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       getValues: settingsValues,
       getStatus: settingsStatus,
       getVersion: () => VERSION,
+      onSave: applyRuntimeSettings,
       logger,
     })
     try {
@@ -1450,6 +1617,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
         : undefined
     const finalKey = `final:${session?.id ?? 'unknown'}:${turn ?? 'na'}:${seq ?? 'na'}`
     let threadMid = config.threads ? state.getAnchor?.(session.id) : undefined
+    let queuedAny = false
     for (const [index, chunk] of chunks.entries()) {
       const isLast = index === chunks.length - 1
       const params = {
@@ -1467,6 +1635,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
         const result = await outbox.deliverNow(params, { dedupeKey: `${finalKey}:c${index}`, kind: 'final' })
         if (result?.skipped) continue
         if (result?.queued) {
+          queuedAny = true
           logger.warn('MAX is unavailable; final reply chunk %d queued: %s', index + 1, result.error)
           continue
         }
@@ -1483,6 +1652,36 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
         }
       }
       logger.debug('MAX message sent%s', mid ? ` (mid ${mid})` : '')
+    }
+    if (config.voiceTts && !queuedAny) {
+      const speak = shouldSpeak(text, config)
+      if (speak.ok) {
+        try {
+          const audio = await synthesizeSpeech({
+            text,
+            endpoint: config.voiceTtsEndpoint || config.voiceEndpoint,
+            apiKey: config.voiceTtsApiKey || config.voiceApiKey,
+            model: config.voiceTtsModel,
+            voice: config.voiceTtsVoice,
+            format: config.voiceTtsFormat,
+            speed: config.voiceTtsSpeed,
+            maxChars: config.voiceTtsMaxChars,
+          })
+          if (audio.ok) {
+            const result = await uploadAndSendAudio({
+              buffer: audio.buffer,
+              format: config.voiceTtsFormat,
+              caption: '🔊',
+              dedupeKey: `tts:${finalKey}`,
+            })
+            if (!result.ok) logger.warn('cannot send TTS audio: %s', result.error)
+          } else {
+            logger.warn('TTS failed: %s', audio.error)
+          }
+        } catch (error) {
+          logger.warn('TTS failed: %s', error?.message || String(error))
+        }
+      }
     }
     bot.noteSession?.(String(session.id))
   }

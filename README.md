@@ -18,7 +18,7 @@
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/enkolesnikov/MaxDSHBot?style=flat-square"/></a>
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img alt="DSH" src="https://img.shields.io/badge/DSH-0.2.x-6C5CE7?style=flat-square"/></a>
   <a href="https://max.ru"><img alt="MAX" src="https://img.shields.io/badge/MAX-messenger-8B5CF6?style=flat-square"/></a>
-  <img alt="Tests" src="https://img.shields.io/badge/tests-316%20passed-2ecc71?style=flat-square"/>
+  <img alt="Tests" src="https://img.shields.io/badge/tests-330%20passed-2ecc71?style=flat-square"/>
   <a href="https://nodejs.org"><img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A524.9-339933?style=flat-square&logo=nodedotjs&logoColor=white"/></a>
   <img alt="Runtime dependencies" src="https://img.shields.io/badge/runtime%20deps-0-brightgreen?style=flat-square"/>
   <a href="https://github.com/enkolesnikov/MaxDSHBot/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/enkolesnikov/MaxDSHBot?style=flat-square"/></a>
@@ -183,6 +183,17 @@ MAX будет сам присылать обновления на публич�
 long polling и пишет warning в лог. Официальная документация MAX:
 [webhooks](https://dev.max.ru/docs-api/methods/POST/subscriptions).
 
+## Голос и инструменты (v1.2)
+
+- **`/say <текст>`** — озвучить текст; **авто-TTS** коротких финальных ответов
+  (`voiceTts`, `voiceTtsMode: off|short|always`) через OpenAI-совместимый
+  `/audio/speech`; аудио уходит отдельным сообщением, ошибки TTS не мешают тексту.
+- **`/diff [--staged] [путь]`** — git diff папки сессии файлом `diff.patch`.
+- **`/send <путь>`** — отправить файл из папки сессии; выход за cwd запрещён,
+  лимит 25 МиБ, тип вложения по расширению.
+- **Настройки применяются без рестарта**: mode/дайджест/тихие часы/reply-ветки/
+  таблицы/TTS/approvals и др. — через GUI; transport/секреты — после перезагрузки.
+
 ## GUI-настройки, голос, нативные изображения (v1.1)
 
 - **Страница настроек в GUI**: DSH → Plugins → `dsh-max-notify` — форма для
@@ -204,6 +215,7 @@ long polling и пишет warning в лог. Официальная докум�
   и `table-N.md`, текст ответа заменяется плейсхолдером (MAX не рендерит таблицы).
 - **`/schedules`**: список задач, `pause`/`resume N`, `cancel N` с подтверждением.
 - **Forwarded-сообщения** из MAX разворачиваются и передаются агенту.
+- **`/say`**, **`/diff`**, **`/send`** — озвучка, git-diff и отправка файлов.
 - **`/settings`**: снимок эффективных настроек (transport, режим, allowlist,
   таймауты, фичи) без секретов.
 - Полный GUI-редактор настроек, голос и нативные входящие изображения — в 1.1.
@@ -276,6 +288,10 @@ long polling и пишет warning в лог. Официальная докум�
 | `voiceTranscribe` / `voiceEndpoint` / `voiceApiKey` | `false` / — / env `MAX_NOTIFY_VOICE_API_KEY` | STT для голосовых MAX |
 | `voiceApiKeyFile` / `voiceModel` / `voiceLanguage` | — / `whisper-1` / — | ключ из файла, модель и язык STT |
 | `settingsPage` / `settingsFile` | `true` / `$DSH_HOME/max-notify/config.json` | GUI-настройки (overlay, 0600) |
+| `voiceTts` / `voiceTtsMode` | `false` / `short` | авто-TTS (off/short/always) |
+| `voiceTtsEndpoint` / `voiceTtsApiKey` | env `MAX_NOTIFY_TTS_*` | OpenAI-совместимый TTS |
+| `voiceTtsVoice` / `voiceTtsModel` / `voiceTtsMaxChars` | `alloy` / `gpt-4o-mini-tts` / `600` | голос, модель, лимит |
+| `fileSendAllowOutside` | `false` | разрешить `/send` вне cwd сессии |
 
 </details>
 
@@ -301,6 +317,8 @@ long polling и пишет warning в лог. Официальная докум�
 | `lib/media.mjs` | входящие изображения → native image parts |
 | `lib/voice.mjs` | опциональная STT-расшифровка аудио |
 | `lib/settings.mjs` | GUI-настройки: валидация, overlay, JSON API |
+| `lib/tts.mjs` | TTS-синтез, очистка текста, endpoint/key |
+| `lib/workspace-tools.mjs` | git diff и безопасная отправка файлов |
 | `client/client.js` | клиентская страница настроек (без сборки) |
 | `lib/observer.mjs`, `lib/policy.mjs` | события, дайджест, режимы, алерты бюджета |
 | `certs/ca-chain.pem` | Russian Trusted Sub CA + Root CA |
@@ -328,7 +346,7 @@ long polling и пишет warning в лог. Официальная докум�
 ## Проверка
 
 ```bash
-cd dsh-max-notify && npm test          # 316 unit tests
+cd dsh-max-notify && npm test          # 330 unit tests
 npm run check                          # синтаксис всех модулей
 node tools/smoke.mjs --env ../.env     # read-only: GET /me, state, outbox
 node tools/send-test.mjs "проверка"    # реальная отправка

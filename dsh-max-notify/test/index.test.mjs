@@ -771,7 +771,45 @@ test('the settings API route is registered and persists the overlay', async () =
   await route.handler(postReq, postRes)
   assert.equal(postRes.statusCode, 200)
   const saved = JSON.parse(postRes.body)
-  assert.equal(saved.restartRequired, true)
+  assert.equal(saved.restartRequired, false)
   assert.equal(saved.values.mode, 'mute')
   assert.equal(saved.values.threads, false)
+  assert.equal(saved.applied.mode, 'mute')
+})
+
+test('a short final answer is also spoken when TTS is enabled', async () => {
+  const originalFetch = globalThis.fetch
+  let ttsRequests = 0
+  globalThis.fetch = async () => {
+    ttsRequests += 1
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'audio/mpeg' },
+      async arrayBuffer() { return new Uint8Array([1, 2, 3]).buffer },
+    }
+  }
+  try {
+    const { ctx, emit } = createFakeCtx()
+    const client = createFakeClient()
+    apply(ctx, {
+      botToken: 't',
+      chatId: '123456789',
+      voiceTts: true,
+      voiceTtsMode: 'always',
+      voiceTtsEndpoint: 'https://tts.example.test/v1',
+      voiceTtsApiKey: 'k',
+    }, { createClient: () => client })
+    const s = session()
+    emit('session/event', s, evt('turn/start', { turn: 1 }))
+    emit('session/event', s, assistantEvent(1, 1, 'Короткий ответ'))
+    emit('session/event', s, evt('turn/end', { turn: 1, reason: { kind: 'completed' } }))
+    await tick(30)
+    assert.equal(ttsRequests, 1)
+    const audio = client.sent.find((item) => item.attachments?.[0]?.type === 'audio')
+    assert.ok(audio)
+    assert.equal(client.uploads.at(-1).type, 'audio')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
 })

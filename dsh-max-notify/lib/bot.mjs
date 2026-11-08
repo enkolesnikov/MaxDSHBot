@@ -54,6 +54,9 @@ const COMMANDS = [
   { name: 'approve', description: 'Политика подтверждений' },
   { name: 'schedules', description: 'Расписания: /schedules [pause|resume|cancel N]' },
   { name: 'settings', description: 'Эффективные настройки плагина' },
+  { name: 'say', description: 'Озвучить текст: /say <текст>' },
+  { name: 'diff', description: 'Git diff сессии файлом: /diff [--staged] [путь]' },
+  { name: 'send', description: 'Отправить файл из папки сессии: /send <путь>' },
   { name: 'health', description: 'Здоровье плагина и очередь' },
   { name: 'version', description: 'Версия плагина' },
   { name: 'ping', description: 'Проверка отклика' },
@@ -726,6 +729,46 @@ export function createBot({
         }
         await observer.sendDigest()
         await reply(chatId, '📊 Дайджест отправлен.')
+        return true
+      }
+      case 'say': {
+        if (arg === '') {
+          await reply(chatId, 'Использование: `/say <текст>` — пришлю голосовое сообщение.')
+          return true
+        }
+        const result = await runtime.say?.(arg)
+        await reply(chatId, result?.ok ? '🔊 Озвучено.' : `❌ ${result?.error ?? 'TTS недоступен'}`)
+        return true
+      }
+      case 'diff': {
+        const sessionId = await activeSession(chatId)
+        if (!sessionId) {
+          await reply(chatId, 'Нет активной сессии.')
+          return true
+        }
+        const tokens = arg.split(/\s+/).filter(Boolean)
+        const staged = tokens.includes('--staged')
+        const path = tokens.filter((token) => token !== '--staged').join(' ').trim() || undefined
+        const result = await runtime.diffSession?.(sessionId, { staged, path })
+        if (!result?.ok) await reply(chatId, `❌ ${result?.error ?? 'git diff недоступен'}`)
+        else if (result.empty) await reply(chatId, '📄 Изменений нет.')
+        else await reply(chatId, `📄 Diff: ${result.bytes} байт${result.truncated ? ' (усечён)' : ''} — файл во вложении.`)
+        return true
+      }
+      case 'send': {
+        const sessionId = await activeSession(chatId)
+        if (!sessionId) {
+          await reply(chatId, 'Нет активной сессии.')
+          return true
+        }
+        if (arg === '') {
+          await reply(chatId, 'Использование: `/send <путь внутри папки сессии>`')
+          return true
+        }
+        const result = await runtime.sendFileFromSession?.(sessionId, arg)
+        await reply(chatId, result?.ok
+          ? `📎 Отправлено: ${result.name} (${formatBytes(result.bytes)})`
+          : `❌ ${result?.error ?? 'не удалось отправить файл'}`)
         return true
       }
       default: {

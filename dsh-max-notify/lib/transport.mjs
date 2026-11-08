@@ -439,7 +439,10 @@ export function createMaxClient(options = {}) {
 
   /** Guess a MAX upload type from a file name. */
   function uploadTypeFor(filePath) {
-    return IMAGE_EXTENSIONS.has(extname(String(filePath)).toLowerCase()) ? 'image' : 'file'
+    const extension = extname(String(filePath)).toLowerCase()
+    if (IMAGE_EXTENSIONS.has(extension)) return 'image'
+    if (AUDIO_EXTENSIONS.has(extension)) return 'audio'
+    return 'file'
   }
 
   /**

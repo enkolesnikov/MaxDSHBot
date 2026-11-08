@@ -200,6 +200,9 @@ export function formatHelpCard() {
     '`/budget` — стоимость и бюджет',
     '`/schedules` — запланированные задачи (pause/resume/cancel)',
     '`/digest` — дайджест сейчас',
+    '`/say <текст>` — озвучить текст голосом',
+    '`/diff [--staged] [путь]` — git diff файлом',
+    '`/send <путь>` — отправить файл из папки сессии',
     '`/help` — эта справка',
     '',
     'Просто текст — отправится агенту как следующее сообщение. Под ответом есть кнопки «Продолжить»/«Стоп».',
@@ -397,6 +400,7 @@ export function formatSettingsCard(settings = {}) {
   lines.push(`🧵 reply-ветки: ${settings.threads ? 'вкл' : 'выкл'} · таблицы файлами: ${settings.tableFiles ? 'вкл' : 'выкл'}`)
   lines.push(`🔐 таймаут approvals: ${settings.approvalTimeoutMs ? `${Math.round(settings.approvalTimeoutMs / 1000)} с` : 'выкл'}`)
   lines.push(`📥 приём файлов: ${settings.receiveFiles ? 'вкл' : 'выкл'} · outbox: ${settings.outboxEnabled ? 'вкл' : 'выкл'}`)
+  if (settings.voiceTts !== undefined) lines.push(`🔊 TTS: ${settings.voiceTts ? `вкл (${settings.voiceTtsMode || 'short'})` : 'выкл'} · STT: ${settings.voiceTranscribe ? 'вкл' : 'выкл'}`)
   lines.push(`💰 cost-meter: ${settings.costMeterEnabled ? 'вкл' : 'выкл'} · алерты бюджета: ${settings.budgetAlertEnabled ? 'вкл' : 'выкл'}`)
   if (settings.buttonsPresets > 0) lines.push(`🔘 пресетов: ${settings.buttonsPresets}`)
   lines.push('', 'Полный конфиг — `cordis.patch.yml` профиля.')

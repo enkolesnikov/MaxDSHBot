@@ -838,3 +838,32 @@ test('an incoming image is passed through promptIncoming', async () => {
   assert.equal(promptIncomingCalls[0].files[0].path, '/work/max-inbox/shot.png')
   assert.match(client.sent.at(-1).text, /Передано агенту/)
 })
+
+test('/say, /diff and /send call their runtime helpers', async () => {
+  const calls = { say: [], diff: [], send: [] }
+  const { bot, client } = makeBot({
+    runtime: {
+      say: async (text) => {
+        calls.say.push(text)
+        return { ok: true }
+      },
+      diffSession: async (sessionId, options) => {
+        calls.diff.push({ sessionId, options })
+        return { ok: true, bytes: 42, truncated: false }
+      },
+      sendFileFromSession: async (sessionId, arg) => {
+        calls.send.push({ sessionId, arg })
+        return { ok: true, name: 'report.pdf', bytes: 5 }
+      },
+    },
+  })
+  await bot.handleUpdate(messageUpdate({ text: '/say привет' }))
+  await bot.handleUpdate(messageUpdate({ text: '/diff --staged src' }))
+  await bot.handleUpdate(messageUpdate({ text: '/send report.pdf' }))
+  assert.deepEqual(calls.say, ['привет'])
+  assert.deepEqual(calls.diff, [{ sessionId: 'session-aaaaaaaa', options: { staged: true, path: 'src' } }])
+  assert.deepEqual(calls.send, [{ sessionId: 'session-aaaaaaaa', arg: 'report.pdf' }])
+  assert.match(client.sent.at(-3).text, /Озвучено/)
+  assert.match(client.sent.at(-2).text, /Diff/)
+  assert.match(client.sent.at(-1).text, /Отправлено/)
+})

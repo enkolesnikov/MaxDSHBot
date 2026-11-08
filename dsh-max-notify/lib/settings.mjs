@@ -60,6 +60,11 @@ export const SETTINGS_KEYS = Object.freeze({
   voiceTranscribe: Object.freeze({ type: 'boolean', default: false }),
   voiceEndpoint: Object.freeze({ type: 'httpsUrl', default: null }),
   voiceModel: Object.freeze({ type: 'string', maxLength: 80, default: 'whisper-1' }),
+  voiceTts: Object.freeze({ type: 'boolean', default: false }),
+  voiceTtsMode: Object.freeze({ type: 'enum', values: Object.freeze(['off', 'short', 'always']), default: 'short' }),
+  voiceTtsVoice: Object.freeze({ type: 'string', maxLength: 80, default: 'alloy' }),
+  voiceTtsModel: Object.freeze({ type: 'string', maxLength: 80, default: 'gpt-4o-mini-tts' }),
+  voiceTtsMaxChars: Object.freeze({ type: 'integer', min: 20, max: 2000, default: 600 }),
 })
 
 /** Built-in defaults derived from {@link SETTINGS_KEYS}. */
@@ -699,7 +704,7 @@ export function createSettingsHandler({ token, file, getStatus, getVersion, logg
  * `connection.requestRejection`). New integrations should use
  * {@link createSettingsHandler}.
  */
-export function createSettingsApi({ file, getValues, getStatus, getVersion, logger } = {}) {
+export function createSettingsApi({ file, getValues, getStatus, getVersion, logger, onSave } = {}) {
   const snapshot = async (getter) => (typeof getter === 'function' ? await getter() : undefined)
   return async function settingsApi(req, res) {
     const method = String(req?.method ?? '').toUpperCase()
@@ -747,7 +752,19 @@ export function createSettingsApi({ file, getValues, getStatus, getVersion, logg
     try {
       const saved = saveSettings(file, mergeSettings(loadSettings(file), sanitized.values))
       const current = (await snapshot(getValues)) ?? {}
-      const payload = { ok: true, values: { ...current, ...saved }, restartRequired: true }
+      let applied
+      let restartRequired = true
+      if (typeof onSave === 'function') {
+        try {
+          const outcome = await onSave(saved)
+          applied = outcome?.applied
+          restartRequired = outcome?.restartRequired === true
+        } catch (error) {
+          logger?.warn?.('cannot apply MAX settings live: %s', error?.message || String(error))
+        }
+      }
+      const payload = { ok: true, values: { ...current, ...saved }, restartRequired }
+      if (applied) payload.applied = applied
       if (sanitized.ignored.length > 0) payload.ignored = sanitized.ignored
       sendJson(res, 200, payload)
     } catch (error) {

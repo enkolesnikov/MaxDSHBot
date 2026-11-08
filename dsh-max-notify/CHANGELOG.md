@@ -4,6 +4,37 @@ All notable changes to `dsh-max-notify` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] — 2026-11-09
+
+Голос и инструменты.
+
+### Added
+
+- **TTS (озвучка ответов)**: опциональная озвучка через OpenAI-совместимый
+  `/audio/speech`; режимы `off|short|always`, выбор голоса/модели, лимит
+  символов, отдельное аудио-сообщение (MAX требует `audio` единственным
+  вложением). Команда `/say <текст>` — ручная озвучка. Ошибки TTS не ломают
+  доставку текста; ровно одно аудио на ход, дедупликация через outbox.
+- **`/diff [--staged] [путь]`**: git diff рабочей папки сессии отправляется
+  файлом `diff.patch`; лимит 1 МиБ, усечение и понятные ошибки.
+- **`/send <путь>`**: отправка файла из папки сессии в MAX; путь вне cwd
+  запрещён по умолчанию, лимит 25 МиБ, тип (image/audio/file) по расширению.
+- **Live-настройки**: allowlisted-настройки из GUI применяются без рестарта
+  строки (режим, дайджест, тихие часы, reply-ветки, таблицы, TTS, approvals и
+  т.д.); transport/webhook/секреты по-прежнему требуют перезагрузки.
+- **GUI**: секция «Озвучка», статус применения настроек.
+- `lib/tts.mjs`, `lib/workspace-tools.mjs`; `sending_audio` action; audio upload
+  type в транспорте.
+
+### Fixed
+
+- Восстановлены релизы v0.8–v1.1 и topics после пересоздания репозитория.
+
+### Tests
+
+330 unit/integration tests (was 316): TTS (5), workspace tools (6), bot
+commands, TTS delivery, live settings, plus existing coverage.
+
 ## [1.1.0] — 2026-11-09
 
 GUI-настройки, голос и нативные изображения.

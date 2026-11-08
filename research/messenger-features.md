@@ -37,7 +37,8 @@ Skill](https://github.com/max-messenger/max-agents-skill), а также наш�
   **v0.9.0**: webhook-транспорт (secret, durable queue, авто-подписка),
   npm-публикация, 200 тестов; **v1.0.0**: reply-ветки, таблицы→файлы,
   `/schedules`, forwarded, `/settings`, 249 тестов; **v1.1.0**: GUI-страница
-  настроек (client plugin), native-изображения, голосовая STT, 315 тестов.
+  настроек (client plugin), native-изображения, голосовая STT, 316 тестов;
+  **v1.2.0**: TTS `/say`, `/diff`, `/send`, live-настройки, 330 тестов.
 - Не реализовано из каталога: 5/8/11/12/14–29 (см. ниже); план — `ROADMAP.md`.
 
 ## 0. TL;DR
