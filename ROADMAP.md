@@ -54,6 +54,11 @@ DSH 0.2.x (проверено на 0.2.2-rc.1, Node 24.9+).
 
 ## 0.9 — production-транспорт и публикация
 
+**npm-пакет опубликован:** `dsh-max-notify@0.8.0` — установка
+`dsh plugin --profile web add dsh-max-notify`; добавлены `icon.svg`,
+`locale/{en,zh,ru}.json`, `publishConfig`. Осталось: webhook, заявка в каталог,
+GitHub release с npm-ссылкой.
+
 1. Webhook: `webServer.register('/max/webhook')`, secret constant-time, ack
    <1 с, очередь+dedupe, `POST/DELETE /subscriptions`, `update_types`,
    `bot_admin_permissions_changed`; nginx с LE-сертификатом уже проксирует 443.

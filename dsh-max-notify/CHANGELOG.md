@@ -20,6 +20,9 @@ All notable changes to `dsh-max-notify` are documented here. The format follows
 - `/status` и `/current` показывают стоимость за сегодня, стоимость сессии и
   процент бюджета.
 - Дайджест включает стоимость за сегодня/месяц и процент бюджета.
+- **Опубликовано в npm** как `dsh-max-notify@0.8.0`
+  (`dsh plugin --profile web add dsh-max-notify`); в пакете есть `icon.svg`,
+  `locale/{en,zh,ru}.json` и `engines.dsh`/`dsh.manifestVersion`.
 - **Алерты бюджета**: пороги `budgetAlertThresholds` (по умолчанию 80/100)
   срабатывают один раз за период, сохраняются в state (`budgetAlerts`),
   дедуплицируются через outbox; 80% — обычный, 100% — critical.

@@ -12,6 +12,8 @@
 
 <p align="center">
   <a href="https://github.com/enkolesnikov/MaxDSHBot/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/enkolesnikov/MaxDSHBot/ci.yml?branch=main&label=tests&logo=github&style=flat-square"/></a>
+  <a href="https://www.npmjs.com/package/dsh-max-notify"><img alt="npm" src="https://img.shields.io/npm/v/dsh-max-notify?style=flat-square&label=npm"/></a>
+  <a href="https://www.npmjs.com/package/dsh-max-notify"><img alt="npm downloads" src="https://img.shields.io/npm/dm/dsh-max-notify?style=flat-square&label=downloads"/></a>
   <a href="https://github.com/enkolesnikov/MaxDSHBot/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/enkolesnikov/MaxDSHBot?style=flat-square&label=release"/></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/enkolesnikov/MaxDSHBot?style=flat-square"/></a>
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img alt="DSH" src="https://img.shields.io/badge/DSH-0.2.x-6C5CE7?style=flat-square"/></a>
@@ -89,6 +91,14 @@ flowchart LR
 
 ## Быстрый старт
 
+### Установка из npm (рекомендуется)
+
+```bash
+dsh plugin --profile web add dsh-max-notify
+```
+
+### Из git-чекаута (для разработки)
+
 ```bash
 git clone https://github.com/enkolesnikov/MaxDSHBot.git
 cd MaxDSHBot
@@ -100,8 +110,9 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 ./dsh-max-notify/install.sh              # профиль web (или: ./install.sh tui)
 ```
 
-Установка вызывает `dsh plugin --profile <p> add link:<путь>`, добавляет пакет в
-`dsh.profile.bundles`, а его `cordis.patch.yml` вставляет строку `max-notify`.
+Оба способа добавляют пакет в `dsh.profile.bundles`, а его
+`cordis.patch.yml` вставляет строку `max-notify`. Пакет:
+[npmjs.com/package/dsh-max-notify](https://www.npmjs.com/package/dsh-max-notify).
 
 <details>
 <summary><b>Приватная конфигурация (не коммитить)</b></summary>

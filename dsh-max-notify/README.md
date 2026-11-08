@@ -1,9 +1,16 @@
 # dsh-max-notify
 
+[![npm version](https://img.shields.io/npm/v/dsh-max-notify)](https://www.npmjs.com/package/dsh-max-notify)
+[![npm downloads](https://img.shields.io/npm/dm/dsh-max-notify)](https://www.npmjs.com/package/dsh-max-notify)
+[![CI](https://github.com/enkolesnikov/MaxDSHBot/actions/workflows/ci.yml/badge.svg)](https://github.com/enkolesnikov/MaxDSHBot/actions/workflows/ci.yml)
+[![license](https://img.shields.io/github/license/enkolesnikov/MaxDSHBot)](LICENSE)
+
 DSH (DeepSeek Harness) plugin: forward **the last assistant message of every
 agent turn** to **MAX messenger** (max.ru) through a bot — and drive the agent
 from MAX ("Пульт"): chat, commands, approvals, questions, live progress and
 file deliverables.
+
+Published on npm: https://www.npmjs.com/package/dsh-max-notify
 
 - Zero runtime dependencies (relative imports + `node:` builtins only — required
   for `link:`-installed DSH plugins, which cannot import `@deepseek-ai/*`).
@@ -188,14 +195,26 @@ target chat to drive the agent.
 
 ## Install (into a DSH profile)
 
+### From npm (recommended)
+
+```bash
+dsh plugin --profile web add dsh-max-notify
+```
+
+DSH resolves the published package, records it in `dsh.profile.bundles`, and the
+bundle's `cordis.patch.yml` inserts the `max-notify` row. Set the private config
+(token file, chat id, allowlist) through the profile's own `cordis.patch.yml`
+override (see the root README).
+
+### From a local checkout
+
 ```bash
 ./install.sh                 # profile web
 ./install.sh tui             # another profile
 ```
 
 This runs `dsh plugin --profile <p> add link:<this dir>`, which records the
-`link:` dependency and appends the package to `dsh.profile.bundles`; the
-bundle's `cordis.patch.yml` then inserts the row. Verify with:
+`link:` dependency and appends the package to `dsh.profile.bundles`. Verify with:
 
 ```bash
 dsh --profile web --dump-config | grep -A12 'id: max-notify'

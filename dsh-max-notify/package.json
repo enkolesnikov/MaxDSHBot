@@ -16,7 +16,9 @@
     "tools",
     "cordis.patch.yml",
     "README.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "icon.svg",
+    "locale/*.json"
   ],
   "scripts": {
     "test": "node --test \"test/**/*.test.mjs\"",
@@ -51,5 +53,9 @@
     "notifications",
     "remote-control",
     "agent"
-  ]
+  ],
+  "icon": "./icon.svg",
+  "publishConfig": {
+    "access": "public"
+  }
 }
