@@ -18,7 +18,7 @@
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/enkolesnikov/MaxDSHBot?style=flat-square"/></a>
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img alt="DSH" src="https://img.shields.io/badge/DSH-0.2.x-6C5CE7?style=flat-square"/></a>
   <a href="https://max.ru"><img alt="MAX" src="https://img.shields.io/badge/MAX-messenger-8B5CF6?style=flat-square"/></a>
-  <img alt="Tests" src="https://img.shields.io/badge/tests-315%20passed-2ecc71?style=flat-square"/>
+  <img alt="Tests" src="https://img.shields.io/badge/tests-316%20passed-2ecc71?style=flat-square"/>
   <a href="https://nodejs.org"><img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A524.9-339933?style=flat-square&logo=nodedotjs&logoColor=white"/></a>
   <img alt="Runtime dependencies" src="https://img.shields.io/badge/runtime%20deps-0-brightgreen?style=flat-square"/>
   <a href="https://github.com/enkolesnikov/MaxDSHBot/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/enkolesnikov/MaxDSHBot?style=flat-square"/></a>
@@ -328,7 +328,7 @@ long polling и пишет warning в лог. Официальная докум�
 ## Проверка
 
 ```bash
-cd dsh-max-notify && npm test          # 315 unit tests
+cd dsh-max-notify && npm test          # 316 unit tests
 npm run check                          # синтаксис всех модулей
 node tools/smoke.mjs --env ../.env     # read-only: GET /me, state, outbox
 node tools/send-test.mjs "проверка"    # реальная отправка

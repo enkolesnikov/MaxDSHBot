@@ -367,6 +367,11 @@ function readBody(req, limit) {
       settled = true
       reject(error)
     })
+    req.on('aborted', () => {
+      const error = new Error('request aborted')
+      error.status = 400
+      fail(error)
+    })
   })
 }
 

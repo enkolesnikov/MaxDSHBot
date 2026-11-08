@@ -103,7 +103,7 @@ Published on npm: https://www.npmjs.com/package/dsh-max-notify
 | `lib/voice.mjs` | optional STT transcription |
 | `lib/settings.mjs` | GUI settings validation/overlay/API |
 | `client/client.js` | hand-written settings page bundle |
-| `test/*.test.mjs` | `node --test` (315 unit tests) |
+| `test/*.test.mjs` | `node --test` (316 unit tests) |
 
 ## Config
 

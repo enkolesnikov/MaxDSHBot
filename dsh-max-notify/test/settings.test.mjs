@@ -542,6 +542,21 @@ test('POST rejects a declared oversized content-length before reading', async (t
   assert.equal(res.statusCode, 413)
 })
 
+test('an aborted POST body is rejected instead of hanging the handler', async (t) => {
+  const file = join(tempDir(t), 'config.json')
+  const handler = makeHandler(file)
+  const req = new EventEmitter()
+  req.method = 'POST'
+  req.url = settingsUrl(SETTINGS_JSON_PATH, 'secret-token')
+  req.headers = {}
+  req.resume = () => {}
+  const res = fakeResponse()
+  queueMicrotask(() => req.emit('aborted'))
+  await handler(req, res)
+  assert.equal(res.statusCode, 400)
+  assert.equal(JSON.parse(res.body).error, 'cannot read request body')
+})
+
 test('POST answers 500 when the settings file cannot be written', async (t) => {
   const directory = tempDir(t)
   const blocker = join(directory, 'blocker')
