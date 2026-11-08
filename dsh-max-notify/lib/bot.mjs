@@ -32,6 +32,7 @@ import { deleteSchedule, formatSchedulesCard, listSchedules, setScheduleActive }
 const COMMANDS = [
   { name: 'help', description: 'Справка; /help all — все команды' },
   { name: 'status', description: 'Сессия, модель, стоимость' },
+  { name: 'brief', description: 'Брифинг: работа, ожидание, деньги' },
   { name: 'stop', description: 'Остановить текущий ход' },
   { name: 'sessions', description: 'Список сессий' },
   { name: 'use', description: 'Выбрать сессию: /use N' },
@@ -246,6 +247,11 @@ export function createBot({
         const sessionId = await activeSession(chatId)
         if (!sessionId) await reply(chatId, 'Нет активной сессии. Открой GUI или напиши агенту первым сообщением.')
         else await reply(chatId, await describeSession(sessionId))
+        return true
+      }
+      case 'brief': {
+        const text = await runtime.briefing?.()
+        await reply(chatId, text ?? 'Брифинг недоступен.')
         return true
       }
       case 'current': {

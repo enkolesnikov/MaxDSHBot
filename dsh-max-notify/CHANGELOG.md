@@ -4,6 +4,28 @@ All notable changes to `dsh-max-notify` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] — 2026-11-09
+
+Брифинг и статус.
+
+### Added
+
+- **`/brief`**: компактный брифинг — что работает, сколько сессий за сутки,
+  что ждёт (approvals/questions), деньги/бюджет и ближайшие расписания.
+- Команда добавлена в компактное меню и `/help`; `/digest` остаётся скрытым.
+
+### Fixed
+
+- `/status`: заголовок сессии больше не расползается на несколько строк
+  (обрезка 30 символов), папка показывается как basename, а не полный `/root/…`.
+- Деньги в `/status`: два знака после запятой; если стоимость сессии больше
+  «сегодня», подпись «сессия всего» — больше не выглядит противоречиво.
+- Русские склонения в брифинге/дайджесте («2 сессии», «2 вопроса»).
+
+### Tests
+
+353 tests (was 349): briefing, status/cost regressions, `/brief`, menu/help.
+
 ## [1.4.0] — 2026-11-09
 
 UX-аудит: тише, короче, понятнее.

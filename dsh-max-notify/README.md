@@ -77,6 +77,13 @@ Published on npm: https://www.npmjs.com/package/dsh-max-notify
   budget alerts (80/100 by default) fire once per period and survive reloads.
   `costMeterFile`, `budgetAlertEnabled`, `budgetAlertThresholds` configure it.
 
+## Briefing and status (v1.5)
+
+- `/brief`: compact briefing with running sessions, pending approvals/questions,
+  money/budget and the next schedules. The menu has 13 commands.
+- `/status`: title ≤30 chars, folder basename, two-decimal money and a
+  "сессия всего" label when the session cost exceeds today's spend.
+
 ## Compact UX (v1.4)
 
 - 12 core commands in the MAX menu; `/help` is short, `/help all` is complete.
@@ -137,7 +144,7 @@ for per-run `new` sessions, the title plus a recent delivery receipt.
 | `lib/autonomy.mjs` | schedule autonomy policies/matching |
 | `lib/settings.mjs` | GUI settings validation/overlay/API |
 | `client/client.js` | hand-written settings page bundle |
-| `test/*.test.mjs` | `node --test` (349 unit tests) |
+| `test/*.test.mjs` | `node --test` (353 unit tests) |
 
 ## Config
 

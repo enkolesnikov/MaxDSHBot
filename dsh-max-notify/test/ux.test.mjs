@@ -5,6 +5,8 @@ import {
   formatApprovalCard,
   formatApprovalResult,
   formatDigestCard,
+  formatBriefingCard,
+  formatCostStatusLine,
   formatErrorCard,
   formatHelpAllCard,
   formatHelpCard,
@@ -95,4 +97,53 @@ test('digest is a four-part briefing, not a session dump', () => {
   assert.match(digest, /Ждёт тебя: 2 approval · 1 вопрос/)
   assert.match(digest, /Деньги/)
   assert.doesNotMatch(digest, /S7/)
+})
+
+test('status card shortens title and hides the absolute cwd', () => {
+  const card = formatStatusCard({
+    title: 'Создание плагина для MAX Messenger',
+    sessionId: 'session-00000000-0000-0000-0000-abcdef12',
+    running: false,
+    agentStatus: 'idle',
+    model: 'deepseek-flash',
+    provider: 'deepseek-official',
+    cwd: '/workspace/MaxBot',
+    updatedAt: Date.now(),
+  })
+  assert.doesNotMatch(card, /\/root\/MaxBot/)
+  assert.match(card, /📁 MaxBot/)
+  assert.ok(card.split('\n')[0].length <= 42)
+})
+
+test('cost line uses two decimals and labels a larger session total', () => {
+  const line = formatCostStatusLine({
+    snapshot: {
+      available: true,
+      currency: { symbol: '¥', decimals: 4 },
+      today: { amount: 12.2969 },
+      budget: { enabled: true, percent: 21 },
+    },
+    sessionAmount: 14.8278,
+  })
+  assert.match(line, /¥12\.30/)
+  assert.match(line, /сессия всего ¥14\.83/)
+  assert.doesNotMatch(line, /12\.2969|14\.8278/)
+})
+
+test('briefing card shows work, waiting, money and next schedules', () => {
+  const card = formatBriefingCard({
+    sessions: [{ running: true }, { running: false }],
+    pending: { approvals: 1, questions: 2 },
+    cost: {
+      available: true,
+      currency: { symbol: '¥', decimals: 2 },
+      today: { amount: 12.3 },
+      budget: { enabled: true, percent: 21 },
+    },
+    schedules: [{ title: 'Deploy', scheduledAt: new Date(2026, 10, 9, 10, 0).toISOString() }],
+  })
+  assert.match(card, /Сейчас: 1 работает · 2 сессии/)
+  assert.match(card, /Ждёт: 1 approval · 2 вопроса/)
+  assert.match(card, /Деньги: ¥12\.30/)
+  assert.match(card, /Дальше: 10:00 Deploy/)
 })

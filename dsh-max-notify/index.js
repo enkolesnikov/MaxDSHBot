@@ -24,6 +24,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createMaxClient, splitText, MAX_TEXT_LIMIT } from './lib/transport.mjs'
 import { extractAssistantText } from './lib/extract.mjs'
 import { formatNotification } from './lib/format.mjs'
+import { formatBriefingCard } from './lib/cards.mjs'
 import { createState, resolveStateFile } from './lib/state.mjs'
 import { createInteractions } from './lib/interactions.mjs'
 import { normalizeAutonomyMode, resolveAutonomyPolicy } from './lib/autonomy.mjs'
@@ -1109,6 +1110,38 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     return { applied, restartRequired: restartRequired.length > 0 }
   }
 
+  async function briefing() {
+    let sessions = []
+    try {
+      sessions = (await listSessions()) ?? []
+    } catch (error) {
+      logger.warn('cannot list sessions for briefing: %s', error?.message || String(error))
+    }
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000
+    const recent = sessions.filter((item) => !item.updatedAt || item.updatedAt >= cutoff)
+    const pendingCards = state.listPendingCards?.() ?? []
+    const pending = {
+      approvals: pendingCards.filter((card) => card?.kind === 'approval').length,
+      questions: pendingCards.filter((card) => card?.kind === 'question').length,
+    }
+    let schedules = []
+    const service = getService('schedule')
+    if (service?.list) {
+      try {
+        const result = await listSchedules(service, { active: true, limit: 5 })
+        if (result.ok) schedules = result.items
+      } catch (error) {
+        logger.warn('cannot list schedules for briefing: %s', error?.message || String(error))
+      }
+    }
+    return formatBriefingCard({
+      sessions: recent,
+      pending,
+      cost: costMeter?.snapshot(),
+      schedules,
+    })
+  }
+
   async function promptSessionRich(sessionId, text, { imagePaths = [] } = {}) {
     const value = String(text ?? '').trim()
     let imageParts = []
@@ -1398,6 +1431,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       schedulePolicies: () => state.listSchedulePolicies(),
       setSchedulePolicy,
       settingsSummary,
+      briefing,
       say,
       diffSession,
       sendFileFromSession,

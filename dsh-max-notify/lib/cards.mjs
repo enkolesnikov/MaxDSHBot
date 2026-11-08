@@ -33,6 +33,15 @@ function folderOf(cwd) {
   return normalized.split(/[/\\]/).pop() || normalized
 }
 
+function pluralRu(value, one, few, many) {
+  const n = Math.abs(Number(value) || 0) % 100
+  const last = n % 10
+  if (n > 10 && n < 20) return many
+  if (last === 1) return one
+  if (last >= 2 && last <= 4) return few
+  return many
+}
+
 /** Approval card: one tool action waits for a decision. */
 export function formatApprovalCard({ title, toolName, reason } = {}) {
   const lines = [`🔐 **Разрешить \`${truncate(toolName || '?', 40)}\`?**`]
@@ -86,10 +95,10 @@ export function formatQuestionCard({ questions, answered = 0 } = {}) {
 
 /** Status card. */
 export function formatStatusCard({ title, sessionId, running, agentStatus, model, provider, cwd, updatedAt } = {}) {
-  const lines = [`🤖 **${truncate(title || 'Сессия', 100)}**`]
+  const lines = [`🤖 **${truncate(title || 'Сессия', 30)}**`]
   const state = `${runnerLabel({ running, agentStatus })}${model ? ` · \`${provider ? `${provider}/` : ''}${model}\`` : ''}`
   lines.push(state)
-  if (cwd) lines.push(`📁 \`${truncate(cwd, 160)}\``)
+  if (cwd) lines.push(`📁 ${folderOf(cwd)}`)
   if (updatedAt) lines.push(`🕒 ${clock(updatedAt)}${sessionId ? ` · ${shortSessionId(sessionId)}` : ''}`)
   return lines.join('\n')
 }
@@ -100,8 +109,13 @@ export function formatCostStatusLine({ snapshot, sessionAmount } = {}) {
     return `💰 Стоимость: нет данных cost-meter${snapshot?.reason ? ` (${snapshot.reason})` : ''}`
   }
   const currency = snapshot.currency ?? {}
-  const parts = [`💰 Сегодня ${formatMoney(snapshot.today?.amount, currency)}`]
-  if (Number.isFinite(sessionAmount)) parts.push(`сессия ${formatMoney(sessionAmount, currency)}`)
+  const displayCurrency = { ...currency, decimals: Math.min(Number(currency.decimals) || 2, 2) }
+  const today = Number(snapshot.today?.amount) || 0
+  const parts = [`💰 Сегодня ${formatMoney(today, displayCurrency)}`]
+  if (Number.isFinite(sessionAmount)) {
+    const label = sessionAmount > today + 0.000001 ? 'сессия всего' : 'сессия'
+    parts.push(`${label} ${formatMoney(sessionAmount, displayCurrency)}`)
+  }
   const budget = snapshot.budget
   if (budget?.enabled && budget.percent !== null) {
     parts.push(`бюджет ${formatPercent(budget.percent)}`)
@@ -177,6 +191,7 @@ export function formatHelpCard() {
     '🕹 **Пульт DSH**',
     '',
     '`/status` — сессия, модель, стоимость',
+    '`/brief` — брифинг: что идёт, что ждёт, деньги',
     '`/stop` — остановить ход',
     '`/sessions` · `/use N` — выбрать сессию',
     '`/new [папка]` — новая сессия',
@@ -197,7 +212,7 @@ export function formatHelpAllCard() {
     '🕹 **Все команды**',
     '',
     '**Основные**',
-    '`/status` · `/stop` · `/sessions` · `/use N` · `/new` · `/model`',
+    '`/status` · `/brief` · `/stop` · `/sessions` · `/use N` · `/new` · `/model`',
     '`/mode` · `/mute` · `/budget` · `/schedules` · `/health`',
     '',
     '**Сессии и проект**',
@@ -285,16 +300,49 @@ export function formatTodoCard({ title, todos } = {}) {
   return lines.join('\n')
 }
 
-/** Daily digest / briefing. */
-export function formatDigestCard({ date, sessions = [], usage, goals = [], todos = [], cost, pending } = {}) {
-  const lines = [`📊 **Брифинг** · ${date ?? ''}`]
-  const active = Array.isArray(sessions) ? sessions.filter((item) => item?.running).length : 0
-  lines.push(`✅ Сделано: ${active} активных · ${sessions.length} сессий за сутки`)
+/** On-demand briefing: what runs, what waits, money and the next schedules. */
+export function formatBriefingCard({ date, sessions = [], pending, cost, schedules = [] } = {}) {
+  const list = Array.isArray(sessions) ? sessions : []
+  const running = list.filter((item) => item?.running).length
+  const lines = [`📊 **Брифинг** · ${date ?? new Date().toLocaleDateString('ru-RU')}`]
+  lines.push(`✅ Сейчас: ${running} работает · ${list.length} ${pluralRu(list.length, 'сессия', 'сессии', 'сессий')} за сутки`)
   const approvals = Number(pending?.approvals) || 0
   const questions = Number(pending?.questions) || 0
   lines.push(
     approvals + questions > 0
-      ? `⏳ Ждёт тебя: ${approvals} approval · ${questions} вопрос`
+      ? `⏳ Ждёт: ${approvals} approval · ${questions} ${pluralRu(questions, 'вопрос', 'вопроса', 'вопросов')}`
+      : '⏳ Ждёт: ничего',
+  )
+  if (cost?.available) {
+    const currency = { ...(cost.currency ?? {}), decimals: Math.min(Number(cost.currency?.decimals) || 2, 2) }
+    let money = `💰 Деньги: ${formatMoney(cost.today?.amount, currency)} сегодня`
+    if (cost.budget?.enabled && cost.budget.percent !== null) money += ` · бюджет ${formatPercent(cost.budget.percent)}`
+    lines.push(money)
+  }
+  const next = Array.isArray(schedules) ? schedules.filter((item) => item?.scheduledAt).slice(0, 2) : []
+  if (next.length > 0) {
+    const parts = next.map((item) => {
+      const at = new Date(item.scheduledAt)
+      const time = Number.isNaN(at.getTime())
+        ? '—'
+        : `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`
+      return `${time} ${truncate(item.title || 'задача', 40)}`
+    })
+    lines.push(`⏰ Дальше: ${parts.join(' · ')}`)
+  }
+  return lines.join('\n')
+}
+
+/** Daily digest / briefing. */
+export function formatDigestCard({ date, sessions = [], usage, goals = [], todos = [], cost, pending } = {}) {
+  const lines = [`📊 **Брифинг** · ${date ?? ''}`]
+  const active = Array.isArray(sessions) ? sessions.filter((item) => item?.running).length : 0
+  lines.push(`✅ Сделано: ${active} активных · ${sessions.length} ${pluralRu(sessions.length, 'сессия', 'сессии', 'сессий')} за сутки`)
+  const approvals = Number(pending?.approvals) || 0
+  const questions = Number(pending?.questions) || 0
+  lines.push(
+    approvals + questions > 0
+      ? `⏳ Ждёт тебя: ${approvals} approval · ${questions} ${pluralRu(questions, 'вопрос', 'вопроса', 'вопросов')}`
       : '⏳ Ждёт тебя: ничего',
   )
   if (cost?.available) {

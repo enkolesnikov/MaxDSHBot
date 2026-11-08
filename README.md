@@ -18,7 +18,7 @@
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/enkolesnikov/MaxDSHBot?style=flat-square"/></a>
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img alt="DSH" src="https://img.shields.io/badge/DSH-0.2.x-6C5CE7?style=flat-square"/></a>
   <a href="https://max.ru"><img alt="MAX" src="https://img.shields.io/badge/MAX-messenger-8B5CF6?style=flat-square"/></a>
-  <img alt="Tests" src="https://img.shields.io/badge/tests-349%20passed-2ecc71?style=flat-square"/>
+  <img alt="Tests" src="https://img.shields.io/badge/tests-353%20passed-2ecc71?style=flat-square"/>
   <a href="https://nodejs.org"><img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A524.9-339933?style=flat-square&logo=nodedotjs&logoColor=white"/></a>
   <img alt="Runtime dependencies" src="https://img.shields.io/badge/runtime%20deps-0-brightgreen?style=flat-square"/>
   <a href="https://github.com/enkolesnikov/MaxDSHBot/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/enkolesnikov/MaxDSHBot?style=flat-square"/></a>
@@ -183,9 +183,17 @@ MAX будет сам присылать обновления на публич�
 long polling и пишет warning в лог. Официальная документация MAX:
 [webhooks](https://dev.max.ru/docs-api/methods/POST/subscriptions).
 
+## Брифинг и статус (v1.5)
+
+- **`/brief`** — компактный брифинг: что работает, что ждёт решения, деньги,
+  ближайшие расписания. В меню теперь 13 команд.
+- **`/status`** стал короче: title ≤30 символов, папка basename, деньги с двумя
+  знаками; если сессия дороже «сегодня», пишется «сессия всего».
+- Исправлены русские склонения в брифинге/дайджесте.
+
 ## UX-аудит (v1.4)
 
-- **12 команд в меню** вместо 31; `/help` ≤450 символов, полный список — `/help all`.
+- **12 команд в меню** вместо 31 (в 1.5 — 13 с `/brief`); `/help` ≤450 символов, полный список — `/help all`.
 - **Компактный заголовок** `🕒 20:03 · Название`; старый подробный режим —
   `messageStyle: detailed`.
 - **Тише по умолчанию**: subagent/job/goal/TODO-уведомления выключены; остаются
@@ -376,7 +384,7 @@ long polling и пишет warning в лог. Официальная докум�
 ## Проверка
 
 ```bash
-cd dsh-max-notify && npm test          # 349 unit tests
+cd dsh-max-notify && npm test          # 353 unit tests
 npm run check                          # синтаксис всех модулей
 node tools/smoke.mjs --env ../.env     # read-only: GET /me, state, outbox
 node tools/send-test.mjs "проверка"    # реальная отправка

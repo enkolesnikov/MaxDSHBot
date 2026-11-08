@@ -1,7 +1,7 @@
 {
   "name": "dsh-max-notify",
-  "version": "1.4.0",
-  "description": "DSH → MAX messenger plugin: compact UX, reliable replies, remote control, GUI settings, reply threads, tables, schedules with autonomy, webhook, voice STT, /diff & /send, cost & budget, observability. Zero runtime deps.",
+  "version": "1.5.0",
+  "description": "DSH → MAX messenger plugin: compact UX, briefings, status, reliable replies, remote control, GUI settings, reply threads, tables, schedules, webhook, cost & budget. Zero runtime deps.",
   "type": "module",
   "main": "index.js",
   "exports": {

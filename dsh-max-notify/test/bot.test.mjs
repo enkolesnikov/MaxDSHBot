@@ -298,13 +298,13 @@ test('pollOnce primes the marker first and then processes new updates', async ()
   assert.equal(state.marker, 777)
 })
 
-test('bot registers exactly the 12 core commands', async () => {
+test('bot registers exactly the 13 core commands', async () => {
   const { bot, client } = makeBot()
   await bot.registerCommands()
   assert.equal(client.commands.length, 1)
-  assert.equal(client.commands[0].length, 12)
+  assert.equal(client.commands[0].length, 13)
   const names = client.commands[0].map((command) => command.name)
-  assert.deepEqual(names, ['help', 'status', 'stop', 'sessions', 'use', 'new', 'model', 'mode', 'mute', 'budget', 'schedules', 'health'])
+  assert.deepEqual(names, ['help', 'status', 'brief', 'stop', 'sessions', 'use', 'new', 'model', 'mode', 'mute', 'budget', 'schedules', 'health'])
 })
 
 function fakePolicy(initial = 'all') {
@@ -909,4 +909,10 @@ test('/schedules mode sets, confirms and clears autonomous policies', async () =
 
   await bot.handleUpdate(messageUpdate({ text: '/schedules mode 1 inherit' }))
   assert.deepEqual(calls.at(-1), { id: 'sched-1', mode: 'inherit', title: 'Deploy' })
+})
+
+test('/brief asks the runtime for a briefing', async () => {
+  const { bot, client } = makeBot({ runtime: { briefing: async () => '📊 **Брифинг** · сегодня' } })
+  await bot.handleUpdate(messageUpdate({ text: '/brief' }))
+  assert.match(client.sent[0].text, /Брифинг/)
 })
