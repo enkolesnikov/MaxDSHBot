@@ -262,7 +262,12 @@ export function formatDigestCard({ date, sessions = [], usage, goals = [], todos
 export function formatModelsCard({ current, models, failures = [] } = {}) {
   const list = Array.isArray(models) ? models : []
   const lines = ['🧠 **Модели**', '']
-  if (current) lines.push(`Текущая: \`${current.provider ? `${current.provider}/` : ''}${current.model}${current.reasoningEffort ? ` · ${current.reasoningEffort}` : ''}\``, '')
+  if (current?.model) {
+    lines.push(
+      `Текущая: \`${current.provider ? `${current.provider}/` : ''}${current.model}${current.reasoningEffort ? ` · ${current.reasoningEffort}` : ''}\``,
+      '',
+    )
+  }
   if (list.length === 0) lines.push('Каталог моделей недоступен.')
   else {
     list.forEach((item, index) => {

@@ -340,7 +340,14 @@ export function createInteractions({ client, config, logger, target, resolveTitl
     try {
       if (isPlanReview(record)) {
         const attachments = await planFileAttachments(record)
-        record.messageId = await sendCard(renderPlanCard(record), optionRows(record), attachments)
+        try {
+          record.messageId = await sendCard(renderPlanCard(record), optionRows(record), attachments)
+        } catch (error) {
+          // Some clients reject a file + inline keyboard in one message; the
+          // review card alone is still useful.
+          logger?.warn?.('cannot send plan.md with the review card, retrying without the file: %s', error?.message || String(error))
+          record.messageId = await sendCard(renderPlanCard(record), optionRows(record))
+        }
       } else {
         record.messageId = await sendCard(renderQuestionCard(record), optionRows(record))
       }
