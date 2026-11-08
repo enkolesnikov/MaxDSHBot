@@ -19,7 +19,7 @@
  * MAX_CA_FILE, MAX_NOTIFY_DRY_RUN.
  */
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 
 import { createMaxClient, splitText, MAX_TEXT_LIMIT } from './lib/transport.mjs'
 import { extractAssistantText } from './lib/extract.mjs'
@@ -35,11 +35,25 @@ import { collectMessageImages, extractImageReferences } from './lib/images.mjs'
 import { createIncoming } from './lib/incoming.mjs'
 import { resolveSessionDir } from './lib/create-session.mjs'
 import { archivedIdsOf, filterArchivedSessions } from './lib/sessions.mjs'
+import { createLimiter, PRIORITY } from './lib/limits.mjs'
+import { createOutbox, resolveOutboxFile } from './lib/outbox.mjs'
+import { createHealth } from './lib/health.mjs'
+import { createAudit, resolveAuditFile } from './lib/audit.mjs'
+import { wrapLogger } from './lib/redact.mjs'
 
 export const name = 'dsh-max-notify'
 
 /** No DSH services are required: `session/event` is a Context event. */
 export const inject = []
+
+/** Plugin version, read once from the package manifest (used by `/version` and health). */
+export const VERSION = (() => {
+  try {
+    return JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version ?? '0.0.0'
+  } catch {
+    return '0.0.0'
+  }
+})()
 
 const DEFAULTS = {
   enabled: true,
@@ -101,6 +115,22 @@ const DEFAULTS = {
   maxIncomingFiles: 4,
   maxIncomingBytes: 25 * 1024 * 1024,
   newSessionDir: undefined,
+  // reliability & security (v0.6)
+  outboxEnabled: true,
+  outboxMaxItems: 200,
+  outboxTtlHours: 48,
+  outboxFile: undefined,
+  ratePerChatPerSecond: 2,
+  rateGlobalPerSecond: 30,
+  approvalTimeoutMs: 120000,
+  approvalRememberTools: [],
+  approvalRememberMs: 3600000,
+  allowUnlistedUsers: false,
+  incomingPerMinute: 30,
+  incomingBurst: 10,
+  auditLog: true,
+  auditFile: undefined,
+  heartbeatFile: undefined,
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -203,6 +233,21 @@ export function normalizeConfig(raw = {}) {
     digestTime: /^\d{2}:\d{2}$/.test(String(merged.digestTime ?? '')) ? String(merged.digestTime) : DEFAULTS.digestTime,
     quietHours: normalizeQuietHours(merged.quietHours),
     mode: ['all', 'errors', 'mute'].includes(merged.mode) ? merged.mode : DEFAULTS.mode,
+    outboxEnabled: asBoolean(merged.outboxEnabled, DEFAULTS.outboxEnabled),
+    outboxMaxItems: asInteger(merged.outboxMaxItems, DEFAULTS.outboxMaxItems, 1, 5000),
+    outboxTtlHours: asInteger(merged.outboxTtlHours, DEFAULTS.outboxTtlHours, 1, 720),
+    outboxFile: String(merged.outboxFile || env.MAX_NOTIFY_OUTBOX_FILE || '').trim() || undefined,
+    ratePerChatPerSecond: asInteger(merged.ratePerChatPerSecond, DEFAULTS.ratePerChatPerSecond, 1, 100),
+    rateGlobalPerSecond: asInteger(merged.rateGlobalPerSecond, DEFAULTS.rateGlobalPerSecond, 1, 1000),
+    approvalTimeoutMs: asInteger(merged.approvalTimeoutMs, DEFAULTS.approvalTimeoutMs, 0, 600000),
+    approvalRememberTools: asStringArray(merged.approvalRememberTools, DEFAULTS.approvalRememberTools),
+    approvalRememberMs: asInteger(merged.approvalRememberMs, DEFAULTS.approvalRememberMs, 60000, 86400000),
+    allowUnlistedUsers: asBoolean(merged.allowUnlistedUsers, DEFAULTS.allowUnlistedUsers),
+    incomingPerMinute: asInteger(merged.incomingPerMinute, DEFAULTS.incomingPerMinute, 1, 600),
+    incomingBurst: asInteger(merged.incomingBurst, DEFAULTS.incomingBurst, 1, 100),
+    auditLog: asBoolean(merged.auditLog, DEFAULTS.auditLog),
+    auditFile: String(merged.auditFile || env.MAX_NOTIFY_AUDIT_FILE || '').trim() || undefined,
+    heartbeatFile: String(merged.heartbeatFile || env.MAX_NOTIFY_HEARTBEAT_FILE || '').trim() || undefined,
   }
 
   const format = typeof config.format === 'string' ? config.format.trim().toLowerCase() : ''
@@ -268,7 +313,7 @@ export function readTokenFile(path) {
  */
 export function apply(ctx, rawConfig = {}, deps = {}) {
   const config = normalizeConfig(rawConfig)
-  const logger = ctx.logger('max-notify')
+  const logger = wrapLogger(ctx.logger('max-notify'))
   const createClient = deps.createClient ?? createMaxClient
 
   if (config.enabled && !config.botToken && config.botTokenFile) {
@@ -292,6 +337,13 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     return
   }
 
+  const limiter = createLimiter({
+    perChatPerSecond: config.ratePerChatPerSecond,
+    globalPerSecond: config.rateGlobalPerSecond,
+    logger,
+  })
+  const health = createHealth({ version: VERSION })
+
   let client
   try {
     client = createClient({
@@ -301,6 +353,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       timeoutMs: config.requestTimeoutMs,
       maxRetries: config.maxRetries,
       minIntervalMs: config.minIntervalMs,
+      limiter,
       log: (level, message) => logger[level === 'warn' ? 'warn' : 'debug'](message),
     })
   } catch (error) {
@@ -309,6 +362,19 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
   }
 
   const enqueue = createSendQueue({ minIntervalMs: config.minIntervalMs, logger })
+
+  // Fail-closed remote control: without an allowlist anyone could drive the
+  // agent. Notifications stay on; polling/commands/approvals are disabled
+  // unless the operator explicitly opts out with `allowUnlistedUsers`.
+  const hasAllowlist = config.allowedUserIds.length > 0 || config.allowedChatIds.length > 0
+  if (config.interactive && !hasAllowlist && !config.allowUnlistedUsers) {
+    config.interactive = false
+    config.polling = false
+    logger.warn(
+      'remote control disabled: allowedUserIds/allowedChatIds are empty. Set an allowlist or allowUnlistedUsers: true to enable commands/approvals.',
+    )
+  }
+  if (!config.interactive) config.polling = false
 
   /**
    * Recipient allowlist: when allowedUserIds/allowedChatIds are configured, the
@@ -545,12 +611,28 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
   const target = { chatId: config.chatId, userId: config.chatId === undefined ? config.userId : undefined }
   const state = createState({ file: resolveStateFile(config), logger, chatId: config.chatId })
   const policy = createPolicy({ config, state, logger })
+  const audit = createAudit({ file: resolveAuditFile(config), enabled: config.auditLog, logger })
+  const outbox = config.outboxEnabled
+    ? createOutbox({
+        file: resolveOutboxFile(config),
+        maxItems: config.outboxMaxItems,
+        ttlHours: config.outboxTtlHours,
+        logger,
+        send: async (call, params) => {
+          const method = client?.[call]
+          if (typeof method !== 'function') throw new Error(`MAX transport has no ${call}()`)
+          return method(params)
+        },
+      })
+    : undefined
   const interactions = createInteractions({
     client,
     config,
     logger,
     target,
     resolveTitle: (session) => titleOf(session),
+    state,
+    audit,
   })
   const progress = createProgress({ client, config, logger, target, policy })
   const deliverables = createDeliverables({ client, config, logger, target, policy })
@@ -562,6 +644,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     policy,
     state,
     runtime: { listSessions, titleFor },
+    outbox,
   })
   const bot = createBot({
     client,
@@ -571,7 +654,14 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     interactions,
     policy,
     observer,
+    health,
+    version: VERSION,
+    outbox,
+    limiter,
+    audit,
     runtime: {
+      healthUpdate: (patch) => health.update(patch),
+      healthFail: (error, options) => health.fail(error, options),
       listSessions,
       statusInfo,
       promptSession,
@@ -659,7 +749,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     return [{ type: 'inline_keyboard', payload: { buttons: rows } }]
   }
 
-  async function deliver(session, text, reason, message, toolImageRefs = []) {
+  async function deliver(session, text, reason, message, toolImageRefs = [], turn, seq) {
     if (!(await ensureTargetAllowed())) return
     const decision = policy.decide('final')
     if (!decision.send) {
@@ -684,9 +774,10 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     const keyboard = finalKeyboard(session)
     const images = await collectFinalImages(session, text, message, toolImageRefs)
     const attachments = images.length > 0 || keyboard ? [...images, ...(keyboard ?? [])] : undefined
+    const finalKey = `final:${session?.id ?? 'unknown'}:${turn ?? 'na'}:${seq ?? 'na'}`
     for (const [index, chunk] of chunks.entries()) {
       const isLast = index === chunks.length - 1
-      const message = await client.sendMessage({
+      const params = {
         chatId: config.chatId,
         userId: config.chatId === undefined ? config.userId : undefined,
         text: chunk,
@@ -694,9 +785,16 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
         notify: decision.notify,
         disableLinkPreview: config.disableLinkPreview,
         ...(isLast && attachments ? { attachments } : {}),
-      })
-      const mid = message?.message?.body?.mid
-      logger.debug('MAX message sent%s', mid ? ` (mid ${mid})` : '')
+      }
+      if (outbox) {
+        const result = await outbox.deliverNow(params, { dedupeKey: `${finalKey}:c${index}`, kind: 'final' })
+        if (result?.skipped) continue
+        if (result?.queued) logger.warn('MAX is unavailable; final reply chunk %d queued: %s', index + 1, result.error)
+      } else {
+        const sent = await client.sendMessage(params)
+        const mid = sent?.message?.body?.mid
+        logger.debug('MAX message sent%s', mid ? ` (mid ${mid})` : '')
+      }
     }
     bot.noteSession?.(String(session.id))
   }
@@ -721,7 +819,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
         const text = extractAssistantText(data.message)
         if (!text) return
         // The last non-empty assistant message of the current turn wins.
-        pending.set(id, { turn: data.turn, text, message: data.message })
+        pending.set(id, { turn: data.turn, text, message: data.message, seq: event.seq })
         return
       }
       case 'tool/result': {
@@ -753,7 +851,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
         const text = record.text.trim()
         if (!text) return
         if (!config.includeSubagents && !isTopLevelSession(session)) return
-        void enqueue(() => deliver(session, text, data.reason, record.message, toolImages))
+        void enqueue(() => deliver(session, text, data.reason, record.message, toolImages, data.turn, record.seq))
         return
       }
       case 'deliverables/presented': {
@@ -861,19 +959,38 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
 
   // Start the MAX long-polling loop and tear everything down with the plugin.
   // (A minimal test context has no fiber/effect support, so guard the call.)
+  function writeHeartbeat() {
+    if (!config.heartbeatFile) return
+    try {
+      const snapshot = health.snapshot({ outbox: outbox?.snapshot?.(), limiter: limiter?.snapshot?.() })
+      state.setHealth(snapshot)
+      writeFileSync(config.heartbeatFile, `${JSON.stringify(snapshot, null, 2)}\n`)
+    } catch (error) {
+      logger.debug('cannot write heartbeat file: %s', error?.message || String(error))
+    }
+  }
+
   if (typeof ctx.effect === 'function') {
     ctx.effect(() => {
+      outbox?.start()
       void bot.start()
       observer.start()
+      writeHeartbeat()
+      const healthTimer = setInterval(writeHeartbeat, 60_000)
+      healthTimer.unref?.()
       return () => {
+        clearInterval(healthTimer)
         bot.stop()
         observer.dispose()
         progress.dispose()
         interactions.dispose()
+        outbox?.dispose()
+        limiter.stop()
         state.dispose()
       }
     })
   } else {
+    outbox?.start()
     void bot.start()
   }
 
@@ -889,7 +1006,8 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     config.format ?? 'plain text',
     config.dryRun ? ' (dry-run)' : '',
     restriction,
-    config.interactive ? '; remote control on' : '',
+    config.interactive ? '; remote control on' : '; remote control off',
+    config.outboxEnabled ? '; outbox on' : '',
     config.digestEnabled ? `; digest at ${config.digestTime}` : '',
   )
 

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -8,6 +8,12 @@ import { join } from 'node:path'
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'dsh-max-notify-test-home-'))
 
 const { apply, normalizeConfig, isTopLevelSession } = await import('../index.js')
+
+// Isolate durable state/outbox per test: a queued item from one test must not
+// be retried by another test's plugin instance.
+test.beforeEach(() => {
+  rmSync(join(process.env.DSH_HOME, 'max-notify'), { recursive: true, force: true })
+})
 
 const tick = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -475,4 +481,62 @@ test('tool images are ignored when forwardToolImages is off', async () => {
   await tick(60)
 
   assert.equal(client.uploads.length, 0)
+})
+
+
+test('remote control is fail-closed without an allowlist', () => {
+  const { ctx, logs, listenerCount } = createFakeCtx()
+  apply(ctx, { botToken: 't', chatId: '1' })
+  assert.equal(listenerCount('approval/request'), 0)
+  assert.equal(listenerCount('user-questions/request'), 0)
+  assert.ok(
+    logs.some(([level, ...args]) => level === 'warn' && args.some((arg) => String(arg).includes('remote control disabled'))),
+  )
+})
+
+test('allowUnlistedUsers explicitly re-enables remote control', () => {
+  const { ctx, listenerCount } = createFakeCtx()
+  apply(ctx, { botToken: 't', chatId: '1', allowUnlistedUsers: true })
+  assert.equal(listenerCount('approval/request'), 1)
+  assert.equal(listenerCount('user-questions/request'), 1)
+})
+
+test('a final reply is queued in the outbox when MAX is down and delivered later', async () => {
+  const failing = {
+    async sendMessage() {
+      throw new Error('MAX is down')
+    },
+  }
+  const first = createFakeCtx()
+  apply(first.ctx, { botToken: 't', chatId: '1' }, { createClient: () => failing })
+  const s = session('session-outbox')
+  first.emit('session/event', s, evt('turn/start', { turn: 1 }))
+  first.emit('session/event', s, assistantEvent(1, 1, 'ответ переживёт сбой'))
+  first.emit('session/event', s, evt('turn/end', { turn: 1, reason: { kind: 'completed' } }))
+  await tick(60)
+
+  const outboxFile = join(process.env.DSH_HOME, 'max-notify', 'outbox.json')
+  const queued = JSON.parse(readFileSync(outboxFile, 'utf8'))
+  assert.ok(queued.pending.length >= 1)
+
+  const second = createFakeCtx()
+  const client = createFakeClient()
+  apply(second.ctx, { botToken: 't', chatId: '1' }, { createClient: () => client })
+  await tick(80)
+  assert.equal(client.sent.length, 1)
+  assert.match(client.sent[0].text, /ответ переживёт сбой/)
+})
+
+test('replaying the same turn after a reload does not duplicate the final reply', async () => {
+  const { ctx, emit } = createFakeCtx()
+  const client = createFakeClient()
+  apply(ctx, { botToken: 't', chatId: '1' }, { createClient: () => client })
+  const s = session('session-replay')
+  const start = evt('turn/start', { turn: 1 })
+  const message = assistantEvent(1, 1, 'один раз')
+  const end = evt('turn/end', { turn: 1, reason: { kind: 'completed' } })
+
+  for (const event of [start, message, end, start, message, end]) emit('session/event', s, event)
+  await tick(60)
+  assert.equal(client.sent.length, 1)
 })

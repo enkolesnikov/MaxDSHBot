@@ -27,7 +27,11 @@ Skill](https://github.com/max-messenger/max-agents-skill), а также наш�
   `$DSH_HOME/max-notify/state.json`, 67 тестов.
 - **v0.3.0 «Наблюдатель»**: события subagent/job/goal/error (п. 2), TODO-прогресс
   (п. 3), режимы/тихие часы (п. 4), ежедневный дайджест (п. 10).
-- Не реализовано из каталога: 5/8/11/12/14–29 (см. ниже).
+- **v0.4.0**: приём файлов из MAX; **v0.5.0**: `/new [папка]`, скрытие
+  архивных сессий; **v0.6.0**: durable outbox, at-least-once polling с dedupe,
+  глобальный лимитер, таймаут approvals, fail-closed-интерактив, `/health`,
+  audit/redaction, 161 тест.
+- Не реализовано из каталога: 5/8/11/12/14–29 (см. ниже); план — `ROADMAP.md`.
 
 ## 0. TL;DR
 

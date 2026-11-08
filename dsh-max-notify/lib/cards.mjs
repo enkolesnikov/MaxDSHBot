@@ -52,7 +52,16 @@ export function formatApprovalResult({ outcome, toolName, by } = {}) {
         : outcome === 'cancelled'
           ? '⏹ **Отменено**'
           : '⚠️ **Решение недоступно**'
-  const where = by === 'gui' ? ' (в GUI)' : by === 'max' ? ' (в MAX)' : ''
+  const where =
+    by === 'gui'
+      ? ' (в GUI)'
+      : by === 'max'
+        ? ' (в MAX)'
+        : by === 'timeout'
+          ? ' (таймаут)'
+          : by === 'rule'
+            ? ' (авто-правило)'
+            : ''
   return `${label}${where}${toolName ? `\n\n🔧 ${toolName}` : ''}`
 }
 

@@ -15,6 +15,7 @@ import {
   formatQuestionCard,
   truncate,
 } from './cards.mjs'
+import { PRIORITY } from './limits.mjs'
 
 const APPROVAL_TARGET = 'approval/request'
 
@@ -41,7 +42,7 @@ function keyboard(rows) {
  * @param {{chatId?: string, userId?: string}} options.target - send target.
  * @param {(session: object|undefined) => (string|undefined)} options.resolveTitle
  */
-export function createInteractions({ client, config, logger, target, resolveTitle } = {}) {
+export function createInteractions({ client, config, logger, target, resolveTitle, state, audit } = {}) {
   /** token -> pending interaction */
   const pending = new Map()
   /** chat key -> Set<token> for text-answered questions */
@@ -51,6 +52,9 @@ export function createInteractions({ client, config, logger, target, resolveTitl
   const enabled = config?.interactive !== false
   const approvalChannel = config?.approvalChannel ?? 'both'
   const questionChannel = config?.questionChannel ?? 'both'
+  const approvalTimeoutMs = Math.max(0, Number(config?.approvalTimeoutMs) || 0)
+  const rememberTools = new Set(Array.isArray(config?.approvalRememberTools) ? config.approvalRememberTools : [])
+  const rememberMs = Math.max(1000, Number(config?.approvalRememberMs) || 60 * 60 * 1000)
 
   function targetQuery() {
     if (target?.chatId !== undefined) return { chatId: target.chatId }
@@ -69,6 +73,7 @@ export function createInteractions({ client, config, logger, target, resolveTitl
       format: config?.format,
       notify: config?.notify,
       disableLinkPreview: true,
+      priority: PRIORITY.critical,
     }
     if (rows) params.attachments = keyboard(rows)
     const response = await client.sendMessage(params)
@@ -120,12 +125,21 @@ export function createInteractions({ client, config, logger, target, resolveTitl
   // ── approvals ────────────────────────────────────────────────────────────
 
   async function handleApproval(request, next) {
-    const guiPromise = next()
-    if (!enabled || disposed) return guiPromise
-    if (approvalChannel === 'gui') return guiPromise
-    if (!isTopLevelAgent(request?.agent)) return guiPromise
-    if (typeof client.sendMessage !== 'function') return guiPromise
+    if (!enabled || disposed) return next()
+    if (approvalChannel === 'gui') return next()
+    if (!isTopLevelAgent(request?.agent)) return next()
+    if (typeof client.sendMessage !== 'function') return next()
 
+    const toolName = request?.toolName
+    // A remembered scope answers before a card is created; the GUI never sees it.
+    const rule = state?.approvalRuleFor?.(toolName)
+    if (rule) {
+      audit?.approve?.({ tool: toolName, outcome: 'allowed-once', source: 'rule' })
+      logger?.info?.('MAX approval auto-allowed by rule for %s until %s', toolName, new Date(rule.until).toISOString())
+      return 'allowed-once'
+    }
+
+    const guiPromise = next()
     const token = randomUUID()
     const title = resolveTitle?.(request?.agent?.session)
     const displayReason =
@@ -134,31 +148,48 @@ export function createInteractions({ client, config, logger, target, resolveTitl
       Object.values(request?.displayReason ?? {})[0]
     const text = formatApprovalCard({
       title,
-      toolName: request?.toolName,
+      toolName,
       reason: displayReason ?? request?.reason,
       callId: request?.callId,
     })
 
+    const rows = [
+      [callbackButton('✅ Разрешить', { t: 'ap', tk: token, v: 'allow' })],
+      [callbackButton('❌ Отклонить', { t: 'ap', tk: token, v: 'deny' })],
+    ]
+    if (toolName && rememberTools.has(toolName)) {
+      rows.push([callbackButton('♾️ Разрешить и запомнить', { t: 'ap', tk: token, v: 'allow-always' })])
+    }
+
     let messageId
     try {
-      messageId = await sendCard(text, [
-        [callbackButton('✅ Разрешить', { t: 'ap', tk: token, v: 'allow' })],
-        [callbackButton('❌ Отклонить', { t: 'ap', tk: token, v: 'deny' })],
-      ])
+      messageId = await sendCard(text, rows)
     } catch (error) {
       logger?.warn?.('cannot send approval card to MAX: %s', error?.message || String(error))
       return guiPromise
     }
 
-    const record = { kind: 'approval', token, messageId, chatId: target?.chatId, resolve: undefined }
+    const record = { kind: 'approval', token, messageId, chatId: target?.chatId, toolName, resolve: undefined }
     const chatPromise = new Promise((resolve) => {
       record.resolve = resolve
     })
     pending.set(token, record)
+    state?.addPendingCard?.({ token, kind: 'approval', messageId, chatId: target?.chatId })
+
+    let timer
+    const timeoutPromise =
+      approvalTimeoutMs > 0
+        ? new Promise((resolve) => {
+            timer = setTimeout(() => resolve({ from: 'timeout' }), approvalTimeoutMs)
+            timer.unref?.()
+          })
+        : undefined
 
     const onAbort = () => {
       if (pending.get(token) === record) {
         pending.delete(token)
+        state?.removePendingCard?.(token)
+        audit?.approve?.({ tool: record.toolName, outcome: 'cancelled', source: 'abort' })
         record.resolve('cancelled')
       }
     }
@@ -169,21 +200,37 @@ export function createInteractions({ client, config, logger, target, resolveTitl
         (outcome) => ({ from: 'gui', outcome }),
         (error) => ({ from: 'gui-error', error }),
       )
-      const winner = await Promise.race([chatPromise.then((outcome) => ({ from: 'chat', outcome })), guiOutcome])
+      const racers = [chatPromise.then((outcome) => ({ from: 'chat', outcome })), guiOutcome]
+      if (timeoutPromise) racers.push(timeoutPromise)
+      const winner = await Promise.race(racers)
+      // A reload already marked the card stale; do not overwrite it.
+      if (disposed) return winner.from === 'chat' ? winner.outcome : 'cancelled'
 
+      if (winner.from === 'timeout') {
+        void guiPromise.catch(() => {})
+        await editCard(messageId, formatApprovalResult({ outcome: 'rejected', toolName, by: 'timeout' }))
+        audit?.approve?.({ tool: toolName, outcome: 'rejected', source: 'timeout' })
+        logger?.warn?.('MAX approval timed out after %d ms for %s (rejected)', approvalTimeoutMs, toolName)
+        return 'rejected'
+      }
       if (winner.from === 'chat') {
         void guiPromise.catch(() => {})
-        await editCard(messageId, formatApprovalResult({ outcome: winner.outcome, toolName: request?.toolName, by: 'max' }))
+        await editCard(messageId, formatApprovalResult({ outcome: winner.outcome, toolName, by: 'max' }))
+        if (!record.audited) audit?.approve?.({ tool: toolName, outcome: winner.outcome, source: 'max' })
         return winner.outcome
       }
       if (winner.from === 'gui-error') {
-        await editCard(messageId, formatApprovalResult({ outcome: 'unavailable', toolName: request?.toolName }))
+        await editCard(messageId, formatApprovalResult({ outcome: 'unavailable', toolName }))
+        audit?.approve?.({ tool: toolName, outcome: 'unavailable', source: 'gui-error' })
         throw winner.error
       }
-      await editCard(messageId, formatApprovalResult({ outcome: winner.outcome, toolName: request?.toolName, by: 'gui' }))
+      await editCard(messageId, formatApprovalResult({ outcome: winner.outcome, toolName, by: 'gui' }))
+      audit?.approve?.({ tool: toolName, outcome: winner.outcome, source: 'gui' })
       return winner.outcome
     } finally {
+      if (timer) clearTimeout(timer)
       pending.delete(token)
+      state?.removePendingCard?.(token)
       request?.signal?.removeEventListener?.('abort', onAbort)
     }
   }
@@ -241,6 +288,7 @@ export function createInteractions({ client, config, logger, target, resolveTitl
       record.resolve = resolve
     })
     pending.set(token, record)
+    state?.addPendingCard?.({ token, kind: 'question', messageId: record.messageId, chatId: target?.chatId })
     addQuestionToken(record)
 
     const onAbort = () => {
@@ -261,6 +309,7 @@ export function createInteractions({ client, config, logger, target, resolveTitl
         chatPromise.then((answer) => ({ from: 'chat', answer })),
         guiOutcome,
       ])
+      if (disposed) return { answers: answersArray(record) }
       if (winner.from === 'chat') {
         void guiPromise.catch(() => {})
         await editCard(record.messageId, `✅ **Ответ отправлен из MAX**\n\n${truncate(describeAnswers(record), 800)}`)
@@ -274,6 +323,7 @@ export function createInteractions({ client, config, logger, target, resolveTitl
       return winner.answer
     } finally {
       pending.delete(token)
+      state?.removePendingCard?.(token)
       dropQuestionToken(record)
       request?.signal?.removeEventListener?.('abort', onAbort)
     }
@@ -308,6 +358,7 @@ export function createInteractions({ client, config, logger, target, resolveTitl
     if (allAnswered(record)) {
       await editCard(record.messageId, `✅ **Ответ отправлен из MAX**\n\n${truncate(describeAnswers(record), 800)}`)
       pending.delete(token)
+      state?.removePendingCard?.(token)
       dropQuestionToken(record)
       record.resolve({ answers: answersArray(record) })
     } else {
@@ -384,19 +435,34 @@ export function createInteractions({ client, config, logger, target, resolveTitl
 
     if (data.t === 'ap') {
       pending.delete(record.token)
+      state?.removePendingCard?.(record.token)
+      const allowed = data.v === 'allow' || data.v === 'allow-always'
+      const remembered = data.v === 'allow-always' && record.toolName
+      if (remembered) {
+        state?.setApprovalRule?.(record.toolName, Date.now() + rememberMs)
+      }
       try {
-        await client.answerCallback(callbackId, { notification: data.v === 'allow' ? '✅ Разрешено' : '⛔ Отклонено' })
+        await client.answerCallback(callbackId, {
+          notification: remembered ? '✅ Разрешено и запомнено' : allowed ? '✅ Разрешено' : '⛔ Отклонено',
+        })
       } catch (error) {
         logger?.debug?.('cannot answer approval callback: %s', error?.message || String(error))
       }
       await editCard(
         record.messageId,
         formatApprovalResult({
-          outcome: data.v === 'allow' ? 'allowed-once' : 'rejected',
+          outcome: allowed ? 'allowed-once' : 'rejected',
+          toolName: record.toolName,
           by: 'max',
-        }),
+        }) + (remembered ? '\n\n♾️ Правило запомнено для этого инструмента.' : ''),
       )
-      record.resolve(data.v === 'allow' ? 'allowed-once' : 'rejected')
+      record.audited = true
+      audit?.approve?.({
+        tool: record.toolName,
+        outcome: allowed ? 'allowed-once' : 'rejected',
+        source: remembered ? 'max-remember' : 'max',
+      })
+      record.resolve(allowed ? 'allowed-once' : 'rejected')
       return true
     }
 
@@ -407,6 +473,7 @@ export function createInteractions({ client, config, logger, target, resolveTitl
     if (option) record.answers.set(question.id, { selected: [option.label] })
     if (allAnswered(record)) {
       pending.delete(record.token)
+      state?.removePendingCard?.(record.token)
       dropQuestionToken(record)
       try {
         await client.answerCallback(callbackId, { notification: '✅ Ответ отправлен' })
@@ -429,6 +496,15 @@ export function createInteractions({ client, config, logger, target, resolveTitl
   function dispose() {
     disposed = true
     for (const record of pending.values()) {
+      state?.removePendingCard?.(record.token)
+      if (record.messageId) {
+        void editCard(
+          record.messageId,
+          record.kind === 'approval'
+            ? '♻️ **Плагин перезагружен** — прими решение в GUI.'
+            : '♻️ **Плагин перезагружен** — ответь в GUI.',
+        )
+      }
       if (record.kind === 'approval') record.resolve('cancelled')
       else if (record.kind === 'question') record.resolve({ answers: answersArray(record) })
     }

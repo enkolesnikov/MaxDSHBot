@@ -36,9 +36,9 @@
 
 - **Двусторонний чат**: текст, отправленный боту в MAX, уходит в активную
   сессию (`sessionController.prompt`), ответ приходит обратно.
-- **Команды**: `/status`, `/stop`, `/sessions`, `/use N`, `/current`, `/new [папка]`, `/help`
-  (архивные сессии из Workspace в списке и дайджесте не показываются)
-  (меню команд регистрируется через `PATCH /me/commands`).
+- **Команды**: `/status`, `/stop`, `/sessions`, `/use N`, `/current`, `/new [папка]`,
+  `/health`, `/version`, `/ping`, `/help` (архивные сессии из Workspace в списке и
+  дайджесте не показываются; меню команд — `PATCH /me/commands`).
 - **Кнопки под ответом**: «Продолжить», «Стоп», «Открыть GUI».
 - **Live-прогресс**: одно сообщение редактируется во время работы
   (инструмент, текст, таймер) + `typing_on`; удаляется в конце хода.
@@ -56,6 +56,27 @@
   в `<рабочая папка сессии>/max-inbox/`, агенту передаётся промпт с путями и
   типами (read/read_image); лимиты размера/количества, безопасные имена,
   отчёт об ошибках в чат.
+
+### Надёжность и безопасность (v0.6)
+
+- **Durable outbox**: финальные ответы и уведомления переживают недоступность
+  MAX и перезагрузку плагина; exponential backoff, TTL 48 ч, приоритетная
+  очередь, дедупликация по бизнес-ключу.
+- **At-least-once long polling**: marker сдвигается только после обработки
+  батча, обработанные update-id сохраняются — повторная доставка не создаёт
+  второй промпт.
+- **Глобальный лимитер**: 2 запроса/с на чат и 30/с суммарно; approvals и
+  ошибки идут в critical-lane и не ждут очереди уведомлений.
+- **Approvals без зависаний**: таймаут 120 с (настраивается) отклоняет запрос,
+  карточка помечается «таймаут»; кнопка «Разрешить и запомнить» хранит правило
+  для инструмента на 1 ч (только для явного `approvalRememberTools`).
+- **Fail-closed**: без `allowedUserIds`/`allowedChatIds` интерактив (команды,
+  approvals, polling) выключен; уведомления работают. Осознанный escape —
+  `allowUnlistedUsers: true`.
+- **Наблюдаемость**: `/health`, `/version`, `/ping`, heartbeat-файл,
+  health snapshot (последний poll/ошибка, глубина outbox, ожидания лимитера),
+  audit log `$DSH_HOME/max-notify/audit.jsonl` (0600), redaction токенов в логах.
+- **Защита от флуда** входящих сообщений и единая очередь всех HTTP-вызовов MAX.
 
 ## Быстрый старт
 
@@ -127,7 +148,16 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 | `quietHours` | — | `{start: '23:00', end: '08:00'}` — без push ночью |
 | `digestEnabled` / `digestTime` | `false` / `21:00` | ежедневный дайджест |
 | `mode` | `all` | стартовый режим: `all`, `errors`, `mute` |
-| `stateFile` | `$DSH_HOME/max-notify/state.json` | marker и активная сессия (вне репозитория) |
+| `stateFile` | `$DSH_HOME/max-notify/state.json` | marker, активная сессия, health, dedupe-ключи (вне репозитория) |
+| `outboxEnabled` / `outboxMaxItems` / `outboxTtlHours` | `true` / `200` / `48` | durable-очередь недоставленных сообщений |
+| `outboxFile` | `$DSH_HOME/max-notify/outbox.json` | файл outbox (вне репозитория) |
+| `ratePerChatPerSecond` / `rateGlobalPerSecond` | `2` / `30` | глобальный лимитер MAX API |
+| `approvalTimeoutMs` | `120000` | таймаут approvals, `0` — ждать бесконечно |
+| `approvalRememberTools` / `approvalRememberMs` | `[]` / `3600000` | «запомнить разрешение» только для явно перечисленных инструментов |
+| `allowUnlistedUsers` | `false` | разрешить интерактив без allowlist (небезопасно) |
+| `incomingPerMinute` / `incomingBurst` | `30` / `10` | защита от флуда входящих |
+| `auditLog` / `auditFile` | `true` / `$DSH_HOME/max-notify/audit.jsonl` | аудит approvals/вопросов/команд |
+| `heartbeatFile` | — | JSON-файл здоровья для внешнего мониторинга |
 
 ## Структура
 
@@ -143,21 +173,37 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 | `dsh-max-notify/lib/interactions.mjs` | approvals/вопросы/кнопки, гонка MAX vs GUI |
 | `dsh-max-notify/lib/progress.mjs` | live-карточка прогресса и typing |
 | `dsh-max-notify/lib/deliverables.mjs` | uploads файлов из `present` |
-| `dsh-max-notify/lib/state.mjs` | marker, активная сессия, режим, дата дайджеста (вне репозитория) |
+| `dsh-max-notify/lib/state.mjs` | marker, сессии, health, dedupe-ключи, approval-правила (вне репозитория) |
+| `dsh-max-notify/lib/limits.mjs` | глобальный лимитер MAX API (2/с на чат, 30/с) |
+| `dsh-max-notify/lib/outbox.mjs` | durable-очередь с retry и дедупликацией |
+| `dsh-max-notify/lib/health.mjs` | health snapshot для `/health` и heartbeat |
+| `dsh-max-notify/lib/audit.mjs` | JSONL-аудит решений (0600) |
+| `dsh-max-notify/lib/redact.mjs` | redaction токенов в логах |
+| `dsh-max-notify/CHANGELOG.md` | история версий |
+| `ROADMAP.md` | дорожная карта 0.6 → 1.0 |
 | `dsh-max-notify/lib/policy.mjs` | режимы уведомлений и тихие часы |
 | `dsh-max-notify/lib/observer.mjs` | события, TODO-прогресс и дайджест |
 | `dsh-max-notify/tools/` | `pair.mjs` (chat_id), `send-test.mjs` |
-| `dsh-max-notify/test/` | `node --test` (121 тестов) |
+| `dsh-max-notify/test/` | `node --test` (161 тест) |
 | `research/` | как писать плагины DSH, MAX Bot API, каталог фич |
 
 ## Ограничения
 
 - Пересылается только финальный текст хода (не стрим и не tool-шаги).
 - MAX markdown не поддерживает списки/таблицы: `- пункт` отрисуется текстом.
+- **Fail-closed**: без `allowedUserIds`/`allowedChatIds` интерактив выключен
+  (уведомления идут). Это защита от «кто угодно управляет агентом»; вернуть
+  старое поведение можно `allowUnlistedUsers: true`, но тогда бот открыт всем,
+  кто знает чат.
 - Приём сообщений — long polling (`GET /updates`): **один поллер на токен**;
-  запущенный `tools/pair.mjs` конкурирует с плагином за события. Для
-  production MAX рекомендует webhook (публичный HTTPS :443 с сертификатом,
-  которому доверяет MAX) — тогда polling в плагине надо выключить (`polling: false`).
+  запущенный `tools/pair.mjs` конкурирует с плагином за события. Webhook —
+  в дорожной карте (0.9): MAX требует публичный HTTPS :443 с доверенным
+  сертификатом; nginx с Let's Encrypt на этом сервере уже готов.
+- Approvals по умолчанию истекают через 120 с (fail-closed). Если нужно ждать
+  дольше — `approvalTimeoutMs: 0`.
+- Outbox гарантирует **at-least-once**: при сбое между отправкой и записью
+  ключа возможен повтор; дедупликация закрывает типовые случаи (reload,
+  повторный батч polling).
 - Approvals/вопросы в режиме `both` гоняются с Web GUI: кто ответил первым, тот
   и прав; карточка в проигравшем канале помечается «решено в другом месте».
 - `interactive`/`polling` требуют `sessionController` (есть в web-профиле);
@@ -170,7 +216,7 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 ## Проверка
 
 ```bash
-cd dsh-max-notify && npm test          # 121 unit tests
+cd dsh-max-notify && npm test          # 161 unit test
 node tools/send-test.mjs "проверка"    # реальная отправка
 DSH_HOME=$HOME/.dsh dsh --profile web --dump-config | grep -A12 'id: max-notify'
 ```

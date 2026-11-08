@@ -40,7 +40,7 @@ function baseConfig(overrides = {}) {
   }
 }
 
-function makeObserver({ config = {}, policy, runtime, state } = {}) {
+function makeObserver({ config = {}, policy, runtime, state, outbox } = {}) {
   const client = createFakeClient()
   const observer = createObserver({
     client,
@@ -56,6 +56,7 @@ function makeObserver({ config = {}, policy, runtime, state } = {}) {
       ],
     },
     state: state ?? { getDigestDate: () => undefined, setDigestDate: () => {} },
+    outbox,
   })
   return { client, observer }
 }
@@ -182,4 +183,53 @@ test('digest respects the notification policy', async () => {
   await observer.sendDigest()
   await tick(120)
   assert.equal(client.sent.length, 0)
+})
+
+
+test('notifications are enqueued into the durable outbox when it is available', async () => {
+  const enqueued = []
+  const flushes = []
+  const outbox = {
+    enqueue(item) {
+      enqueued.push(item)
+      return true
+    },
+    async flush() {
+      flushes.push(1)
+    },
+  }
+  const { client, observer } = makeObserver({ outbox })
+  observer.onSubagentEnd({
+    id: 'session-child',
+    stopReason: 'completed',
+    lastAssistantMessage: [{ type: 'text', text: 'ok' }],
+  })
+  await tick()
+  assert.equal(enqueued.length, 1)
+  assert.equal(enqueued[0].kind, 'subagent')
+  assert.equal(enqueued[0].dedupeKey, 'subagent:session-child')
+  assert.equal(flushes.length, 1)
+  assert.equal(client.sent.length, 0)
+})
+
+test('error notifications use the critical priority lane', async () => {
+  const enqueued = []
+  const outbox = {
+    enqueue(item) {
+      enqueued.push(item)
+      return true
+    },
+    async flush() {},
+  }
+  const { observer } = makeObserver({ outbox })
+  observer.onAgentError({
+    agent: { session: { id: 'session-1', header: {} } },
+    turn: 2,
+    step: 3,
+    error: new Error('boom'),
+  })
+  await tick()
+  assert.equal(enqueued.length, 1)
+  assert.equal(enqueued[0].priority, 10)
+  assert.equal(enqueued[0].dedupeKey, 'error:session-1:2:3')
 })

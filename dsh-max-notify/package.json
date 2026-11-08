@@ -1,7 +1,7 @@
 {
   "name": "dsh-max-notify",
-  "version": "0.5.0",
-  "description": "DSH → MAX messenger plugin: agent replies with images, remote control, observability, and two-way file exchange (incoming MAX attachments → workspace, present/tool images → MAX)",
+  "version": "0.6.0",
+  "description": "DSH → MAX messenger plugin: reliable agent replies (durable outbox, dedupe, rate limits), remote control with approval timeouts and audit, observability, images and two-way file exchange",
   "type": "module",
   "main": "index.js",
   "exports": {
@@ -15,19 +15,41 @@
     "certs",
     "tools",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "test": "node --test \"test/**/*.test.mjs\"",
-    "check": "node --check index.js && node --check lib/transport.mjs && node --check lib/extract.mjs && node --check lib/format.mjs && node --check lib/state.mjs && node --check lib/cards.mjs && node --check lib/interactions.mjs && node --check lib/progress.mjs && node --check lib/deliverables.mjs && node --check lib/bot.mjs"
+    "check": "node --check index.js && node --check lib/transport.mjs && node --check lib/extract.mjs && node --check lib/format.mjs && node --check lib/state.mjs && node --check lib/cards.mjs && node --check lib/interactions.mjs && node --check lib/progress.mjs && node --check lib/deliverables.mjs && node --check lib/bot.mjs && node --check lib/policy.mjs && node --check lib/observer.mjs && node --check lib/images.mjs && node --check lib/incoming.mjs && node --check lib/sessions.mjs && node --check lib/create-session.mjs && node --check lib/limits.mjs && node --check lib/outbox.mjs && node --check lib/health.mjs && node --check lib/audit.mjs && node --check lib/redact.mjs"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20",
+    "dsh": ">=0.2.1 <0.3.0-0"
   },
   "license": "MIT",
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
-    }
-  }
+    },
+    "manifestVersion": 1
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/enkolesnikov/MaxDSHBot.git",
+    "directory": "dsh-max-notify"
+  },
+  "homepage": "https://github.com/enkolesnikov/MaxDSHBot#readme",
+  "bugs": {
+    "url": "https://github.com/enkolesnikov/MaxDSHBot/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "max",
+    "max-messenger",
+    "notifications",
+    "remote-control",
+    "agent"
+  ]
 }

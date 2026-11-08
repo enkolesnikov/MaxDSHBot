@@ -30,3 +30,17 @@
         includeSubagents: false
         skipReasons: [interrupted, forked]
         maxChars: 3800
+        # Reliability & security (v0.6). Uncomment to override defaults.
+        # outboxEnabled: true
+        # outboxMaxItems: 200
+        # outboxTtlHours: 48
+        # ratePerChatPerSecond: 2
+        # rateGlobalPerSecond: 30
+        # approvalTimeoutMs: 120000
+        # approvalRememberTools: [some_safe_tool]
+        # approvalRememberMs: 3600000
+        # allowUnlistedUsers: false
+        # incomingPerMinute: 30
+        # incomingBurst: 10
+        # auditLog: true
+        # heartbeatFile: /var/lib/dsh/max-notify-heartbeat.json

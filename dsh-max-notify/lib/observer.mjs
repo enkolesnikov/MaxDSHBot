@@ -13,6 +13,7 @@ import {
   truncate,
 } from './cards.mjs'
 import { extractAssistantText } from './extract.mjs'
+import { PRIORITY } from './limits.mjs'
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -27,7 +28,7 @@ function isTopLevel(session) {
   return !(Number(header.delegationDepth ?? 0) > 0)
 }
 
-export function createObserver({ client, config, logger, target, policy, runtime, state } = {}) {
+export function createObserver({ client, config, logger, target, policy, runtime, state, outbox } = {}) {
   let disposed = false
   let queue = Promise.resolve()
   let lastSentAt = 0
@@ -58,10 +59,26 @@ export function createObserver({ client, config, logger, target, policy, runtime
   }
 
   /** Queue one notification while respecting MAX's 2 messages/second limit. */
-  function send(kind, text) {
+  function send(kind, text, { dedupeKey, priority } = {}) {
     const decision = decide(kind)
     if (!decision.send) {
       logger?.debug?.('notification %s suppressed (%s)', kind, decision.reason)
+      return
+    }
+    if (outbox) {
+      outbox.enqueue({
+        dedupeKey,
+        kind,
+        priority: priority ?? (kind === 'error' ? PRIORITY.critical : PRIORITY.normal),
+        params: {
+          ...targetQuery(),
+          text,
+          format: config.format,
+          notify: decision.notify,
+          disableLinkPreview: true,
+        },
+      })
+      void outbox.flush().catch((error) => logger?.warn?.('outbox flush failed: %s', error?.message || String(error)))
       return
     }
     queue = queue
@@ -112,7 +129,9 @@ export function createObserver({ client, config, logger, target, policy, runtime
     const previous = todoProgress.get(sessionId)
     if (previous && previous.completed === completed) return
     todoProgress.set(sessionId, { completed })
-    send('todo', formatTodoCard({ title, todos: items }))
+    send('todo', formatTodoCard({ title, todos: items }), {
+      dedupeKey: `todo:${sessionId}:${completed}:${items.length}`,
+    })
   }
 
   function onSubagentEnd(info) {
@@ -125,12 +144,14 @@ export function createObserver({ client, config, logger, target, policy, runtime
         stopReason: info?.stopReason,
         excerpt,
       }),
+      { dedupeKey: info?.id ? `subagent:${info.id}` : undefined },
     )
   }
 
   function onAgentError(payload) {
     if (!config.notifyErrors || disposed) return
     if (!isTopLevel(payload?.agent?.session)) return
+    const errorSession = String(payload?.agent?.session?.id ?? '')
     send(
       'error',
       formatErrorCard({
@@ -139,6 +160,7 @@ export function createObserver({ client, config, logger, target, policy, runtime
         step: payload?.step,
         error: payload?.error,
       }),
+      { dedupeKey: `error:${errorSession}:${payload?.turn ?? ''}:${payload?.step ?? ''}`, priority: PRIORITY.critical },
     )
   }
 
@@ -159,6 +181,7 @@ export function createObserver({ client, config, logger, target, policy, runtime
         goal: change.goal,
         operation,
       }),
+      { dedupeKey: `goal:${sessionId}:${operation}:${change.goal?.id ?? ''}` },
     )
   }
 
@@ -166,7 +189,7 @@ export function createObserver({ client, config, logger, target, policy, runtime
     if (!config.notifyJobs || disposed) return
     if (event?.type !== 'settled') return
     if (event.awaited === true && !config.notifyAwaitedJobs) return
-    send('job', formatJobCard({ job: event.job }))
+    send('job', formatJobCard({ job: event.job }), { dedupeKey: event.job?.id ? `job:${event.job.id}` : undefined })
   }
 
   async function sendDigest() {
@@ -187,7 +210,7 @@ export function createObserver({ client, config, logger, target, policy, runtime
       goals: [...goals.values()],
       todos: [...todos.entries()].map(([sessionId, entry]) => ({ sessionId, ...entry })),
     })
-    send('digest', text)
+    send('digest', text, { dedupeKey: `digest:${localDayKey()}` })
     state?.setDigestDate?.(localDayKey())
   }
 

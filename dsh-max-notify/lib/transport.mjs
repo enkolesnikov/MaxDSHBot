@@ -18,6 +18,7 @@ import { basename, extname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import https from 'node:https'
 import { rootCertificates } from 'node:tls'
+import { redact } from './redact.mjs'
 
 export const MAX_API_BASE = 'https://platform-api2.max.ru'
 export const MAX_TEXT_LIMIT = 4000
@@ -118,11 +119,14 @@ export function createMaxClient(options = {}) {
     maxRetries = 3,
     minIntervalMs = 600,
     log,
+    limiter,
   } = options
 
   if (typeof token !== 'string' || token.trim() === '') {
     throw new Error('MAX bot token is required (config.botToken or MAX_BOT_TOKEN)')
   }
+  // The log sink must never receive token-like material.
+  const logSink = typeof log === 'function' ? (level, message) => log(level, redact(String(message))) : undefined
 
   let caValue = ca
   if (caValue === undefined) {
@@ -131,7 +135,7 @@ export function createMaxClient(options = {}) {
     } else if (!insecureTls) {
       caValue = loadBundledCa()
       if (caValue === undefined) {
-        log?.('warn', 'bundled MAX CA chain not found; falling back to the system trust store')
+        logSink?.('warn', 'bundled MAX CA chain not found; falling back to the system trust store')
       }
     }
   }
@@ -143,8 +147,9 @@ export function createMaxClient(options = {}) {
       ? caValue
       : [...(Array.isArray(caValue) ? caValue : [caValue]), ...rootCertificates]
 
-  const request = ({ method, path, query, body, timeoutMs: callTimeoutMs }) =>
-    new Promise((resolve, reject) => {
+  const request = ({ method, path, query, body, timeoutMs: callTimeoutMs, chatKey, priority, skipLimiter }) => {
+    const execute = () =>
+      new Promise((resolve, reject) => {
       let url
       try {
         url = new URL(path, baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`)
@@ -205,7 +210,12 @@ export function createMaxClient(options = {}) {
       req.on('error', reject)
       if (payload) req.write(payload)
       req.end()
-    })
+      })
+    if (!skipLimiter && limiter) {
+      return limiter.acquire(chatKey ?? null, priority ?? 0).then(execute)
+    }
+    return execute()
+  }
 
   const RETRIABLE_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE'])
 
@@ -223,7 +233,7 @@ export function createMaxClient(options = {}) {
           RETRIABLE_CODES.has(error?.code)
         if (!retriable || attempt > maxRetries) throw error
         const delay = error?.retryAfterMs ?? Math.min(500 * 2 ** attempt, 8000)
-        log?.('warn', `MAX API retry ${attempt}/${maxRetries} in ${delay}ms: ${error.message}`)
+        logSink?.('warn', `MAX API retry ${attempt}/${maxRetries} in ${delay}ms: ${error.message}`)
         await sleep(delay)
       }
     }
@@ -250,6 +260,7 @@ export function createMaxClient(options = {}) {
         path: 'updates',
         query: { timeout, limit, marker, types },
         timeoutMs: callTimeoutMs,
+        skipLimiter: true,
       }),
     )
   }
@@ -266,15 +277,20 @@ export function createMaxClient(options = {}) {
    * @param {boolean} [params.notify]
    * @param {boolean} [params.disableLinkPreview]
    * @param {Array<object>} [params.attachments]
+   * @param {number} [params.priority] - limiter priority (critical jumps the queue).
    */
-  async function sendMessage({ chatId, userId, text, format, notify, disableLinkPreview, attachments } = {}) {
+  async function sendMessage({ chatId, userId, text, format, notify, disableLinkPreview, attachments, priority } = {}) {
     if (typeof text !== 'string' || text.length === 0) throw new Error('text is required')
     if (text.length > MAX_TEXT_LIMIT) throw new RangeError(`text exceeds ${MAX_TEXT_LIMIT} chars; use sendText`)
     if (chatId === undefined && userId === undefined) throw new Error('chatId or userId is required')
 
-    const gap = minIntervalMs - (Date.now() - lastSendAt)
-    if (gap > 0) await sleep(gap)
-    lastSendAt = Date.now()
+    // Without the shared limiter keep the legacy per-client pacing.
+    if (!limiter) {
+      const gap = minIntervalMs - (Date.now() - lastSendAt)
+      if (gap > 0) await sleep(gap)
+      lastSendAt = Date.now()
+    }
+    const chatKey = chatId !== undefined ? `chat:${chatId}` : `user:${userId}`
 
     const body = { text }
     if (format) body.format = format
@@ -300,7 +316,7 @@ export function createMaxClient(options = {}) {
   }
 
   /** PUT /messages?message_id= — edit one bot message (text/attachments/format). */
-  function editMessage({ messageId, text, format, attachments, notify, link, disableLinkPreview } = {}) {
+  function editMessage({ messageId, text, format, attachments, notify, link, disableLinkPreview, chatKey, priority } = {}) {
     if (!messageId) throw new Error('messageId is required')
     const body = {}
     if (text !== undefined) body.text = text
@@ -311,29 +327,36 @@ export function createMaxClient(options = {}) {
     if (link !== undefined) body.link = link
     const query = { message_id: messageId }
     if (disableLinkPreview !== undefined) query.disable_link_preview = disableLinkPreview
-    return withRetry(() => request({ method: 'PUT', path: 'messages', query, body }))
+    return withRetry(() => request({ method: 'PUT', path: 'messages', query, body, chatKey, priority }))
   }
 
   /** DELETE /messages?message_id= — delete one bot message. */
-  function deleteMessage(messageId) {
+  function deleteMessage(messageId, { chatKey, priority } = {}) {
     if (!messageId) throw new Error('messageId is required')
-    return withRetry(() => request({ method: 'DELETE', path: 'messages', query: { message_id: messageId } }))
+    return withRetry(() => request({ method: 'DELETE', path: 'messages', query: { message_id: messageId }, chatKey, priority }))
   }
 
   /** POST /answers?callback_id= — answer an inline-keyboard press. */
-  function answerCallback(callbackId, { message, notification } = {}) {
+  function answerCallback(callbackId, { message, notification, priority } = {}) {
     if (!callbackId) throw new Error('callbackId is required')
     const body = {}
     if (message !== undefined) body.message = message
     if (notification !== undefined) body.notification = notification
-    return withRetry(() => request({ method: 'POST', path: 'answers', query: { callback_id: callbackId }, body }))
+    return withRetry(() =>
+      request({ method: 'POST', path: 'answers', query: { callback_id: callbackId }, body, priority }),
+    )
   }
 
   /** POST /chats/{chatId}/actions — e.g. `typing_on`. Works in dialogs (verified live). */
   function sendAction(chatId, action = 'typing_on') {
     if (chatId === undefined || chatId === null) throw new Error('chatId is required')
     return withRetry(() =>
-      request({ method: 'POST', path: `chats/${encodeURIComponent(String(chatId))}/actions`, body: { action } }),
+      request({
+        method: 'POST',
+        path: `chats/${encodeURIComponent(String(chatId))}/actions`,
+        body: { action },
+        chatKey: `chat:${chatId}`,
+      }),
     )
   }
 
@@ -436,6 +459,7 @@ export function createMaxClient(options = {}) {
     )
     const tail = Buffer.from(`\r\n--${boundary}--\r\n`)
     const multipart = Buffer.concat([head, bytes, tail])
+    if (limiter) await limiter.acquire(null)
     const uploaded = await postRaw(created.url, {
       body: multipart,
       contentType: `multipart/form-data; boundary=${boundary}`,
@@ -579,6 +603,8 @@ export function createMaxClient(options = {}) {
     uploadTypeFor,
     baseUrl,
     token,
+    limiter,
+    stats: () => ({ limiter: limiter?.snapshot?.() }),
   }
 }
 

@@ -42,6 +42,8 @@ function makeInteractions(overrides = {}) {
     logger: silentLogger,
     target: { chatId: '123456789' },
     resolveTitle: () => 'Тестовая сессия',
+    state: overrides.state,
+    audit: overrides.audit,
   })
   return { client, interactions }
 }
@@ -194,4 +196,78 @@ test('dispose resolves pending approvals as cancelled', async () => {
   await tick()
   interactions.dispose()
   assert.equal(await outcomePromise, 'cancelled')
+})
+
+
+test('an unanswered approval is rejected after the timeout', async () => {
+  const audit = { entries: [], approve(entry) { this.entries.push(entry) } }
+  const { client, interactions } = makeInteractions({ approvalTimeoutMs: 30, audit })
+  const startedAt = Date.now()
+  const outcome = await interactions.handleApproval(approvalRequest(), () => new Promise(() => {}))
+  assert.equal(outcome, 'rejected')
+  assert.ok(Date.now() - startedAt >= 25)
+  assert.match(client.edits.at(-1).text, /таймаут/i)
+  assert.deepEqual(audit.entries.at(-1), { tool: 'bash', outcome: 'rejected', source: 'timeout' })
+})
+
+test('a remembered rule auto-allows without sending a card', async () => {
+  const calls = []
+  const state = {
+    approvalRuleFor(tool) {
+      return tool === 'bash' ? { tool: 'bash', until: Date.now() + 60_000 } : undefined
+    },
+    addPendingCard() {},
+    removePendingCard() {},
+    setApprovalRule(tool, until) {
+      calls.push({ tool, until })
+    },
+  }
+  const audit = { entries: [], approve(entry) { this.entries.push(entry) } }
+  const { client, interactions } = makeInteractions({ state, audit })
+  const outcome = await interactions.handleApproval(approvalRequest(), () => new Promise(() => {}))
+  assert.equal(outcome, 'allowed-once')
+  assert.equal(client.sent.length, 0)
+  assert.deepEqual(audit.entries.at(-1), { tool: 'bash', outcome: 'allowed-once', source: 'rule' })
+})
+
+test('"allow and remember" stores a scoped rule and resolves allowed-once', async () => {
+  const stored = []
+  const state = {
+    approvalRuleFor() {
+      return undefined
+    },
+    addPendingCard() {},
+    removePendingCard() {},
+    setApprovalRule(tool, until) {
+      stored.push({ tool, until })
+    },
+  }
+  const audit = { entries: [], approve(entry) { this.entries.push(entry) } }
+  const { client, interactions } = makeInteractions({
+    approvalRememberTools: ['bash'],
+    state,
+    audit,
+  })
+  const outcomePromise = interactions.handleApproval(approvalRequest(), () => new Promise(() => {}))
+  await tick()
+  const buttons = cardButtons(client)
+  assert.equal(buttons.length, 3)
+  const remember = buttons[2][0].payload
+  assert.equal(JSON.parse(remember).v, 'allow-always')
+  await interactions.handleCallback({ callbackId: 'cb-remember', payload: remember })
+  assert.equal(await outcomePromise, 'allowed-once')
+  assert.equal(stored.length, 1)
+  assert.equal(stored[0].tool, 'bash')
+  assert.ok(stored[0].until > Date.now())
+  assert.match(client.answers.at(-1).body.notification, /запомнено/)
+  assert.deepEqual(audit.entries.at(-1), { tool: 'bash', outcome: 'allowed-once', source: 'max-remember' })
+})
+
+test('dispose marks pending cards as stale', async () => {
+  const { client, interactions } = makeInteractions()
+  const outcomePromise = interactions.handleApproval(approvalRequest(), () => new Promise(() => {}))
+  await tick()
+  interactions.dispose()
+  assert.equal(await outcomePromise, 'cancelled')
+  assert.match(client.edits.at(-1).text, /перезагружен/i)
 })

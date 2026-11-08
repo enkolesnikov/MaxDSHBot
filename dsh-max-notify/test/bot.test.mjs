@@ -40,9 +40,17 @@ function createFakeClient() {
 
 function createMemoryState(initial = {}) {
   const sessions = { ...(initial.sessions ?? {}) }
+  const processed = new Set(initial.processed ?? [])
   return {
     marker: initial.marker,
     sessions,
+    processed,
+    hasProcessed(key) {
+      return processed.has(String(key))
+    },
+    markProcessed(key) {
+      processed.add(String(key))
+    },
     setMarker(value) {
       this.marker = value
     },
@@ -130,6 +138,11 @@ function makeBot(overrides = {}) {
     runtime,
     policy: overrides.policy,
     observer: overrides.observer,
+    health: overrides.health,
+    version: overrides.version,
+    outbox: overrides.outbox,
+    limiter: overrides.limiter,
+    audit: overrides.audit,
   })
   return { bot, client, state, runtime, calls }
 }
@@ -141,7 +154,7 @@ function messageUpdate({ text, userId = 987654321, chatId = 123456789, isBot = f
     message: {
       sender: { user_id: userId, is_bot: isBot },
       recipient: { chat_id: chatId },
-      body: { text, attachments: [] },
+      body: { text, attachments: [], mid: `mid-${text}-${userId}-${chatId}` },
     },
   }
 }
@@ -262,12 +275,12 @@ test('pollOnce primes the marker first and then processes new updates', async ()
   })
 
   const primed = await bot.pollOnce()
-  assert.deepEqual(primed, { primed: true, count: 0 })
+  assert.deepEqual(primed, { primed: true, count: 0, handled: 0 })
   assert.equal(state.marker, 555)
 
   updateBatch = [messageUpdate({ text: 'из поллинга' })]
   const next = await bot.pollOnce()
-  assert.deepEqual(next, { primed: false, count: 1 })
+  assert.deepEqual(next, { primed: false, count: 1, handled: 1 })
   assert.equal(state.marker, 777)
 })
 
@@ -383,4 +396,78 @@ test('/sessions includes the active blank session', async () => {
   await bot.handleUpdate(messageUpdate({ text: '/sessions' }))
   assert.match(client.sent[0].text, /Сессии/)
   assert.match(client.sent[0].text, /▶️ 1\)/)
+})
+
+
+test('a redelivered batch does not duplicate prompts (update dedupe)', async () => {
+  const client = createFakeClient()
+  const state = createMemoryState()
+  const { runtime, calls } = runtimeStub()
+  const update = messageUpdate({ text: 'только один раз' })
+  client.getUpdates = async (params) =>
+    params.marker === undefined ? { updates: [], marker: 10 } : { updates: [update], marker: 11 }
+  const bot = createBot({ client, config: config(), logger: { info() {}, warn() {}, debug() {} }, state, runtime })
+
+  await bot.pollOnce()
+  await bot.pollOnce()
+  await bot.pollOnce()
+  assert.deepEqual(calls.prompts, [{ sessionId: 'session-aaaaaaaa', text: 'только один раз' }])
+})
+
+test('a failed handler keeps the marker and redelivers unhandled updates', async () => {
+  const client = createFakeClient()
+  const state = createMemoryState()
+  let failures = 1
+  const { runtime, calls } = runtimeStub()
+  const originalPrompt = runtime.promptSession
+  runtime.promptSession = async (sessionId, text) => {
+    if (failures > 0) {
+      failures -= 1
+      throw new Error('prompt failed')
+    }
+    return originalPrompt(sessionId, text)
+  }
+  const updates = [messageUpdate({ text: 'первый' }), messageUpdate({ text: 'второй' })]
+  client.getUpdates = async (params) =>
+    params.marker === undefined ? { updates: [], marker: 20 } : { updates, marker: 21 }
+  const bot = createBot({ client, config: config(), logger: { info() {}, warn() {}, debug() {} }, state, runtime })
+
+  await bot.pollOnce()
+  await assert.rejects(bot.pollOnce(), /prompt failed/)
+  assert.equal(state.marker, 20)
+  const retry = await bot.pollOnce()
+  assert.equal(retry.handled, 2)
+  assert.equal(state.marker, 21)
+  assert.deepEqual(calls.prompts.map((entry) => entry.text), ['первый', 'второй'])
+})
+
+test('/health, /version and /ping answer with runtime data', async () => {
+  const health = {
+    snapshot: () => ({
+      uptimeMs: 65_000,
+      lastPollAt: Date.now() - 5_000,
+      lastUpdateAt: Date.now() - 1_000,
+      pollStopped: false,
+    }),
+  }
+  const outbox = { snapshot: () => ({ pending: 2, sent: 10, failed: 1 }) }
+  const limiter = { snapshot: () => ({ queueDepth: 0, waits: 3 }) }
+  const { bot, client } = makeBot({ health, outbox, limiter, version: '0.6.0' })
+  await bot.handleUpdate(messageUpdate({ text: '/health' }))
+  assert.match(client.sent[0].text, /dsh-max-notify.*0\.6\.0/s)
+  assert.match(client.sent[0].text, /outbox: 2/)
+  await bot.handleUpdate(messageUpdate({ text: '/version' }))
+  assert.match(client.sent[1].text, /v0\.6\.0/)
+  await bot.handleUpdate(messageUpdate({ text: '/ping' }))
+  assert.match(client.sent[2].text, /pong/)
+})
+
+test('incoming flood protection answers once per warning window', async () => {
+  const { bot, client, calls } = makeBot({ config: { incomingPerMinute: 1, incomingBurst: 1 } })
+  await bot.handleUpdate(messageUpdate({ text: 'раз' }))
+  await bot.handleUpdate(messageUpdate({ text: 'два' }))
+  await bot.handleUpdate(messageUpdate({ text: 'три' }))
+  assert.equal(calls.prompts.length, 1)
+  const warnings = client.sent.filter((item) => /Слишком часто/.test(item.text))
+  assert.equal(warnings.length, 1)
 })

@@ -31,16 +31,99 @@ const COMMANDS = [
   { name: 'unmute', description: 'Вернуть уведомления' },
   { name: 'digest', description: 'Дайджест сейчас' },
   { name: 'new', description: 'Новая сессия: /new [папка]' },
+  { name: 'health', description: 'Здоровье плагина и очередь' },
+  { name: 'version', description: 'Версия плагина' },
+  { name: 'ping', description: 'Проверка отклика' },
 ]
 
 const UPDATE_TYPES = 'message_created,message_callback,bot_started,bot_added,bot_removed'
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
-export function createBot({ client, config, logger, state, interactions, runtime, policy, observer } = {}) {
+export function createBot({
+  client,
+  config,
+  logger,
+  state,
+  interactions,
+  runtime,
+  policy,
+  observer,
+  health,
+  version,
+  outbox,
+  limiter,
+  audit,
+} = {}) {
   let running = false
   let disposed = false
   /** chatKey -> ordered session ids for `/use N` */
   const choices = new Map()
+  /** chatKey -> token bucket for incoming flood protection */
+  const incomingBuckets = new Map()
+  /** chatKey -> last "too fast" warning */
+  const incomingWarnedAt = new Map()
+
+  function allowIncoming(key) {
+    const perMinute = Math.max(1, Number(config.incomingPerMinute) || 30)
+    const burst = Math.max(1, Number(config.incomingBurst) || 10)
+    const at = Date.now()
+    let bucket = incomingBuckets.get(key)
+    if (!bucket) {
+      bucket = { tokens: burst, last: at }
+      incomingBuckets.set(key, bucket)
+    }
+    const elapsedMs = at - bucket.last
+    bucket.tokens = Math.min(burst, bucket.tokens + Math.max(0, elapsedMs / 1000) * (perMinute / 60))
+    bucket.last = at
+    if (bucket.tokens >= 1) {
+      bucket.tokens -= 1
+      return true
+    }
+    return false
+  }
+
+  async function warnTooFast(chatId) {
+    const key = chatKey(chatId)
+    const at = Date.now()
+    if (incomingWarnedAt.has(key) && at - incomingWarnedAt.get(key) < 5 * 60 * 1000) return
+    incomingWarnedAt.set(key, at)
+    await reply(chatId, '⏳ Слишком часто. Подожди немного — команды и сообщения ограничены, чтобы не зациклить агента.')
+  }
+
+  function formatDuration(ms) {
+    const value = Math.max(0, Number(ms) || 0)
+    const seconds = Math.floor(value / 1000)
+    if (seconds < 60) return `${seconds} с`
+    const minutes = Math.floor(seconds / 60)
+    if (minutes < 60) return `${minutes} мин`
+    const hours = Math.floor(minutes / 60)
+    if (hours < 24) return `${hours} ч ${minutes % 60} мин`
+    return `${Math.floor(hours / 24)} д ${hours % 24} ч`
+  }
+
+  function formatRelative(timestamp) {
+    if (!Number.isFinite(timestamp)) return 'никогда'
+    return `${formatDuration(Date.now() - timestamp)} назад`
+  }
+
+  function healthCard() {
+    const snapshot = health?.snapshot?.() ?? {}
+    const outboxStats = outbox?.snapshot?.() ?? {}
+    const limiterStats = limiter?.snapshot?.() ?? {}
+    const lines = [
+      `🩺 *dsh-max-notify* v${version ?? '?'}`,
+      `⏱ uptime: ${formatDuration(snapshot.uptimeMs)}`,
+      `📡 polling: ${snapshot.pollStopped ? `остановлен (${snapshot.pollStoppedReason ?? 'ошибка'})` : 'работает'}`,
+      `🕒 последний poll: ${formatRelative(snapshot.lastPollAt)}`,
+      `📥 последнее обновление: ${formatRelative(snapshot.lastUpdateAt)}`,
+      `📤 outbox: ${outboxStats.pending ?? 0} в очереди, доставлено ${outboxStats.sent ?? 0}, ошибок ${outboxStats.failed ?? 0}`,
+      `🚦 limiter: очередь ${limiterStats.queueDepth ?? 0}, ожиданий ${limiterStats.waits ?? 0}, 429-паузы…`,
+      `🛡 allowlist: ${(config.allowedUserIds ?? []).length} users / ${(config.allowedChatIds ?? []).length} chats`,
+      `🧩 режим: ${policy?.describe?.() ?? '—'}`,
+    ]
+    if (snapshot.lastError) lines.push(`⚠️ последняя ошибка: ${truncate(snapshot.lastError, 300)}`)
+    return lines.join('\n')
+  }
 
   function targetQuery() {
     if (config.chatId !== undefined) return { chatId: config.chatId }
@@ -118,6 +201,7 @@ export function createBot({ client, config, logger, state, interactions, runtime
     if (!match) return false
     const name = match[1].toLowerCase()
     const arg = text.slice(match[0].length).trim()
+    audit?.command?.({ command: name, chatId })
 
     switch (name) {
       case 'start':
@@ -229,6 +313,22 @@ export function createBot({ client, config, logger, state, interactions, runtime
           chatId,
           `🆕 Сессия создана: \`${shortSessionId(created.sessionId)}\`\n📁 ${created.cwd}\n\nНапиши задачу — она уйдёт в эту сессию.`,
         )
+        return true
+      }
+      case 'health': {
+        await reply(chatId, healthCard())
+        return true
+      }
+      case 'version': {
+        await reply(
+          chatId,
+          `🛠 dsh-max-notify v${version ?? '?'}\nNode ${process.version}\nDSH: host plugin (long polling)`,
+        )
+        return true
+      }
+      case 'ping': {
+        const startedAt = Date.now()
+        await reply(chatId, `🏓 pong · ${Date.now() - startedAt} мс`)
         return true
       }
       case 'digest': {
@@ -369,6 +469,11 @@ export function createBot({ client, config, logger, state, interactions, runtime
       logger?.warn?.('ignored MAX message from non-allowlisted user %s', userId)
       return
     }
+    if (config.interactive === false) return
+    if (!allowIncoming(chatKey(chatId))) {
+      await warnTooFast(chatId)
+      return
+    }
     const text = String(message.body?.text ?? '').trim()
     if (interactions?.tryAnswerText && (await interactions.tryAnswerText({ chatId, userId, text }))) return
     const attachments = Array.isArray(message.body?.attachments) ? message.body.attachments : []
@@ -419,7 +524,30 @@ export function createBot({ client, config, logger, state, interactions, runtime
     }
   }
 
-  /** One long-poll iteration; returns `{primed, count}` (exposed for tests). */
+  /** Stable dedupe key for one MAX update (at-least-once polling). */
+  function updateKey(update) {
+    const type = update?.update_type
+    const chatId = update?.chat_id ?? update?.message?.recipient?.chat_id
+    switch (type) {
+      case 'message_created': {
+        const mid = update?.message?.body?.mid
+        return mid === undefined ? undefined : `msg:${chatId}:${mid}`
+      }
+      case 'message_callback': {
+        const callbackId = update?.callback?.callback_id
+        return callbackId === undefined ? undefined : `cb:${callbackId}`
+      }
+      case 'bot_started':
+        return `start:${chatId}:${update?.timestamp ?? update?.user?.user_id ?? ''}`
+      case 'bot_added':
+      case 'bot_removed':
+        return `${type}:${chatId}:${update?.timestamp ?? ''}`
+      default:
+        return undefined
+    }
+  }
+
+  /** One long-poll iteration; returns `{primed, count, handled}` (exposed for tests). */
   async function pollOnce() {
     const params = {
       timeout: Math.max(0, Math.min(90, config.pollTimeoutSec ?? 25)),
@@ -429,19 +557,26 @@ export function createBot({ client, config, logger, state, interactions, runtime
     if (state?.marker === undefined) {
       const response = await client.getUpdates(params)
       state?.setMarker?.(response?.marker)
-      return { primed: true, count: 0 }
+      runtime?.healthUpdate?.({ lastPollAt: Date.now() })
+      return { primed: true, count: 0, handled: 0 }
     }
+    const polledAt = Date.now()
+    runtime?.healthUpdate?.({ lastPollAt: polledAt })
     const response = await client.getUpdates({ ...params, marker: state.marker })
-    if (response?.marker !== undefined) state?.setMarker?.(response.marker)
     const updates = Array.isArray(response?.updates) ? response.updates : []
+    let handled = 0
     for (const update of updates) {
-      try {
-        await handleUpdate(update)
-      } catch (error) {
-        logger?.warn?.('cannot handle MAX update: %s', error?.message || String(error))
-      }
+      const key = updateKey(update)
+      if (key && state?.hasProcessed?.(key)) continue
+      // A handler failure must leave the marker untouched: the batch is retried
+      // and already handled updates are skipped by their dedupe keys.
+      await handleUpdate(update)
+      if (key) state?.markProcessed?.(key)
+      handled += 1
     }
-    return { primed: false, count: updates.length }
+    if (response?.marker !== undefined) state?.setMarker?.(response.marker)
+    if (updates.length > 0) runtime?.healthUpdate?.({ lastUpdateAt: Date.now() })
+    return { primed: false, count: updates.length, handled }
   }
 
   async function pollLoop() {
@@ -455,6 +590,8 @@ export function createBot({ client, config, logger, state, interactions, runtime
         const status = error?.status
         if (status === 401) {
           logger?.warn?.('MAX polling stopped: unauthorized (check MAX_BOT_TOKEN)')
+          runtime?.healthUpdate?.({ pollStopped: true, pollStoppedReason: 'unauthorized (401)' })
+          runtime?.healthFail?.(error, { stopped: true, reason: 'unauthorized (401)' })
           running = false
           return
         }
@@ -463,10 +600,13 @@ export function createBot({ client, config, logger, state, interactions, runtime
             'MAX polling stopped (%s): long polling is disabled while a webhook subscription is active',
             status,
           )
+          runtime?.healthUpdate?.({ pollStopped: true, pollStoppedReason: 'webhook subscription active (405/409)' })
+          runtime?.healthFail?.(error, { stopped: true, reason: 'webhook subscription active (405/409)' })
           running = false
           return
         }
         logger?.warn?.('MAX polling error: %s', error?.message || String(error))
+        runtime?.healthFail?.(error)
         await sleep(backoffMs)
         backoffMs = Math.min(backoffMs * 2, 30000)
       }
@@ -474,7 +614,7 @@ export function createBot({ client, config, logger, state, interactions, runtime
   }
 
   async function start() {
-    if (disposed || !config.polling) return
+    if (disposed || !config.polling || config.interactive === false) return
     if (!config.botToken) return
     if (config.chatId === undefined && config.userId === undefined) return
     if (typeof client.getUpdates !== 'function') return

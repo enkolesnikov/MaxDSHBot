@@ -35,6 +35,19 @@ file deliverables.
   limits) and handed to the agent as a prompt listing the local paths.
 - Observability: subagent/job/goal/error notifications, TODO progress, daily
   digest, notification modes (`/mode`, `/mute`, `/unmute`) and quiet hours.
+- **Reliability (v0.6)**: durable outbox (failed replies are queued and retried
+  with backoff; de-duplicated by turn/event seq), at-least-once long polling
+  (marker advances after handling, update ids are persisted), a global rate
+  limiter (2 req/s per chat, 30/s overall, critical lane for approvals/errors).
+- **Approval hygiene**: unanswered approvals are rejected after
+  `approvalTimeoutMs` (120 s by default) instead of hanging; an optional
+  «remember for this tool» button stores a TTL-scoped rule for tools listed in
+  `approvalRememberTools`; every decision is written to a local audit log.
+- **Safe defaults**: remote control is fail-closed — without
+  `allowedUserIds`/`allowedChatIds` commands, approvals and polling are disabled
+  (notifications still work); `allowUnlistedUsers: true` is the explicit escape.
+- **Health & secrets**: `/health`, `/version`, `/ping`, optional heartbeat file,
+  token/upload-credential redaction in logs, incoming flood protection.
 
 ## Package layout
 
@@ -49,7 +62,12 @@ file deliverables.
 | `install.sh` | `dsh plugin --profile <name> add link:<this dir>` |
 | `tools/pair.mjs` | long-poll `GET /updates` to discover `chat_id` |
 | `tools/send-test.mjs` | manual send test |
-| `test/*.test.mjs` | `node --test test/*.test.mjs` (121 unit tests) |
+| `lib/limits.mjs` | global outbound scheduler (per-chat + global token buckets) |
+| `lib/outbox.mjs` | durable outbound queue with retry, TTL and dedupe keys |
+| `lib/health.mjs` | health snapshot for `/health` and heartbeat files |
+| `lib/audit.mjs` | metadata-only JSONL audit of approvals/commands (0600) |
+| `lib/redact.mjs` | token/credential redaction for log sinks |
+| `test/*.test.mjs` | `node --test` (161 unit tests) |
 
 ## Config
 
@@ -91,6 +109,14 @@ Set in `cordis.patch.yml` (or override the row by id from the profile's own
 | `todoProgress` | `true` | TODO progress notifications |
 | `quietHours` | — | `{start, end}`: non-critical delivered without push |
 | `mode` / `digestEnabled` / `digestTime` | `all` / `false` / `21:00` | Notification mode and daily digest |
+| `outboxEnabled` / `outboxMaxItems` / `outboxTtlHours` | `true` / `200` / `48` | Durable queue for undelivered messages |
+| `ratePerChatPerSecond` / `rateGlobalPerSecond` | `2` / `30` | Global MAX API rate limiter |
+| `approvalTimeoutMs` | `120000` | Reject an unanswered approval after this timeout (`0` = wait forever) |
+| `approvalRememberTools` / `approvalRememberMs` | `[]` / `3600000` | Tools for which «allow and remember» is offered, and its TTL |
+| `allowUnlistedUsers` | `false` | Allow remote control without an allowlist (unsafe) |
+| `incomingPerMinute` / `incomingBurst` | `30` / `10` | Incoming flood protection |
+| `auditLog` / `auditFile` | `true` / `$DSH_HOME/max-notify/audit.jsonl` | Local audit of approvals/questions/commands |
+| `heartbeatFile` | — | JSON health snapshot for external monitoring |
 
 ## Remote control ("Пульт")
 
@@ -109,6 +135,9 @@ session (default: most recent session; `/use N` to switch). Commands:
 | `/mute [30m\|2h]`, `/unmute` | Mute/unmute non-critical notifications |
 | `/digest` | Send the digest now |
 | `/new [folder]` | Create a new session (folder is created if missing; relative to the active session's cwd) |
+| `/health` | Polling/outbox/limiter/health snapshot |
+| `/version` | Plugin version |
+| `/ping` | Round-trip check |
 
 Approvals and `ask_user_question` cards carry inline buttons; free text answers
 questions too (option number, option label or custom text; multiple questions —
@@ -122,8 +151,11 @@ Set `allowedUserIds: [987654321]` (numbers from YAML are accepted; and/or
 Before the first send the plugin resolves `GET /chats/{chatId}`; the chat must be
 a personal `dialog` whose `dialog_with_user.user_id` is allowlisted, otherwise
 nothing is sent and a warning is logged (**fail closed**). If `userId` is the
-target, it must be in `allowedUserIds` directly. With both lists empty the
-plugin behaves as before (sends to the configured target only).
+target, it must be in `allowedUserIds` directly.
+Since v0.6 the allowlist is also required for **remote control**: with both
+lists empty, commands/approvals/polling stay off (notifications still send).
+Set `allowUnlistedUsers: true` only when you intentionally want anyone in the
+target chat to drive the agent.
 
 ## Install (into a DSH profile)
 

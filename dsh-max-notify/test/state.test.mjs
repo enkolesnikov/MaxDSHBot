@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createState, resolveStateFile } from '../lib/state.mjs'
@@ -42,5 +42,70 @@ test('corrupt state file starts fresh', () => {
   writeFileSync(broken, '{not json')
   const state = createState({ file: broken, logger: { warn() {} } })
   assert.equal(state.marker, undefined)
+  state.dispose()
+})
+
+test('schema v1 migrates to v2 without losing marker/session/mode', () => {
+  const v1File = join(workspace, 'v1-state.json')
+  writeFileSync(
+    v1File,
+    JSON.stringify({ marker: 777, sessions: { 123456789: 'session-old' }, mode: 'mute', digestDate: '2026-11-01' }),
+  )
+  const state = createState({ file: v1File, logger: { warn() {} }, chatId: 123456789 })
+  assert.equal(state.marker, 777)
+  assert.equal(state.sessionFor(123456789), 'session-old')
+  assert.equal(state.getMode(), 'mute')
+  state.setHealth({ lastPollAt: 123 })
+  state.save()
+  state.dispose()
+
+  const migrated = JSON.parse(readFileSync(v1File, 'utf8'))
+  assert.equal(migrated.schemaVersion, 2)
+  assert.equal(migrated.marker, 777)
+  assert.equal(migrated.health.lastPollAt, 123)
+})
+
+test('processed dedupe keys are recorded once and pruned by TTL', () => {
+  const file = join(workspace, 'processed.json')
+  writeFileSync(file, JSON.stringify({ processed: [{ key: 'old-key', at: 0 }] }))
+  const state = createState({ file, logger: { warn() {} } })
+  assert.equal(state.hasProcessed('msg:1'), false)
+  state.markProcessed('msg:1')
+  state.markProcessed('msg:1')
+  assert.equal(state.hasProcessed('msg:1'), true)
+  assert.equal(state.hasProcessed('old-key'), false)
+  state.save()
+  state.dispose()
+  const saved = JSON.parse(readFileSync(file, 'utf8'))
+  assert.equal(saved.processed.filter((entry) => entry.key === 'msg:1').length, 1)
+  assert.equal(saved.processed.some((entry) => entry.key === 'old-key'), false)
+})
+
+test('pending cards survive reload until explicitly removed', () => {
+  const file = join(workspace, 'cards.json')
+  const first = createState({ file, logger: { warn() {} } })
+  first.addPendingCard({ token: 'tok-1', kind: 'approval', messageId: 'mid-1', chatId: '123456789' })
+  first.save()
+  first.dispose()
+
+  const second = createState({ file, logger: { warn() {} } })
+  assert.equal(second.listPendingCards().length, 1)
+  assert.equal(second.listPendingCards()[0].messageId, 'mid-1')
+  second.removePendingCard('tok-1')
+  assert.equal(second.listPendingCards().length, 0)
+  second.dispose()
+})
+
+test('approval rules are scoped by tool and expiry', () => {
+  const file = join(workspace, 'rules.json')
+  const state = createState({ file, logger: { warn() {} } })
+  state.setApprovalRule('deploy', Date.now() + 60_000)
+  assert.equal(state.approvalRuleFor('deploy').tool, 'deploy')
+  assert.equal(state.approvalRuleFor('bash'), undefined)
+
+  state.setApprovalRule('expired', Date.now() - 1)
+  assert.equal(state.approvalRuleFor('expired'), undefined)
+  state.clearApprovalRules()
+  assert.equal(state.approvalRuleFor('deploy'), undefined)
   state.dispose()
 })
