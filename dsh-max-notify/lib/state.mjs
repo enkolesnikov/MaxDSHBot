@@ -43,6 +43,8 @@ export function createState({ file, logger, chatId } = {}) {
     pendingCards: [],
     /** @type {Array<{tool: string, until: number, createdAt: number}>} */
     approvalRules: [],
+    /** scheduleId -> {mode: 'read-only'|'auto', title?: string, updatedAt: number} */
+    schedulePolicies: {},
     /** periodKey:threshold -> timestamp of the last sent budget alert */
     budgetAlerts: {},
     /** Durable webhook updates: [{ key, update, at }] */
@@ -82,6 +84,19 @@ export function createState({ file, logger, chatId } = {}) {
       }
       if (parsed.budgetAlerts && typeof parsed.budgetAlerts === 'object' && !Array.isArray(parsed.budgetAlerts)) {
         state.budgetAlerts = { ...parsed.budgetAlerts }
+      }
+      if (parsed.schedulePolicies && typeof parsed.schedulePolicies === 'object' && !Array.isArray(parsed.schedulePolicies)) {
+        state.schedulePolicies = {}
+        for (const [id, policy] of Object.entries(parsed.schedulePolicies)) {
+          if (!policy || typeof policy !== 'object') continue
+          const mode = policy.mode === 'read-only' || policy.mode === 'auto' ? policy.mode : undefined
+          if (!mode) continue
+          state.schedulePolicies[String(id)] = {
+            mode,
+            title: typeof policy.title === 'string' ? policy.title.slice(0, 120) : '',
+            updatedAt: Number.isFinite(Number(policy.updatedAt)) ? Number(policy.updatedAt) : Date.now(),
+          }
+        }
       }
       if (Array.isArray(parsed.approvalRules)) {
         state.approvalRules = parsed.approvalRules.filter(
@@ -138,6 +153,7 @@ export function createState({ file, logger, chatId } = {}) {
             processed: state.processed,
             pendingCards: state.pendingCards,
             approvalRules: state.approvalRules,
+            schedulePolicies: state.schedulePolicies,
             budgetAlerts: state.budgetAlerts,
             webhookQueue: state.webhookQueue,
             anchors: state.anchors,
@@ -238,6 +254,33 @@ export function createState({ file, logger, chatId } = {}) {
         state.pendingCards.splice(index, 1)
         saveSoon()
       }
+    },
+    getSchedulePolicy(id) {
+      const policy = state.schedulePolicies[String(id ?? '')]
+      return policy ? { ...policy } : undefined
+    },
+    listSchedulePolicies() {
+      return Object.fromEntries(Object.entries(state.schedulePolicies).map(([id, policy]) => [id, { ...policy }]))
+    },
+    setSchedulePolicy(id, policy) {
+      const key = String(id ?? '')
+      if (key === '') return false
+      const mode = policy?.mode
+      if (mode !== 'read-only' && mode !== 'auto') return false
+      state.schedulePolicies[key] = {
+        mode,
+        title: typeof policy.title === 'string' ? policy.title.slice(0, 120) : '',
+        updatedAt: Date.now(),
+      }
+      saveSoon()
+      return true
+    },
+    removeSchedulePolicy(id) {
+      const key = String(id ?? '')
+      if (state.schedulePolicies[key] === undefined) return false
+      delete state.schedulePolicies[key]
+      saveSoon()
+      return true
     },
     approvalRuleFor(toolName, at = Date.now()) {
       const name = String(toolName ?? '')

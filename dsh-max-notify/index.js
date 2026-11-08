@@ -26,6 +26,8 @@ import { extractAssistantText } from './lib/extract.mjs'
 import { formatNotification } from './lib/format.mjs'
 import { createState, resolveStateFile } from './lib/state.mjs'
 import { createInteractions } from './lib/interactions.mjs'
+import { normalizeAutonomyMode, resolveAutonomyPolicy } from './lib/autonomy.mjs'
+import { listSchedules } from './lib/schedules.mjs'
 import { createProgress } from './lib/progress.mjs'
 import { createDeliverables } from './lib/deliverables.mjs'
 import { createBot } from './lib/bot.mjs'
@@ -124,6 +126,7 @@ const DEFAULTS = {
   voiceTtsMaxChars: 600,
   voiceTtsSpeed: undefined,
   fileSendAllowOutside: false,
+  autonomyEnabled: true,
   webUrl: undefined,
   progress: true,
   progressDelayMs: 2500,
@@ -301,6 +304,7 @@ export function normalizeConfig(raw = {}) {
     voiceTtsMaxChars: asInteger(merged.voiceTtsMaxChars, DEFAULTS.voiceTtsMaxChars, 20, 2000),
     voiceTtsSpeed: Number.isFinite(Number(merged.voiceTtsSpeed)) ? Math.min(4, Math.max(0.25, Number(merged.voiceTtsSpeed))) : undefined,
     fileSendAllowOutside: asBoolean(merged.fileSendAllowOutside, DEFAULTS.fileSendAllowOutside),
+    autonomyEnabled: asBoolean(merged.autonomyEnabled, DEFAULTS.autonomyEnabled),
     progress: asBoolean(merged.progress, DEFAULTS.progress),
     typing: asBoolean(merged.typing, DEFAULTS.typing),
     deliverables: asBoolean(merged.deliverables, DEFAULTS.deliverables),
@@ -919,6 +923,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       voiceTranscribe: config.voiceTranscribe,
       voiceTts: config.voiceTts,
       voiceTtsMode: config.voiceTtsMode,
+      autonomyEnabled: config.autonomyEnabled,
       outboxEnabled: config.outboxEnabled,
       costMeterEnabled: config.costMeterEnabled,
       budgetAlertEnabled: config.budgetAlertEnabled,
@@ -949,6 +954,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       voiceTtsVoice: config.voiceTtsVoice,
       voiceTtsModel: config.voiceTtsModel,
       voiceTtsMaxChars: config.voiceTtsMaxChars,
+      autonomyEnabled: config.autonomyEnabled,
       buttonsPresets: config.buttonsPresets,
     }
   }
@@ -1265,6 +1271,56 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
   const costMeter = config.costMeterEnabled
     ? createCostMeter({ file: resolveCostLedgerFile(config), logger })
     : undefined
+  let schedulePolicyCache = { at: 0, items: [] }
+
+  function scheduleTitleOf(session) {
+    try {
+      const snapshot = ctx.get?.('sessionTitle')?.get?.(session)
+      const title = snapshot?.title
+      if (typeof title === 'string' && title.trim() !== '') return title.trim()
+    } catch {
+      // title service is optional
+    }
+    return resolveTitle(session)
+  }
+
+  async function resolveAutonomy(session) {
+    if (!config.autonomyEnabled) return undefined
+    const policies = state.listSchedulePolicies()
+    if (Object.keys(policies).length === 0) return undefined
+    const service = getService('schedule')
+    if (typeof service?.list !== 'function') return undefined
+    const now = Date.now()
+    if (now - schedulePolicyCache.at > 5000) {
+      const result = await listSchedules(service, { active: true, limit: 500 })
+      if (!result.ok) return undefined
+      schedulePolicyCache = { at: now, items: result.items }
+    }
+    const match = resolveAutonomyPolicy({
+      sessionId: session?.id,
+      sessionTitle: scheduleTitleOf(session),
+      schedules: schedulePolicyCache.items,
+      policies,
+      now,
+    })
+    return match.ok ? match : undefined
+  }
+
+  function setSchedulePolicy(id, mode, title) {
+    const normalized = normalizeAutonomyMode(mode)
+    if (!normalized) return { ok: false, error: 'режим должен быть inherit|read-only|auto' }
+    if (normalized === 'inherit') {
+      state.removeSchedulePolicy(id)
+      schedulePolicyCache = { at: 0, items: [] }
+      audit.write({ kind: 'autonomy', action: 'policy', scheduleId: String(id), mode: 'inherit' })
+      return { ok: true, mode: 'inherit' }
+    }
+    state.setSchedulePolicy(id, { mode: normalized, title })
+    schedulePolicyCache = { at: 0, items: [] }
+    audit.write({ kind: 'autonomy', action: 'policy', scheduleId: String(id), mode: normalized })
+    return { ok: true, mode: normalized }
+  }
+
   const interactions = createInteractions({
     client,
     config,
@@ -1273,6 +1329,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     resolveTitle: (session) => titleOf(session),
     state,
     audit,
+    resolveAutonomy,
   })
   const progress = createProgress({ client, config, logger, target, policy })
   const deliverables = createDeliverables({ client, config, logger, target, policy })
@@ -1328,6 +1385,8 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       getApprovalPolicy,
       setApprovalPolicy,
       scheduleService: () => getService('schedule'),
+      schedulePolicies: () => state.listSchedulePolicies(),
+      setSchedulePolicy,
       settingsSummary,
       say,
       diffSession,

@@ -867,3 +867,40 @@ test('/say, /diff and /send call their runtime helpers', async () => {
   assert.match(client.sent.at(-2).text, /Diff/)
   assert.match(client.sent.at(-1).text, /Отправлено/)
 })
+
+test('/schedules mode sets, confirms and clears autonomous policies', async () => {
+  const service = {
+    async list() {
+      return {
+        items: [{ id: 'sched-1', title: 'Deploy', status: 'active', kind: 'daily', scheduledAt: '2026-11-10T09:00:00.000Z', target: { kind: 'session', sessionId: 'session-aaaaaaaa' }, updatedAt: 'u1' }],
+        total: 1,
+      }
+    },
+  }
+  const calls = []
+  const { bot, client } = makeBot({
+    runtime: {
+      scheduleService: () => service,
+      schedulePolicies: () => ({}),
+      setSchedulePolicy: (id, mode, title) => {
+        calls.push({ id, mode, title })
+        return { ok: true, mode }
+      },
+    },
+  })
+  await bot.handleUpdate(messageUpdate({ text: '/schedules' }))
+  assert.match(client.sent.at(-1).text, /Deploy/)
+
+  await bot.handleUpdate(messageUpdate({ text: '/schedules mode 1 read-only' }))
+  assert.deepEqual(calls.at(-1), { id: 'sched-1', mode: 'read-only', title: 'Deploy' })
+
+  await bot.handleUpdate(messageUpdate({ text: '/schedules mode 1 auto' }))
+  assert.equal(calls.length, 1)
+  assert.match(client.sent.at(-1).text, /Подтверди/)
+
+  await bot.handleUpdate(messageUpdate({ text: '/schedules mode 1 auto confirm' }))
+  assert.deepEqual(calls.at(-1), { id: 'sched-1', mode: 'auto', title: 'Deploy' })
+
+  await bot.handleUpdate(messageUpdate({ text: '/schedules mode 1 inherit' }))
+  assert.deepEqual(calls.at(-1), { id: 'sched-1', mode: 'inherit', title: 'Deploy' })
+})

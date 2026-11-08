@@ -50,6 +50,7 @@ function makeInteractions(overrides = {}) {
     resolveTitle: () => 'Тестовая сессия',
     state: overrides.state,
     audit: overrides.audit,
+    resolveAutonomy: overrides.resolveAutonomy,
   })
   return { client, interactions }
 }
@@ -339,4 +340,35 @@ test('plan review free-text feedback becomes a custom answer', async () => {
   const answer = await answerPromise
   assert.equal(answer.answers[0].custom, 'добавь ещё тесты')
   assert.match(client.edits.at(-1).text, /Фидбек/i)
+})
+
+test('autonomy read-only rejects side effects without a MAX card', async () => {
+  const auditEntries = []
+  const { client, interactions } = makeInteractions({
+    resolveAutonomy: async () => ({ mode: 'read-only', scheduleId: 'sched-1', title: 'Deploy' }),
+    audit: { write: (entry) => auditEntries.push(entry) },
+  })
+  const outcome = await interactions.handleApproval(
+    approvalRequest({ session: { id: 'sched-session', header: {} } }),
+    () => new Promise(() => {}),
+  )
+  assert.equal(outcome, 'rejected')
+  assert.equal(client.sent.length, 0)
+  assert.equal(auditEntries.at(-1).kind, 'autonomy')
+  assert.equal(auditEntries.at(-1).outcome, 'rejected')
+
+  const read = makeInteractions({
+    resolveAutonomy: async () => ({ mode: 'read-only', scheduleId: 'sched-1', title: 'Deploy' }),
+  })
+  const request = { ...approvalRequest({ session: { id: 'sched-session', header: {} } }), toolName: 'read' }
+  assert.equal(await read.interactions.handleApproval(request, () => new Promise(() => {})), 'allowed-once')
+  assert.equal(read.client.sent.length, 0)
+})
+
+test('autonomy auto allows approvals silently', async () => {
+  const { client, interactions } = makeInteractions({
+    resolveAutonomy: async () => ({ mode: 'auto', scheduleId: 'sched-auto', title: 'Nightly' }),
+  })
+  assert.equal(await interactions.handleApproval(approvalRequest(), () => new Promise(() => {})), 'allowed-once')
+  assert.equal(client.sent.length, 0)
 })

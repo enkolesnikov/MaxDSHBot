@@ -153,3 +153,19 @@ test('session anchors and message routing survive reloads', () => {
   assert.equal(second.findSessionByMid('mid-reply-2'), 'session-thread')
   second.dispose()
 })
+
+test('schedule autonomy policies survive reloads and can be removed', () => {
+  const policyFile = join(workspace, 'policies.json')
+  const first = createState({ file: policyFile, logger: { warn() {} } })
+  assert.equal(first.setSchedulePolicy('', { mode: 'auto' }), false)
+  assert.equal(first.setSchedulePolicy('sched-1', { mode: 'read-only', title: 'Deploy' }), true)
+  assert.equal(first.setSchedulePolicy('sched-2', { mode: 'invalid' }), false)
+  first.dispose()
+
+  const second = createState({ file: policyFile, logger: { warn() {} } })
+  assert.deepEqual(second.getSchedulePolicy('sched-1')?.mode, 'read-only')
+  assert.equal(second.getSchedulePolicy('sched-2'), undefined)
+  second.removeSchedulePolicy('sched-1')
+  assert.equal(second.getSchedulePolicy('sched-1'), undefined)
+  second.dispose()
+})

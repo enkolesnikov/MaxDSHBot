@@ -116,6 +116,13 @@ function normalizeSchedule(entry) {
     scheduledAt: typeof task.scheduledAt === 'string' ? task.scheduledAt : null,
     status: typeof task.status === 'string' && task.status !== '' ? task.status : 'unknown',
     targetKind: typeof task.target?.kind === 'string' ? task.target.kind : '',
+    targetSessionId: typeof task.target?.sessionId === 'string' ? task.target.sessionId : '',
+    involvedSessionIds: Array.isArray(task.involvedSessionIds)
+      ? task.involvedSessionIds.filter((id) => typeof id === 'string')
+      : [],
+    lastDelivery: task.lastDelivery && typeof task.lastDelivery === 'object'
+      ? { deliveredAt: typeof task.lastDelivery.deliveredAt === 'string' ? task.lastDelivery.deliveredAt : undefined }
+      : undefined,
     executionActive: task.executionActive === true,
     updatedAt: task.updatedAt ?? null,
   }
@@ -249,7 +256,7 @@ export async function deleteSchedule(scheduleService, { id, expectedUpdatedAt } 
  * @param {unknown} entry - Raw or normalized task entry; unknown fields are ignored.
  * @returns {string} Line such as `🟢 «Деплой» · ежедневно · 08.11 21:30 · цель: текущая сессия`.
  */
-export function describeSchedule(entry) {
+export function describeSchedule(entry, policy) {
   if (!entry || typeof entry !== 'object') return '❔ Задача без данных'
 
   const task = entry
@@ -278,6 +285,9 @@ export function describeSchedule(entry) {
 
   const parts = [`${status} «${title}»`, kindText, when, `цель: ${target}`]
   if (task.executionActive === true) parts.push('выполняется')
+  if (policy?.mode === 'read-only' || policy?.mode === 'auto') {
+    parts.push(policy.mode === 'auto' ? '🤖 auto' : '🔎 read-only')
+  }
   return parts.join(' · ')
 }
 
@@ -287,8 +297,9 @@ export function describeSchedule(entry) {
  * @param {{ items?: unknown[], total?: unknown }} [card] - List result from {@link listSchedules}.
  * @returns {string} Plain-text card for MAX.
  */
-export function formatSchedulesCard(card = {}) {
+export function formatSchedulesCard(card = {}, { policies } = {}) {
   const items = Array.isArray(card?.items) ? card.items : []
+  const policyMap = policies && typeof policies === 'object' ? policies : {}
   const lines = ['⏰ Запланированные задачи', '']
 
   if (items.length === 0) {
@@ -298,7 +309,7 @@ export function formatSchedulesCard(card = {}) {
 
   const shown = items.slice(0, MAX_CARD_ITEMS)
   shown.forEach((item, index) => {
-    lines.push(`${index + 1}. ${describeSchedule(item)}`)
+    lines.push(`${index + 1}. ${describeSchedule(item, item?.id ? policyMap[item.id] : undefined)}`)
   })
 
   const total = Number.isFinite(card?.total) && card.total >= items.length ? card.total : items.length
@@ -310,6 +321,7 @@ export function formatSchedulesCard(card = {}) {
     '/schedules pause N',
     '/schedules resume N',
     '/schedules cancel N',
+    '/schedules mode N read-only|auto|inherit',
   )
   return lines.join('\n')
 }

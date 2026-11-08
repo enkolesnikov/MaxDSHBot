@@ -95,6 +95,7 @@ export function createBot({
   const scheduleChoices = new Map()
   /** chatKey -> { id, at } pending `/schedules cancel N confirm` */
   const scheduleCancels = new Map()
+  const scheduleModeConfirms = new Map()
   /** workspace path chosen for subsequent `/new` calls */
   let preferredWorkspacePath
   /** chatKey -> token bucket for incoming flood protection */
@@ -657,12 +658,12 @@ export function createBot({
             return true
           }
           scheduleChoices.set(chatKey(chatId), result.items.slice(0, 10))
-          await reply(chatId, formatSchedulesCard(result))
+          await reply(chatId, formatSchedulesCard(result, { policies: runtime.schedulePolicies?.() ?? {} }))
           return true
         }
         const indexMatch = /^(\d+)$/.exec(tokens[1] ?? '')
         if (!indexMatch) {
-          await reply(chatId, 'Использование: `/schedules`, `/schedules pause N`, `/schedules resume N`, `/schedules cancel N [confirm]`')
+          await reply(chatId, 'Использование: `/schedules`, `/schedules pause N`, `/schedules resume N`, `/schedules cancel N [confirm]`, `/schedules mode N inherit|read-only|auto`')
           return true
         }
         let items = scheduleChoices.get(chatKey(chatId))
@@ -678,6 +679,36 @@ export function createBot({
         const item = items[Number(indexMatch[1]) - 1]
         if (!item?.id) {
           await reply(chatId, `Нет задачи №${indexMatch[1]} — обнови список: /schedules`)
+          return true
+        }
+        if (action === 'mode') {
+          const mode = String(tokens[2] ?? '').toLowerCase()
+          if (!['inherit', 'read-only', 'auto'].includes(mode)) {
+            await reply(chatId, 'Режим: `inherit`, `read-only` или `auto`. Пример: `/schedules mode 1 read-only`')
+            return true
+          }
+          const key = chatKey(chatId)
+          if (mode === 'auto' && !tokens.includes('confirm')) {
+            scheduleModeConfirms.set(key, { id: item.id, mode, at: Date.now() })
+            await reply(chatId, `⚠️ Режим \`auto\` разрешит все инструменты без подтверждений в задаче «${truncate(item.title || item.id, 80)}».\nПодтверди: \`/schedules mode ${indexMatch[1]} auto confirm\``)
+            return true
+          }
+          if (mode === 'auto') {
+            const pending = scheduleModeConfirms.get(key)
+            if (!pending || pending.id !== item.id || pending.mode !== 'auto' || Date.now() - pending.at > 60_000) {
+              await reply(chatId, '⚠️ Нет подтверждения auto (или истекло). Повтори: `/schedules mode N auto`')
+              return true
+            }
+            scheduleModeConfirms.delete(key)
+          }
+          const result = await runtime.setSchedulePolicy?.(item.id, mode, item.title)
+          if (!result?.ok) {
+            await reply(chatId, `❌ ${result?.error ?? 'не удалось сохранить режим'}`)
+            return true
+          }
+          scheduleChoices.delete(key)
+          const label = mode === 'inherit' ? 'обычный' : mode
+          await reply(chatId, `🤖 Режим задачи «${truncate(item.title || item.id, 80)}»: \`${label}\``)
           return true
         }
         if (action === 'cancel' || action === 'delete') {
@@ -714,7 +745,7 @@ export function createBot({
           await reply(chatId, `${desired ? '▶️ Возобновлена' : '⏸ Поставлена на паузу'}: «${truncate(item.title || item.id, 80)}»`)
           return true
         }
-        await reply(chatId, 'Использование: `/schedules`, `/schedules pause N`, `/schedules resume N`, `/schedules cancel N [confirm]`')
+        await reply(chatId, 'Использование: `/schedules`, `/schedules pause N`, `/schedules resume N`, `/schedules cancel N [confirm]`, `/schedules mode N inherit|read-only|auto`')
         return true
       }
       case 'settings': {

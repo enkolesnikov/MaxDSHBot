@@ -4,6 +4,31 @@ All notable changes to `dsh-max-notify` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] — 2026-11-09
+
+Автономные расписания.
+
+### Added
+
+- **Политики автономности для задач `/schedules`**: `inherit` (обычный),
+  `read-only` (разрешены только read-инструменты, остальное отклоняется) и
+  `auto` (все approvals разрешаются автоматически, только после явного
+  подтверждения). Команда `/schedules mode N inherit|read-only|auto`.
+- **Авто-ответы на approvals во время запуска по расписанию**: карточка в MAX не
+  создаётся; решение и причина пишутся в audit log (`kind: autonomy`).
+- **Сопоставление запуска с задачей**: по target/involved session, а для
+  `new`-сессий — по заголовку и свежей receipt-записи; при нескольких политиках
+  выбирается наименее привилегированная.
+- `schedulePolicies` в state (переживают reload), отображение режима в
+  `/schedules`, `autonomyEnabled` в конфиге, `lib/autonomy.mjs`.
+- `/schedules` card показывает `🤖 auto` / `🔎 read-only`; auto требует
+  двухшагового подтверждения.
+
+### Tests
+
+341 test (was 330): autonomy helpers/matching, interactions without cards, bot
+command, policy persistence.
+
 ## [1.2.0] — 2026-11-09
 
 Голос и инструменты.

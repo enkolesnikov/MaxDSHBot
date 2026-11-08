@@ -16,6 +16,7 @@ import {
   truncate,
 } from './cards.mjs'
 import { PRIORITY } from './limits.mjs'
+import { classifyAutonomyDecision } from './autonomy.mjs'
 
 const APPROVAL_TARGET = 'approval/request'
 
@@ -42,7 +43,7 @@ function keyboard(rows) {
  * @param {{chatId?: string, userId?: string}} options.target - send target.
  * @param {(session: object|undefined) => (string|undefined)} options.resolveTitle
  */
-export function createInteractions({ client, config, logger, target, resolveTitle, state, audit } = {}) {
+export function createInteractions({ client, config, logger, target, resolveTitle, state, audit, resolveAutonomy } = {}) {
   /** token -> pending interaction */
   const pending = new Map()
   /** chat key -> Set<token> for text-answered questions */
@@ -129,11 +130,41 @@ export function createInteractions({ client, config, logger, target, resolveTitl
 
   async function handleApproval(request, next) {
     if (!enabled || disposed) return next()
-    if (approvalChannel === 'gui') return next()
     if (!isTopLevelAgent(request?.agent)) return next()
-    if (typeof client.sendMessage !== 'function') return next()
-
     const toolName = request?.toolName
+
+    if (typeof resolveAutonomy === 'function' && toolName) {
+      try {
+        const policy = await resolveAutonomy(request?.agent?.session, request)
+        if (policy?.mode) {
+          const decision = classifyAutonomyDecision(policy.mode, toolName)
+          if (decision.action === 'allow' || decision.action === 'deny') {
+            audit?.write?.({
+              kind: 'autonomy',
+              scheduleId: policy.scheduleId,
+              scheduleTitle: policy.title,
+              mode: policy.mode,
+              tool: toolName,
+              outcome: decision.action === 'allow' ? 'allowed-once' : 'rejected',
+              reason: decision.reason,
+            })
+            logger?.info?.(
+              'MAX autonomy %s for %s on schedule %s (%s)',
+              policy.mode,
+              toolName,
+              policy.scheduleId,
+              decision.action,
+            )
+            return decision.action === 'allow' ? 'allowed-once' : 'rejected'
+          }
+        }
+      } catch (error) {
+        logger?.warn?.('cannot resolve MAX autonomy policy: %s', error?.message || String(error))
+      }
+    }
+
+    if (approvalChannel === 'gui') return next()
+    if (typeof client.sendMessage !== 'function') return next()
     // A remembered scope answers before a card is created; the GUI never sees it.
     const rule = state?.approvalRuleFor?.(toolName)
     if (rule) {

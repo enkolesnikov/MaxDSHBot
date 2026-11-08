@@ -199,6 +199,7 @@ export function formatHelpCard() {
     '`/mute [30m|2h]` — тишина, `/unmute` — вернуть',
     '`/budget` — стоимость и бюджет',
     '`/schedules` — запланированные задачи (pause/resume/cancel)',
+    '`/schedules mode N inherit|read-only|auto` — автономный режим задачи',
     '`/digest` — дайджест сейчас',
     '`/say <текст>` — озвучить текст голосом',
     '`/diff [--staged] [путь]` — git diff файлом',
@@ -401,6 +402,7 @@ export function formatSettingsCard(settings = {}) {
   lines.push(`🔐 таймаут approvals: ${settings.approvalTimeoutMs ? `${Math.round(settings.approvalTimeoutMs / 1000)} с` : 'выкл'}`)
   lines.push(`📥 приём файлов: ${settings.receiveFiles ? 'вкл' : 'выкл'} · outbox: ${settings.outboxEnabled ? 'вкл' : 'выкл'}`)
   if (settings.voiceTts !== undefined) lines.push(`🔊 TTS: ${settings.voiceTts ? `вкл (${settings.voiceTtsMode || 'short'})` : 'выкл'} · STT: ${settings.voiceTranscribe ? 'вкл' : 'выкл'}`)
+  if (settings.autonomyEnabled !== undefined) lines.push(`🤖 автономные расписания: ${settings.autonomyEnabled ? 'вкл' : 'выкл'}`)
   lines.push(`💰 cost-meter: ${settings.costMeterEnabled ? 'вкл' : 'выкл'} · алерты бюджета: ${settings.budgetAlertEnabled ? 'вкл' : 'выкл'}`)
   if (settings.buttonsPresets > 0) lines.push(`🔘 пресетов: ${settings.buttonsPresets}`)
   lines.push('', 'Полный конфиг — `cordis.patch.yml` профиля.')

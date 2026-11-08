@@ -70,6 +70,9 @@ test('listSchedules normalizes entries and drops unknown fields', async () => {
         scheduledAt: WHEN,
         status: 'active',
         targetKind: 'session',
+        targetSessionId: 's1',
+        involvedSessionIds: [],
+        lastDelivery: undefined,
         executionActive: true,
         updatedAt: '2026-11-08T15:00:00.000Z',
       },
@@ -93,6 +96,9 @@ test('listSchedules tolerates missing fields and stringifies ids', async () => {
     scheduledAt: null,
     status: 'unknown',
     targetKind: '',
+    targetSessionId: '',
+    involvedSessionIds: [],
+    lastDelivery: undefined,
     executionActive: false,
     updatedAt: null,
   })
@@ -426,7 +432,7 @@ test('formatSchedulesCard shows at most ten tasks and reports the remainder', ()
 })
 
 test('formatSchedulesCard tolerates malformed input', () => {
-  assert.equal(formatSchedulesCard(null), '⏰ Запланированные задачи\n\nЗадач нет')
+  assert.match(formatSchedulesCard(null), /Запланированные задачи[\s\S]*Задач нет/)
   const card = formatSchedulesCard({ items: [null, 'строка'] })
   assert.match(card, /^1\. ❔ Задача без данных$/m)
   assert.match(card, /^2\. ❔ Задача без данных$/m)

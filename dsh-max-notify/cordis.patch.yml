@@ -72,3 +72,4 @@
         # voiceTtsVoice: alloy
         # voiceTtsMaxChars: 600
         # fileSendAllowOutside: false
+        # autonomyEnabled: true

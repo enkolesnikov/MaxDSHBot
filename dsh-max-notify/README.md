@@ -77,6 +77,16 @@ Published on npm: https://www.npmjs.com/package/dsh-max-notify
   budget alerts (80/100 by default) fire once per period and survive reloads.
   `costMeterFile`, `budgetAlertEnabled`, `budgetAlertThresholds` configure it.
 
+## Autonomous schedules (v1.3)
+
+`/schedules mode N inherit|read-only|auto` attaches a policy to one schedule.
+During that schedule's run approvals are answered without a MAX card:
+`read-only` allows only read tools and rejects side effects, `auto` allows
+everything (two-step confirmation), `inherit` keeps normal approvals. Decisions
+are audited (`kind: autonomy`); policies survive reloads and are shown in
+`/schedules`. `auto`/`read-only` matching uses the target/involved session and,
+for per-run `new` sessions, the title plus a recent delivery receipt.
+
 ## Voice, files and live settings (v1.2)
 
 - **TTS**: `voiceTts` + OpenAI-compatible `/audio/speech`; `/say <text>` and
@@ -114,9 +124,10 @@ Published on npm: https://www.npmjs.com/package/dsh-max-notify
 | `lib/voice.mjs` | optional STT transcription |
 | `lib/tts.mjs` | TTS synthesis, speakable text, endpoint/key |
 | `lib/workspace-tools.mjs` | git diff and safe file send |
+| `lib/autonomy.mjs` | schedule autonomy policies/matching |
 | `lib/settings.mjs` | GUI settings validation/overlay/API |
 | `client/client.js` | hand-written settings page bundle |
-| `test/*.test.mjs` | `node --test` (330 unit tests) |
+| `test/*.test.mjs` | `node --test` (341 unit tests) |
 
 ## Config
 
@@ -184,6 +195,7 @@ Set in `cordis.patch.yml` (or override the row by id from the profile's own
 | `voiceTtsEndpoint` / `voiceTtsApiKey` | env `MAX_NOTIFY_TTS_*` | OpenAI-compatible TTS |
 | `voiceTtsVoice` / `voiceTtsModel` / `voiceTtsMaxChars` | `alloy` / `gpt-4o-mini-tts` / `600` | Voice/model/limit |
 | `fileSendAllowOutside` | `false` | Allow `/send` outside the session cwd |
+| `autonomyEnabled` | `true` | Autonomous schedule policies |
 
 ## Remote control ("Пульт")
 
