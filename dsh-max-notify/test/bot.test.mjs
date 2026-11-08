@@ -41,9 +41,17 @@ function createFakeClient() {
 function createMemoryState(initial = {}) {
   const sessions = { ...(initial.sessions ?? {}) }
   const processed = new Set(initial.processed ?? [])
+  const messageSessions = { ...(initial.messageSessions ?? {}) }
   return {
     marker: initial.marker,
     sessions,
+    messageSessions,
+    findSessionByMid(mid) {
+      return messageSessions[String(mid)]
+    },
+    mapMessage(sessionId, mid) {
+      messageSessions[String(mid)] = String(sessionId)
+    },
     processed,
     hasProcessed(key) {
       return processed.has(String(key))
@@ -694,4 +702,109 @@ test('/budget shows budget and spend, /status includes the cost line', async () 
   await bot.handleUpdate(messageUpdate({ text: '/status' }))
   assert.match(client.sent[1].text, /Сегодня ¥5\.00/)
   assert.match(client.sent[1].text, /сессия ¥5\.00/)
+})
+
+test('a MAX reply is routed to the session that produced the quoted message', async () => {
+  const { bot, calls, state } = makeBot({
+    state: { messageSessions: { 'quoted-mid': 'session-bbbbbbbb' } },
+  })
+  await bot.handleUpdate({
+    update_type: 'message_created',
+    chat_id: 123456789,
+    message: {
+      sender: { user_id: 987654321 },
+      recipient: { chat_id: 123456789 },
+      link: { type: 'reply', mid: 'quoted-mid' },
+      body: { text: 'продолжай эту ветку', mid: 'reply-mid', attachments: [] },
+    },
+  })
+  assert.equal(state.sessionFor(123456789), 'session-bbbbbbbb')
+  assert.deepEqual(calls.prompts, [{ sessionId: 'session-bbbbbbbb', text: 'продолжай эту ветку' }])
+})
+
+test('a forwarded MAX message is unwrapped and passed to the agent', async () => {
+  const { bot, calls } = makeBot()
+  await bot.handleUpdate({
+    update_type: 'message_created',
+    chat_id: 123456789,
+    message: {
+      sender: { user_id: 987654321 },
+      recipient: { chat_id: 123456789 },
+      link: {
+        type: 'forward',
+        message: {
+          body: { text: 'текст пересланного', attachments: [] },
+        },
+      },
+      body: { text: '', mid: 'forward-mid', attachments: [] },
+    },
+  })
+  assert.equal(calls.prompts.length, 1)
+  assert.match(calls.prompts[0].text, /текст пересланного/)
+})
+
+test('/schedules lists tasks and pauses/resumes/cancels with confirmation', async () => {
+  const schedule = {
+    items: [
+      { id: 'job-1', kind: 'daily', title: 'Деплой', prompt: 'задеплой', scheduledAt: '2026-11-10T06:00:00Z', status: 'active', target: { kind: 'session' }, updatedAt: '2026-11-09T00:00:00Z' },
+      { id: 'job-2', kind: 'after', title: 'Напомнить', prompt: 'напомни', scheduledAt: '2026-11-09T12:00:00Z', status: 'active', target: { kind: 'new' }, updatedAt: '2026-11-09T01:00:00Z' },
+    ],
+    total: 2,
+  }
+  const edits = []
+  const runtime = {
+    scheduleService: () => ({
+      async list() {
+        return schedule
+      },
+      async edit(request) {
+        edits.push(request)
+        if (request.action === 'delete') return { id: request.id, deleted: true }
+        return { ...schedule.items.find((item) => item.id === request.id), status: request.patch.active ? 'active' : 'paused' }
+      },
+    }),
+  }
+  const { bot, client } = makeBot({ runtime })
+  await bot.handleUpdate(messageUpdate({ text: '/schedules' }))
+  assert.match(client.sent[0].text, /Запланированные задачи/)
+  assert.match(client.sent[0].text, /Деплой/)
+
+  await bot.handleUpdate(messageUpdate({ text: '/schedules pause 1' }))
+  assert.deepEqual(edits[0], { id: 'job-1', action: 'update', patch: { active: false }, expectedUpdatedAt: '2026-11-09T00:00:00Z' })
+  assert.match(client.sent[1].text, /паузу/)
+
+  await bot.handleUpdate(messageUpdate({ text: '/schedules cancel 2' }))
+  assert.match(client.sent[2].text, /Подтверди/)
+  assert.equal(edits.length, 1)
+  await bot.handleUpdate(messageUpdate({ text: '/schedules cancel 2 confirm' }))
+  assert.equal(edits.at(-1).action, 'delete')
+  assert.match(client.sent[3].text, /удалена/)
+})
+
+test('/settings renders effective settings', async () => {
+  const { bot, client } = makeBot({
+    runtime: {
+      settingsSummary: () => ({
+        version: '1.0.0',
+        transport: 'webhook',
+        interactive: true,
+        allowlist: { users: 1, chats: 0 },
+        mode: 'all',
+        digest: '21:00',
+        threads: true,
+        tableFiles: true,
+        approvalTimeoutMs: 120000,
+        receiveFiles: true,
+        outboxEnabled: true,
+        costMeterEnabled: true,
+        budgetAlertEnabled: true,
+        buttonsPresets: 2,
+      }),
+    },
+  })
+  await bot.handleUpdate(messageUpdate({ text: '/settings' }))
+  assert.match(client.sent[0].text, /Настройки dsh-max-notify/)
+  assert.match(client.sent[0].text, /webhook/)
+  assert.match(client.sent[0].text, /reply-ветки: вкл/)
+  assert.match(client.sent[0].text, /пресетов: 2/)
 })

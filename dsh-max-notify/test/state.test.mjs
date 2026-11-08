@@ -137,3 +137,19 @@ test('webhook updates are persisted in a durable queue', () => {
   assert.equal(queue[0].update.update_type, 'message_created')
   second.dispose()
 })
+
+test('session anchors and message routing survive reloads', () => {
+  const file = join(workspace, 'anchors.json')
+  const first = createState({ file, logger: { warn() {} } })
+  first.setAnchor('session-thread', 'mid-anchor')
+  first.mapMessage('session-thread', 'mid-reply-2')
+  assert.equal(first.getAnchor('session-thread'), 'mid-anchor')
+  assert.equal(first.findSessionByMid('mid-reply-2'), 'session-thread')
+  first.dispose()
+
+  const second = createState({ file, logger: { warn() {} } })
+  assert.equal(second.getAnchor('session-thread'), 'mid-anchor')
+  assert.equal(second.findSessionByMid('mid-anchor'), 'session-thread')
+  assert.equal(second.findSessionByMid('mid-reply-2'), 'session-thread')
+  second.dispose()
+})

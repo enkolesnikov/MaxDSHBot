@@ -277,9 +277,10 @@ export function createMaxClient(options = {}) {
    * @param {boolean} [params.notify]
    * @param {boolean} [params.disableLinkPreview]
    * @param {Array<object>} [params.attachments]
+   * @param {{type: 'reply'|'forward', mid: string}} [params.link] - reply/forward link.
    * @param {number} [params.priority] - limiter priority (critical jumps the queue).
    */
-  async function sendMessage({ chatId, userId, text, format, notify, disableLinkPreview, attachments, priority } = {}) {
+  async function sendMessage({ chatId, userId, text, format, notify, disableLinkPreview, attachments, link, priority } = {}) {
     if (typeof text !== 'string' || text.length === 0) throw new Error('text is required')
     if (text.length > MAX_TEXT_LIMIT) throw new RangeError(`text exceeds ${MAX_TEXT_LIMIT} chars; use sendText`)
     if (chatId === undefined && userId === undefined) throw new Error('chatId or userId is required')
@@ -296,6 +297,7 @@ export function createMaxClient(options = {}) {
     if (format) body.format = format
     if (notify !== undefined) body.notify = notify
     if (attachments !== undefined) body.attachments = attachments
+    if (link && link.mid) body.link = { type: link.type === 'forward' ? 'forward' : 'reply', mid: String(link.mid) }
 
     const query = chatId !== undefined ? { chat_id: chatId } : { user_id: userId }
     // MAX expects disable_link_preview as a QUERY parameter, not a body field.

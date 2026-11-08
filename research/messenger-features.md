@@ -35,7 +35,8 @@ Skill](https://github.com/max-messenger/max-agents-skill), а также наш�
   `/approve`, пресеты, 173 теста; **v0.8.0**: read-only cost-meter ledger,
   `/budget`, стоимость в `/status` и дайджесте, алерты 80/100 %, 187 тестов;
   **v0.9.0**: webhook-транспорт (secret, durable queue, авто-подписка),
-  npm-публикация, 200 тестов.
+  npm-публикация, 200 тестов; **v1.0.0**: reply-ветки, таблицы→файлы,
+  `/schedules`, forwarded, `/settings`, 249 тестов.
 - Не реализовано из каталога: 5/8/11/12/14–29 (см. ниже); план — `ROADMAP.md`.
 
 ## 0. TL;DR

@@ -19,12 +19,14 @@ import {
   formatPlanStateCard,
   formatSearchCard,
   formatSessionsCard,
+  formatSettingsCard,
   formatStatusCard,
   formatWorkspacesCard,
   shortSessionId,
   truncate,
 } from './cards.mjs'
 import { formatBytes } from './incoming.mjs'
+import { deleteSchedule, formatSchedulesCard, listSchedules, setScheduleActive } from './schedules.mjs'
 
 const COMMANDS = [
   { name: 'help', description: 'Справка по командам' },
@@ -50,6 +52,8 @@ const COMMANDS = [
   { name: 'unpin', description: 'Открепить текущую сессию' },
   { name: 'workspace', description: 'Рабочие папки: /workspace [N|add path]' },
   { name: 'approve', description: 'Политика подтверждений' },
+  { name: 'schedules', description: 'Расписания: /schedules [pause|resume|cancel N]' },
+  { name: 'settings', description: 'Эффективные настройки плагина' },
   { name: 'health', description: 'Здоровье плагина и очередь' },
   { name: 'version', description: 'Версия плагина' },
   { name: 'ping', description: 'Проверка отклика' },
@@ -84,6 +88,10 @@ export function createBot({
   const workspaceChoices = new Map()
   /** chatKey -> { policy, at } pending `/approve <policy> confirm` */
   const approvalConfirms = new Map()
+  /** chatKey -> normalized schedule list for `/schedules <action> N` */
+  const scheduleChoices = new Map()
+  /** chatKey -> { id, at } pending `/schedules cancel N confirm` */
+  const scheduleCancels = new Map()
   /** workspace path chosen for subsequent `/new` calls */
   let preferredWorkspacePath
   /** chatKey -> token bucket for incoming flood protection */
@@ -635,6 +643,82 @@ export function createBot({
         await reply(chatId, formatBudgetCard({ status }))
         return true
       }
+      case 'schedules': {
+        const service = runtime.scheduleService?.()
+        const tokens = arg.trim().split(/\s+/).filter(Boolean)
+        const action = (tokens[0] ?? 'list').toLowerCase()
+        if (action === 'list' || tokens.length === 0) {
+          const result = await listSchedules(service)
+          if (!result.ok) {
+            await reply(chatId, `❌ ${result.error}`)
+            return true
+          }
+          scheduleChoices.set(chatKey(chatId), result.items.slice(0, 10))
+          await reply(chatId, formatSchedulesCard(result))
+          return true
+        }
+        const indexMatch = /^(\d+)$/.exec(tokens[1] ?? '')
+        if (!indexMatch) {
+          await reply(chatId, 'Использование: `/schedules`, `/schedules pause N`, `/schedules resume N`, `/schedules cancel N [confirm]`')
+          return true
+        }
+        let items = scheduleChoices.get(chatKey(chatId))
+        if (!items) {
+          const result = await listSchedules(service)
+          if (!result.ok) {
+            await reply(chatId, `❌ ${result.error}`)
+            return true
+          }
+          items = result.items
+          scheduleChoices.set(chatKey(chatId), items)
+        }
+        const item = items[Number(indexMatch[1]) - 1]
+        if (!item?.id) {
+          await reply(chatId, `Нет задачи №${indexMatch[1]} — обнови список: /schedules`)
+          return true
+        }
+        if (action === 'cancel' || action === 'delete') {
+          const confirmed = tokens.includes('confirm')
+          const key = chatKey(chatId)
+          const pending = scheduleCancels.get(key)
+          if (!confirmed || !pending || pending.id !== item.id || Date.now() - pending.at > 60_000) {
+            scheduleCancels.set(key, { id: item.id, at: Date.now() })
+            await reply(chatId, `🗑 Удалить задачу «${truncate(item.title || item.id, 80)}»? Подтверди: \`/schedules cancel ${indexMatch[1]} confirm\``)
+            return true
+          }
+          scheduleCancels.delete(key)
+          const deleted = await deleteSchedule(service, { id: item.id, expectedUpdatedAt: item.updatedAt })
+          if (!deleted.ok) {
+            await reply(chatId, `❌ ${deleted.error}`)
+            return true
+          }
+          scheduleChoices.delete(key)
+          await reply(chatId, `🗑 Задача удалена: «${truncate(item.title || item.id, 80)}»`)
+          return true
+        }
+        if (action === 'pause' || action === 'resume') {
+          const desired = action === 'resume'
+          const result = await setScheduleActive(service, {
+            id: item.id,
+            active: desired,
+            expectedUpdatedAt: item.updatedAt,
+          })
+          if (!result.ok) {
+            await reply(chatId, `❌ ${result.error}`)
+            return true
+          }
+          scheduleChoices.delete(chatKey(chatId))
+          await reply(chatId, `${desired ? '▶️ Возобновлена' : '⏸ Поставлена на паузу'}: «${truncate(item.title || item.id, 80)}»`)
+          return true
+        }
+        await reply(chatId, 'Использование: `/schedules`, `/schedules pause N`, `/schedules resume N`, `/schedules cancel N [confirm]`')
+        return true
+      }
+      case 'settings': {
+        const settings = runtime.settingsSummary?.() ?? {}
+        await reply(chatId, formatSettingsCard(settings))
+        return true
+      }
       case 'digest': {
         if (!observer?.sendDigest) {
           await reply(chatId, 'Дайджест недоступен.')
@@ -775,6 +859,19 @@ export function createBot({
     }
   }
 
+  /** Unwrap the forwarded message payload when MAX provides one. */
+  function forwardedPayload(message) {
+    const link = message?.link ?? message?.body?.link
+    if (!link || link.type !== 'forward') return undefined
+    const nested = link.message ?? link.forwardedMessage ?? link.forwarded_message
+    if (!nested || typeof nested !== 'object') return undefined
+    const body = nested.body ?? nested
+    const text = String(body?.text ?? '').trim()
+    const attachments = Array.isArray(body?.attachments) ? body.attachments : []
+    if (text === '' && attachments.length === 0) return undefined
+    return { text, attachments }
+  }
+
   async function handleMessageCreated(update) {
     const message = update.message
     if (!message || message.sender?.is_bot) return
@@ -789,9 +886,22 @@ export function createBot({
       await warnTooFast(chatId)
       return
     }
-    const text = String(message.body?.text ?? '').trim()
+    // A MAX reply is routed back to the session that produced the quoted message.
+    const link = message.link ?? message.body?.link
+    const replyMid = link?.type === 'reply' ? link.mid : undefined
+    const replySession = replyMid ? state?.findSessionByMid?.(replyMid) : undefined
+    if (replySession) {
+      state?.setSession?.(chatId, replySession)
+      logger?.debug?.('MAX reply routed to session %s', replySession)
+    }
+    const forwarded = forwardedPayload(message)
+    let text = String(message.body?.text ?? '').trim()
+    let attachments = Array.isArray(message.body?.attachments) ? message.body.attachments : []
+    if (forwarded) {
+      if (text === '' && forwarded.text !== '') text = `↪️ Пересланное сообщение:\n${forwarded.text}`
+      if (attachments.length === 0) attachments = forwarded.attachments
+    }
     if (interactions?.tryAnswerText && (await interactions.tryAnswerText({ chatId, userId, text }))) return
-    const attachments = Array.isArray(message.body?.attachments) ? message.body.attachments : []
     if (attachments.length > 0) {
       await handleIncomingFiles({ chatId, attachments, text })
       return

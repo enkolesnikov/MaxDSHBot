@@ -47,6 +47,10 @@ export function createState({ file, logger, chatId } = {}) {
     budgetAlerts: {},
     /** Durable webhook updates: [{ key, update, at }] */
     webhookQueue: [],
+    /** sessionId -> anchor message mid (first MAX reply of the session) */
+    anchors: {},
+    /** mid -> sessionId for every forwarded final message (reply routing) */
+    messageSessions: {},
   }
 
   try {
@@ -64,6 +68,12 @@ export function createState({ file, logger, chatId } = {}) {
         state.pendingCards = parsed.pendingCards.filter(
           (entry) => entry && typeof entry.token === 'string' && (entry.kind === 'approval' || entry.kind === 'question'),
         )
+      }
+      if (parsed.anchors && typeof parsed.anchors === 'object' && !Array.isArray(parsed.anchors)) {
+        state.anchors = { ...parsed.anchors }
+      }
+      if (parsed.messageSessions && typeof parsed.messageSessions === 'object' && !Array.isArray(parsed.messageSessions)) {
+        state.messageSessions = { ...parsed.messageSessions }
       }
       if (Array.isArray(parsed.webhookQueue)) {
         state.webhookQueue = parsed.webhookQueue.filter(
@@ -130,6 +140,8 @@ export function createState({ file, logger, chatId } = {}) {
             approvalRules: state.approvalRules,
             budgetAlerts: state.budgetAlerts,
             webhookQueue: state.webhookQueue,
+            anchors: state.anchors,
+            messageSessions: state.messageSessions,
           },
           null,
           2,
@@ -236,6 +248,41 @@ export function createState({ file, logger, chatId } = {}) {
       if (name === '' || !Number.isFinite(until)) return
       state.approvalRules = state.approvalRules.filter((rule) => rule.tool !== name && rule.until > Date.now())
       state.approvalRules.push({ tool: name, until, createdAt: Date.now() })
+      saveSoon()
+    },
+    /** First MAX message of a session (thread anchor). */
+    getAnchor(sessionId) {
+      const value = state.anchors[String(sessionId ?? '')]
+      return typeof value === 'string' && value !== '' ? value : undefined
+    },
+    /** Remember the anchor and map the message id back to the session. */
+    setAnchor(sessionId, mid) {
+      const sid = String(sessionId ?? '')
+      const messageId = String(mid ?? '')
+      if (sid === '' || messageId === '') return
+      state.anchors[sid] = messageId
+      this.mapMessage(sid, messageId)
+    },
+    /** Map one forwarded message to its session so a MAX reply can route back. */
+    mapMessage(sessionId, mid) {
+      const sid = String(sessionId ?? '')
+      const messageId = String(mid ?? '')
+      if (sid === '' || messageId === '') return
+      state.messageSessions[messageId] = sid
+      const keys = Object.keys(state.messageSessions)
+      if (keys.length > 1000) {
+        for (const key of keys.slice(0, keys.length - 1000)) delete state.messageSessions[key]
+      }
+      saveSoon()
+    },
+    findSessionByMid(mid) {
+      const messageId = String(mid ?? '')
+      if (messageId === '') return undefined
+      const value = state.messageSessions[messageId]
+      return typeof value === 'string' && value !== '' ? value : undefined
+    },
+    clearAnchor(sessionId) {
+      delete state.anchors[String(sessionId ?? '')]
       saveSoon()
     },
     getWebhookQueue() {

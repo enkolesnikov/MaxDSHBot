@@ -32,6 +32,7 @@ import { createBot } from './lib/bot.mjs'
 import { createPolicy } from './lib/policy.mjs'
 import { createObserver } from './lib/observer.mjs'
 import { collectMessageImages, extractImageReferences } from './lib/images.mjs'
+import { buildTableFiles } from './lib/tables.mjs'
 import { createIncoming } from './lib/incoming.mjs'
 import { resolveSessionDir } from './lib/create-session.mjs'
 import { archivedIdsOf, filterArchivedSessions } from './lib/sessions.mjs'
@@ -90,6 +91,9 @@ const DEFAULTS = {
   questionChannel: 'both',
   buttons: true,
   buttonsPresets: [],
+  threads: true,
+  tableFiles: true,
+  tableMaxFiles: 4,
   webUrl: undefined,
   progress: true,
   progressDelayMs: 2500,
@@ -244,6 +248,9 @@ export function normalizeConfig(raw = {}) {
     interactive: asBoolean(merged.interactive, DEFAULTS.interactive),
     buttons: asBoolean(merged.buttons, DEFAULTS.buttons),
     buttonsPresets: normalizePresets(merged.buttonsPresets),
+    threads: asBoolean(merged.threads, DEFAULTS.threads),
+    tableFiles: asBoolean(merged.tableFiles, DEFAULTS.tableFiles),
+    tableMaxFiles: asInteger(merged.tableMaxFiles, DEFAULTS.tableMaxFiles, 0, 8),
     progress: asBoolean(merged.progress, DEFAULTS.progress),
     typing: asBoolean(merged.typing, DEFAULTS.typing),
     deliverables: asBoolean(merged.deliverables, DEFAULTS.deliverables),
@@ -830,6 +837,26 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     }
   }
 
+  function settingsSummary() {
+    return {
+      version: VERSION,
+      transport: webhookActive ? 'webhook' : 'polling',
+      interactive: config.interactive,
+      allowlist: { users: config.allowedUserIds.length, chats: config.allowedChatIds.length },
+      mode: config.mode,
+      digest: config.digestEnabled ? config.digestTime : undefined,
+      quietHours: config.quietHours,
+      threads: config.threads,
+      tableFiles: config.tableFiles,
+      approvalTimeoutMs: config.approvalTimeoutMs,
+      receiveFiles: config.receiveFiles,
+      outboxEnabled: config.outboxEnabled,
+      costMeterEnabled: config.costMeterEnabled,
+      budgetAlertEnabled: config.budgetAlertEnabled,
+      buttonsPresets: config.buttonsPresets.length,
+    }
+  }
+
   let preferredWorkspacePath
 
   function setPreferredWorkspace(path) {
@@ -1009,6 +1036,8 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       setPreferredWorkspace,
       getApprovalPolicy,
       setApprovalPolicy,
+      scheduleService: () => getService('schedule'),
+      settingsSummary,
       costSnapshot: () => costMeter?.snapshot(),
       costForSession: (sessionId) => costMeter?.sessionCost(sessionId),
       budgetStatus: () => costMeter?.budgetStatus(),
@@ -1208,8 +1237,28 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       logger.debug('final reply suppressed (%s)', decision.reason)
       return
     }
+    let displayText = text
+    let tableAttachments = []
+    if (config.tableFiles && config.tableMaxFiles > 0) {
+      const tables = buildTableFiles(text, { maxTables: config.tableMaxFiles })
+      if (tables.files.length > 0) {
+        for (const file of tables.files) {
+          try {
+            const uploaded = await client.uploadMedia({
+              buffer: Buffer.from(file.content, 'utf8'),
+              filename: file.filename,
+              type: 'file',
+            })
+            if (uploaded?.token) tableAttachments.push({ type: 'file', payload: { token: uploaded.token } })
+          } catch (error) {
+            logger.warn('cannot upload %s to MAX: %s', file.filename, error?.message || String(error))
+          }
+        }
+        if (tableAttachments.length > 0) displayText = tables.strippedText
+      }
+    }
     const payload = formatNotification({
-      text,
+      text: displayText,
       cwd: session?.header?.cwd,
       title: resolveTitle(session),
       sessionId: session?.id,
@@ -1225,8 +1274,12 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     }
     const keyboard = finalKeyboard(session)
     const images = await collectFinalImages(session, text, message, toolImageRefs)
-    const attachments = images.length > 0 || keyboard ? [...images, ...(keyboard ?? [])] : undefined
+    const attachments =
+      images.length > 0 || tableAttachments.length > 0 || keyboard
+        ? [...images, ...tableAttachments, ...(keyboard ?? [])]
+        : undefined
     const finalKey = `final:${session?.id ?? 'unknown'}:${turn ?? 'na'}:${seq ?? 'na'}`
+    let threadMid = config.threads ? state.getAnchor?.(session.id) : undefined
     for (const [index, chunk] of chunks.entries()) {
       const isLast = index === chunks.length - 1
       const params = {
@@ -1237,16 +1290,29 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
         notify: decision.notify,
         disableLinkPreview: config.disableLinkPreview,
         ...(isLast && attachments ? { attachments } : {}),
+        ...(threadMid ? { link: { type: 'reply', mid: threadMid } } : {}),
       }
+      let sent
       if (outbox) {
         const result = await outbox.deliverNow(params, { dedupeKey: `${finalKey}:c${index}`, kind: 'final' })
         if (result?.skipped) continue
-        if (result?.queued) logger.warn('MAX is unavailable; final reply chunk %d queued: %s', index + 1, result.error)
+        if (result?.queued) {
+          logger.warn('MAX is unavailable; final reply chunk %d queued: %s', index + 1, result.error)
+          continue
+        }
+        sent = result?.response
       } else {
-        const sent = await client.sendMessage(params)
-        const mid = sent?.message?.body?.mid
-        logger.debug('MAX message sent%s', mid ? ` (mid ${mid})` : '')
+        sent = await client.sendMessage(params)
       }
+      const mid = sent?.message?.body?.mid
+      if (mid) {
+        state.mapMessage?.(session.id, mid)
+        if (!threadMid && config.threads) {
+          threadMid = mid
+          state.setAnchor?.(session.id, mid)
+        }
+      }
+      logger.debug('MAX message sent%s', mid ? ` (mid ${mid})` : '')
     }
     bot.noteSession?.(String(session.id))
   }

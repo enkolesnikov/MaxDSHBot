@@ -673,3 +673,59 @@ test('webhook transport registers a route and processes an update idempotently',
   assert.equal(rejected.statusCode, 401)
   assert.equal(prompts.length, 1)
 })
+
+test('final replies are threaded under the session anchor', async () => {
+  const { ctx, emit } = createFakeCtx()
+  const client = createFakeClient()
+  apply(ctx, { botToken: 't', chatId: '1', buttons: false, minIntervalMs: 0 }, { createClient: () => client })
+  const s = session('session-thread')
+
+  emit('session/event', s, evt('turn/start', { turn: 1 }))
+  emit('session/event', s, assistantEvent(1, 1, 'первый ответ'))
+  emit('session/event', s, evt('turn/end', { turn: 1, reason: { kind: 'completed' } }))
+  await tick(40)
+  emit('session/event', s, evt('turn/start', { turn: 2 }))
+  emit('session/event', s, assistantEvent(2, 1, 'второй ответ'))
+  emit('session/event', s, evt('turn/end', { turn: 2, reason: { kind: 'completed' } }))
+  await tick(40)
+
+  assert.equal(client.sent.length, 2)
+  assert.equal(client.sent[0].link, undefined)
+  assert.equal(client.sent[1].link?.type, 'reply')
+  assert.equal(client.sent[1].link?.mid, 'mid-1')
+})
+
+test('threads can be disabled', async () => {
+  const { ctx, emit } = createFakeCtx()
+  const client = createFakeClient()
+  apply(ctx, { botToken: 't', chatId: '1', buttons: false, threads: false, minIntervalMs: 0 }, { createClient: () => client })
+  const s = session('session-no-thread')
+  for (const turn of [1, 2]) {
+    emit('session/event', s, evt('turn/start', { turn }))
+    emit('session/event', s, assistantEvent(turn, 1, `ответ ${turn}`))
+    emit('session/event', s, evt('turn/end', { turn, reason: { kind: 'completed' } }))
+    await tick(30)
+  }
+  assert.equal(client.sent.length, 2)
+  assert.equal(client.sent[0].link, undefined)
+  assert.equal(client.sent[1].link, undefined)
+})
+
+test('markdown tables are attached as CSV and Markdown files', async () => {
+  const { ctx, emit } = createFakeCtx()
+  const client = createFakeClient()
+  apply(ctx, { botToken: 't', chatId: '1', buttons: false, minIntervalMs: 0 }, { createClient: () => client })
+  const s = session('session-table')
+  const table = ['| Имя | Роль |', '| --- | --- |', '| Mew | админ |', '| Bot | помощник |'].join('\n')
+  emit('session/event', s, evt('turn/start', { turn: 1 }))
+  emit('session/event', s, assistantEvent(1, 1, `Вот таблица:\n\n${table}\n\nГотово.`))
+  emit('session/event', s, evt('turn/end', { turn: 1, reason: { kind: 'completed' } }))
+  await tick(60)
+
+  assert.equal(client.sent.length, 1)
+  assert.doesNotMatch(client.sent[0].text, /\| Имя \|/)
+  assert.match(client.sent[0].text, /таблица во вложении/)
+  assert.deepEqual(client.uploads.map((item) => item.type), ['file', 'file'])
+  const attachments = client.sent[0].attachments ?? []
+  assert.equal(attachments.filter((item) => item.type === 'file').length, 2)
+})

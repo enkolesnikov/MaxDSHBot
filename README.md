@@ -18,7 +18,7 @@
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/enkolesnikov/MaxDSHBot?style=flat-square"/></a>
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img alt="DSH" src="https://img.shields.io/badge/DSH-0.2.x-6C5CE7?style=flat-square"/></a>
   <a href="https://max.ru"><img alt="MAX" src="https://img.shields.io/badge/MAX-messenger-8B5CF6?style=flat-square"/></a>
-  <img alt="Tests" src="https://img.shields.io/badge/tests-200%20passed-2ecc71?style=flat-square"/>
+  <img alt="Tests" src="https://img.shields.io/badge/tests-249%20passed-2ecc71?style=flat-square"/>
   <a href="https://nodejs.org"><img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A524.9-339933?style=flat-square&logo=nodedotjs&logoColor=white"/></a>
   <img alt="Runtime dependencies" src="https://img.shields.io/badge/runtime%20deps-0-brightgreen?style=flat-square"/>
   <a href="https://github.com/enkolesnikov/MaxDSHBot/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/enkolesnikov/MaxDSHBot?style=flat-square"/></a>
@@ -183,6 +183,19 @@ MAX будет сам присылать обновления на публич�
 long polling и пишет warning в лог. Официальная документация MAX:
 [webhooks](https://dev.max.ru/docs-api/methods/POST/subscriptions).
 
+## Reply-ветки, таблицы, расписания (v1.0)
+
+- **Reply-ветки**: первый ответ сессии становится якорем, следующие приходят
+  реплаями к нему; ответ пользователя на любой ответ уходит в исходную сессию.
+  Якоря/mid→session переживают reload.
+- **Таблицы → файлы**: markdown-таблицы дополнительно уходят как `table-N.csv`
+  и `table-N.md`, текст ответа заменяется плейсхолдером (MAX не рендерит таблицы).
+- **`/schedules`**: список задач, `pause`/`resume N`, `cancel N` с подтверждением.
+- **Forwarded-сообщения** из MAX разворачиваются и передаются агенту.
+- **`/settings`**: снимок эффективных настроек (transport, режим, allowlist,
+  таймауты, фичи) без секретов.
+- Полный GUI-редактор настроек, голос и нативные входящие изображения — в 1.1.
+
 ## Надёжность и безопасность
 
 - **Durable outbox** — финальные ответы и уведомления переживают недоступность MAX и reload; retry с backoff, TTL, приоритеты, дедуп по `session:turn:seq`.
@@ -245,6 +258,8 @@ long polling и пишет warning в лог. Официальная докум�
 | `webhookUpdateTypes` | message_created,… | список типов обновлений для подписки |
 | `webhookAutoSubscribe` / `webhookRemoveOnStop` | `true` / `false` | авто-подписка/отписка MAX |
 | `webhookQueueMax` | `200` | durable-очередь входящих webhook-обновлений |
+| `threads` | `true` | reply-ветки сессий (якорь + маршрутизация ответов) |
+| `tableFiles` / `tableMaxFiles` | `true` / `4` | markdown-таблицы → CSV/MD файлами |
 
 </details>
 
@@ -265,6 +280,8 @@ long polling и пишет warning в лог. Официальная докум�
 | `lib/state.mjs`, `lib/health.mjs`, `lib/audit.mjs`, `lib/redact.mjs` | состояние, health, аудит, секреты |
 | `lib/cost-meter.mjs` | read-only ledger `dsh-cost-meter` |
 | `lib/webhook.mjs` | webhook-обработчик, secret, подписка MAX |
+| `lib/tables.mjs` | markdown-таблицы → CSV/MD |
+| `lib/schedules.mjs` | `/schedules`: список, пауза, удаление |
 | `lib/observer.mjs`, `lib/policy.mjs` | события, дайджест, режимы, алерты бюджета |
 | `certs/ca-chain.pem` | Russian Trusted Sub CA + Root CA |
 | `test/` | 187 тестов (`node --test`) |
@@ -291,7 +308,7 @@ long polling и пишет warning в лог. Официальная докум�
 ## Проверка
 
 ```bash
-cd dsh-max-notify && npm test          # 200 unit tests
+cd dsh-max-notify && npm test          # 249 unit tests
 npm run check                          # синтаксис всех модулей
 node tools/smoke.mjs --env ../.env     # read-only: GET /me, state, outbox
 node tools/send-test.mjs "проверка"    # реальная отправка

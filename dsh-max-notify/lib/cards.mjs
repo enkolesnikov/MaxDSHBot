@@ -198,6 +198,7 @@ export function formatHelpCard() {
     '`/mode [all|errors|mute]` — режим уведомлений',
     '`/mute [30m|2h]` — тишина, `/unmute` — вернуть',
     '`/budget` — стоимость и бюджет',
+    '`/schedules` — запланированные задачи (pause/resume/cancel)',
     '`/digest` — дайджест сейчас',
     '`/help` — эта справка',
     '',
@@ -381,6 +382,24 @@ export function formatPlanStateCard({ active, pending, action } = {}) {
   lines.push(`Состояние: ${active ? 'включён' : 'выключен'}${pending ? ' (переключение в следующем шаге)' : ''}`)
   if (action) lines.push(`Действие: ${action}`)
   lines.push('', '`/plan` — включить, `/plan off` — выключить.')
+  return lines.join('\n')
+}
+
+/** Read-only effective settings card for `/settings`. */
+export function formatSettingsCard(settings = {}) {
+  const lines = ['⚙️ **Настройки dsh-max-notify**', '']
+  lines.push(`🧩 версия: ${settings.version ?? '?'}`)
+  lines.push(`📡 transport: ${settings.transport ?? 'polling'}`)
+  lines.push(`🕹 интерактив: ${settings.interactive ? 'вкл' : 'выкл'} · allowlist: ${settings.allowlist?.users ?? 0} users / ${settings.allowlist?.chats ?? 0} chats`)
+  if (settings.mode) lines.push(`🔔 режим: ${settings.mode}`)
+  if (settings.digest) lines.push(`📊 дайджест: ${settings.digest}`)
+  if (settings.quietHours) lines.push(`🌙 тихие часы: ${settings.quietHours.start}–${settings.quietHours.end}`)
+  lines.push(`🧵 reply-ветки: ${settings.threads ? 'вкл' : 'выкл'} · таблицы файлами: ${settings.tableFiles ? 'вкл' : 'выкл'}`)
+  lines.push(`🔐 таймаут approvals: ${settings.approvalTimeoutMs ? `${Math.round(settings.approvalTimeoutMs / 1000)} с` : 'выкл'}`)
+  lines.push(`📥 приём файлов: ${settings.receiveFiles ? 'вкл' : 'выкл'} · outbox: ${settings.outboxEnabled ? 'вкл' : 'выкл'}`)
+  lines.push(`💰 cost-meter: ${settings.costMeterEnabled ? 'вкл' : 'выкл'} · алерты бюджета: ${settings.budgetAlertEnabled ? 'вкл' : 'выкл'}`)
+  if (settings.buttonsPresets > 0) lines.push(`🔘 пресетов: ${settings.buttonsPresets}`)
+  lines.push('', 'Полный конфиг — `cordis.patch.yml` профиля.')
   return lines.join('\n')
 }
 

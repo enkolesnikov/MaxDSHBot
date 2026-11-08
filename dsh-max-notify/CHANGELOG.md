@@ -4,6 +4,44 @@ All notable changes to `dsh-max-notify` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] — 2026-11-09
+
+Первый стабильный релиз: «чат как пульт» стал полноценным рабочим местом.
+
+### Added
+
+- **Reply-ветки сессий**: первый MAX-ответ сессии становится якорем, следующие
+  ответы приходят реплаями к нему; ответ пользователя на любой ответ
+  маршрутизируется в исходную сессию. Якоря и mid→session сохраняются в state.
+- **Таблицы → файлы**: markdown-таблицы из финального ответа дополнительно
+  уходят в MAX как `table-N.csv` и `table-N.md`, текст ответа заменяется
+  плейсхолдером; code fences не считаются таблицами.
+- **`/schedules`**: список запланированных задач, `/schedules pause|resume N`,
+  `/schedules cancel N` с двухшаговым подтверждением. Для операций используется
+  `ctx.get('schedule')`, `expectedUpdatedAt` защищает от конфликтов.
+- **Forwarded-сообщения**: входящий forward из MAX разворачивается и передаётся
+  агенту как обычный текст/вложения.
+- **`/settings`**: снимок эффективных настроек (transport, режим, allowlist,
+  таймауты, фичи) без раскрытия секретов.
+- `/help` и меню команд MAX расширены (`/schedules`, `/settings`).
+
+### Changed
+
+- `package.json` 1.0.0; в пакет добавлены `lib/tables.mjs`, `lib/schedules.mjs`,
+  `test/tables.test.mjs`, `test/schedules.test.mjs`.
+- Конфиг: `threads` (true), `tableFiles` (true), `tableMaxFiles` (4).
+
+### Tests
+
+249 unit/integration tests (was 200): таблицы, расписания, reply-маршрутизация,
+forwarded, `/settings`, плюс существующее покрытие.
+
+### Deferred to 1.1
+
+GUI-страница настроек с редактированием, голосовые STT/TTS и нативные входящие
+изображения — требуют отдельного клиентского/внешнего слоя; в 1.0 есть
+read-only `/settings` и стабильные файлы/ветки/расписания.
+
 ## [0.9.0] — 2026-11-09
 
 «Production-транспорт»: webhook-режим MAX + публикация npm.

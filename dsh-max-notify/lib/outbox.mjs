@@ -192,7 +192,7 @@ export function createOutbox({
   async function deliverNow(params, { dedupeKey, call = 'sendMessage', priority = 0, kind = 'message' } = {}) {
     if (dedupeKey && isDelivered(dedupeKey)) return { skipped: true }
     try {
-      await send(call, params)
+      const response = await send(call, params)
       stats.sent += 1
       stats.lastSentAt = now()
       if (dedupeKey) {
@@ -200,7 +200,7 @@ export function createOutbox({
         while (delivered.length > DELIVERED_LIMIT) delivered.shift()
         save()
       }
-      return { sent: true }
+      return { sent: true, response, mid: response?.message?.body?.mid }
     } catch (error) {
       enqueue({ dedupeKey, call, params, priority, kind })
       return { queued: true, error: error?.message || String(error) }

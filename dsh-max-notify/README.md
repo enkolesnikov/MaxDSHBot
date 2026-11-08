@@ -97,7 +97,9 @@ Published on npm: https://www.npmjs.com/package/dsh-max-notify
 | `lib/redact.mjs` | token/credential redaction for log sinks |
 | `lib/cost-meter.mjs` | read-only dsh-cost-meter ledger adapter (cost/budget) |
 | `lib/webhook.mjs` | webhook handler, secret verification, MAX subscription |
-| `test/*.test.mjs` | `node --test` (200 unit tests) |
+| `lib/tables.mjs` | Markdown tables → CSV/Markdown |
+| `lib/schedules.mjs` | `/schedules` helpers |
+| `test/*.test.mjs` | `node --test` (249 unit tests) |
 
 ## Config
 
@@ -156,6 +158,8 @@ Set in `cordis.patch.yml` (or override the row by id from the profile's own
 | `webhookUpdateTypes` | message_created,… | Subscription update types |
 | `webhookAutoSubscribe` / `webhookRemoveOnStop` | `true` / `false` | Automatic subscription management |
 | `webhookQueueMax` | `200` | Durable incoming-update queue limit |
+| `threads` | `true` | Reply threads for session answers |
+| `tableFiles` / `tableMaxFiles` | `true` / `4` | Markdown tables as CSV/MD attachments |
 
 ## Remote control ("Пульт")
 
@@ -185,6 +189,8 @@ session (default: most recent session; `/use N` to switch). Commands:
 | `/workspace [N\|add <path>]` | List/select workspaces or register a new folder |
 | `/approve` | Show/change the approval policy (`ask`/`never`, two-step) |
 | `/budget`, `/cost` | Spend today/month/total and budget status |
+| `/schedules [pause\|resume\|cancel N]` | Manage DSH scheduled tasks |
+| `/settings` | Effective plugin settings |
 | `/health` | Polling/outbox/limiter/health snapshot |
 | `/version` | Plugin version |
 | `/ping` | Round-trip check |
