@@ -44,3 +44,7 @@
         # incomingBurst: 10
         # auditLog: true
         # heartbeatFile: /var/lib/dsh/max-notify-heartbeat.json
+        # costMeterEnabled: true
+        # costMeterFile: $DSH_HOME/storages/cost-meter/ledger.json
+        # budgetAlertEnabled: true
+        # budgetAlertThresholds: [80, 100]

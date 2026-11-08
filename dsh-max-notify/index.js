@@ -39,6 +39,7 @@ import { createLimiter, PRIORITY } from './lib/limits.mjs'
 import { createOutbox, resolveOutboxFile } from './lib/outbox.mjs'
 import { createHealth } from './lib/health.mjs'
 import { createAudit, resolveAuditFile } from './lib/audit.mjs'
+import { createCostMeter, resolveCostLedgerFile } from './lib/cost-meter.mjs'
 import { wrapLogger } from './lib/redact.mjs'
 
 export const name = 'dsh-max-notify'
@@ -132,6 +133,11 @@ const DEFAULTS = {
   auditLog: true,
   auditFile: undefined,
   heartbeatFile: undefined,
+  // cost & budget (v0.8)
+  costMeterEnabled: true,
+  costMeterFile: undefined,
+  budgetAlertEnabled: true,
+  budgetAlertThresholds: [80, 100],
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -156,6 +162,14 @@ function normalizePresets(value) {
     })
     .filter(Boolean)
     .slice(0, 6)
+}
+
+function asIntArray(value, fallback) {
+  const raw = Array.isArray(value) ? value : typeof value === 'string' ? value.split(',') : []
+  const numbers = raw
+    .map((item) => Number(String(item).trim()))
+    .filter((number) => Number.isFinite(number) && number > 0 && number <= 1000)
+  return numbers.length > 0 ? [...new Set(numbers)].sort((a, b) => a - b) : fallback
 }
 
 function asStringArray(value, fallback) {
@@ -263,6 +277,10 @@ export function normalizeConfig(raw = {}) {
     auditLog: asBoolean(merged.auditLog, DEFAULTS.auditLog),
     auditFile: String(merged.auditFile || env.MAX_NOTIFY_AUDIT_FILE || '').trim() || undefined,
     heartbeatFile: String(merged.heartbeatFile || env.MAX_NOTIFY_HEARTBEAT_FILE || '').trim() || undefined,
+    costMeterEnabled: asBoolean(merged.costMeterEnabled, DEFAULTS.costMeterEnabled),
+    costMeterFile: String(merged.costMeterFile || env.MAX_NOTIFY_COST_FILE || '').trim() || undefined,
+    budgetAlertEnabled: asBoolean(merged.budgetAlertEnabled, DEFAULTS.budgetAlertEnabled),
+    budgetAlertThresholds: asIntArray(merged.budgetAlertThresholds, DEFAULTS.budgetAlertThresholds),
   }
 
   const format = typeof config.format === 'string' ? config.format.trim().toLowerCase() : ''
@@ -903,6 +921,9 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
         },
       })
     : undefined
+  const costMeter = config.costMeterEnabled
+    ? createCostMeter({ file: resolveCostLedgerFile(config), logger })
+    : undefined
   const interactions = createInteractions({
     client,
     config,
@@ -921,7 +942,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     target,
     policy,
     state,
-    runtime: { listSessions, titleFor },
+    runtime: { listSessions, titleFor, costSnapshot: () => costMeter?.snapshot() },
     outbox,
   })
   const bot = createBot({
@@ -964,6 +985,9 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       setPreferredWorkspace,
       getApprovalPolicy,
       setApprovalPolicy,
+      costSnapshot: () => costMeter?.snapshot(),
+      costForSession: (sessionId) => costMeter?.sessionCost(sessionId),
+      budgetStatus: () => costMeter?.budgetStatus(),
     },
   })
 
@@ -1313,6 +1337,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     restriction,
     config.interactive ? '; remote control on' : '; remote control off',
     config.outboxEnabled ? '; outbox on' : '',
+    config.costMeterEnabled ? '; cost-meter on' : '',
     config.digestEnabled ? `; digest at ${config.digestTime}` : '',
   )
 

@@ -57,6 +57,11 @@ file deliverables.
   plan is attached as `plan.md` and the agent receives either an approval or
   free-text feedback.
 - `/sessions` resolves titles of cold sessions through the projection cache.
+- **Cost & budget (v0.8)**: `/budget` (`/cost`) reads the `dsh-cost-meter`
+  ledger read-only and reports spend today/month/total plus budget
+  spent/remaining/percent; `/status` and the daily digest include cost lines;
+  budget alerts (80/100 by default) fire once per period and survive reloads.
+  `costMeterFile`, `budgetAlertEnabled`, `budgetAlertThresholds` configure it.
 
 ## Package layout
 
@@ -76,7 +81,8 @@ file deliverables.
 | `lib/health.mjs` | health snapshot for `/health` and heartbeat files |
 | `lib/audit.mjs` | metadata-only JSONL audit of approvals/commands (0600) |
 | `lib/redact.mjs` | token/credential redaction for log sinks |
-| `test/*.test.mjs` | `node --test` (173 unit tests) |
+| `lib/cost-meter.mjs` | read-only dsh-cost-meter ledger adapter (cost/budget) |
+| `test/*.test.mjs` | `node --test` (187 unit tests) |
 
 ## Config
 
@@ -127,6 +133,8 @@ Set in `cordis.patch.yml` (or override the row by id from the profile's own
 | `incomingPerMinute` / `incomingBurst` | `30` / `10` | Incoming flood protection |
 | `auditLog` / `auditFile` | `true` / `$DSH_HOME/max-notify/audit.jsonl` | Local audit of approvals/questions/commands |
 | `heartbeatFile` | — | JSON health snapshot for external monitoring |
+| `costMeterEnabled` / `costMeterFile` | `true` / `$DSH_HOME/storages/cost-meter/ledger.json` | Read-only cost ledger adapter |
+| `budgetAlertEnabled` / `budgetAlertThresholds` | `true` / `[80, 100]` | Budget threshold alerts (once per period) |
 
 ## Remote control ("Пульт")
 
@@ -155,6 +163,7 @@ session (default: most recent session; `/use N` to switch). Commands:
 | `/pin`, `/unpin` | Pin/unpin the active session |
 | `/workspace [N\|add <path>]` | List/select workspaces or register a new folder |
 | `/approve` | Show/change the approval policy (`ask`/`never`, two-step) |
+| `/budget`, `/cost` | Spend today/month/total and budget status |
 | `/health` | Polling/outbox/limiter/health snapshot |
 | `/version` | Plugin version |
 | `/ping` | Round-trip check |

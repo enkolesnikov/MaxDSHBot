@@ -661,3 +661,37 @@ test('preset buttons prompt the session with the configured text', async () => {
   assert.deepEqual(calls.prompts, [{ sessionId: 'session-aaaaaaaa', text: 'дай ещё вариант' }])
   assert.equal(client.callbacks.at(-1).body.notification, '📨 Ещё вариант')
 })
+
+test('/budget shows budget and spend, /status includes the cost line', async () => {
+  const snapshot = {
+    available: true,
+    currency: { code: 'CNY', symbol: '¥', decimals: 2 },
+    today: { date: '2026-11-09', amount: 5 },
+    month: { start: '2026-11-01', amount: 15 },
+    total: { amount: 15 },
+    budget: {
+      enabled: true,
+      amount: 100,
+      spent: 15,
+      remaining: 85,
+      percent: 15,
+      period: 'month',
+      periodKey: '2026-11',
+      start: '2026-11-01',
+      end: '2026-11-09',
+    },
+  }
+  const { bot, client } = makeBot({
+    runtime: {
+      budgetStatus: async () => ({ available: true, ...snapshot }),
+      costSnapshot: async () => snapshot,
+      costForSession: async () => 5,
+    },
+  })
+  await bot.handleUpdate(messageUpdate({ text: '/budget' }))
+  assert.match(client.sent[0].text, /Бюджет/)
+  assert.match(client.sent[0].text, /¥15\.00 из ¥100\.00/)
+  await bot.handleUpdate(messageUpdate({ text: '/status' }))
+  assert.match(client.sent[1].text, /Сегодня ¥5\.00/)
+  assert.match(client.sent[1].text, /сессия ¥5\.00/)
+})

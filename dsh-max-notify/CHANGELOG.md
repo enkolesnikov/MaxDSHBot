@@ -4,6 +4,39 @@ All notable changes to `dsh-max-notify` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] — 2026-11-09
+
+«Стоимость и бюджет»: read-only интеграция с `dsh-cost-meter`.
+
+### Added
+
+- `lib/cost-meter.mjs` — адаптер ledger `$DSH_HOME/storages/cost-meter/ledger.json`
+  (version 1, size cap 8 МиБ, mtime-cache, graceful degradation): сегодня,
+  календарный месяц, всего, стоимость по DSH session id, окно/потрачено/
+  остаток/процент бюджета. Валюта, символ и decimals берутся из конфига
+  cost-meter; конвертация `cost` × `exchangeRate` повторяет логику UI.
+- `/budget` (и `/cost`): бюджет, потрачено/осталось/период, сегодня/месяц/всего;
+  если бюджет выключен — подсказка, где включить.
+- `/status` и `/current` показывают стоимость за сегодня, стоимость сессии и
+  процент бюджета.
+- Дайджест включает стоимость за сегодня/месяц и процент бюджета.
+- **Алерты бюджета**: пороги `budgetAlertThresholds` (по умолчанию 80/100)
+  срабатывают один раз за период, сохраняются в state (`budgetAlerts`),
+  дедуплицируются через outbox; 80% — обычный, 100% — critical.
+- Конфиг: `costMeterEnabled`, `costMeterFile`, `budgetAlertEnabled`,
+  `budgetAlertThresholds` (env `MAX_NOTIFY_COST_FILE`).
+
+### Changed
+
+- `/help` дополнен `/budget`; команды в меню MAX обновлены.
+- `package.json` 0.8.0.
+
+### Tests
+
+187 unit tests (was 173): ledger fixtures (CNY/USD, day/month/all/custom,
+disabled/missing/corrupt/version mismatch), budget cards, `/budget`, `/status`
+cost line, alert dedupe, digest cost, state persistence.
+
 ## [0.7.0] — 2026-11-09
 
 «Полное управление»: все частые действия из MAX без возврата в веб-GUI.

@@ -233,3 +233,93 @@ test('error notifications use the critical priority lane', async () => {
   assert.equal(enqueued[0].priority, 10)
   assert.equal(enqueued[0].dedupeKey, 'error:session-1:2:3')
 })
+
+function budgetRuntime(percent, extra = {}) {
+  const budget = {
+    enabled: true,
+    amount: 100,
+    spent: percent,
+    remaining: Math.max(0, 100 - percent),
+    percent,
+    period: 'month',
+    periodKey: '2026-11',
+    start: '2026-11-01',
+    end: '2026-11-09',
+  }
+  return {
+    budgetStatus: async () => ({
+      available: true,
+      currency: { code: 'CNY', symbol: '¥', decimals: 2 },
+      budget,
+      today: { date: '2026-11-09', amount: 5 },
+      month: { amount: 15 },
+      total: { amount: 15 },
+      ...extra,
+    }),
+  }
+}
+
+function createBudgetState() {
+  let alerts = {}
+  return {
+    getBudgetAlerts: () => alerts,
+    setBudgetAlerts: (next) => {
+      alerts = { ...next }
+    },
+    getDigestDate: () => undefined,
+    setDigestDate: () => {},
+    snapshot: () => alerts,
+  }
+}
+
+test('budget alerts fire once per threshold and period', async () => {
+  const state = createBudgetState()
+  const { client, observer } = makeObserver({
+    config: { budgetAlertEnabled: true, budgetAlertThresholds: [80, 100] },
+    runtime: budgetRuntime(85),
+    state,
+  })
+  assert.deepEqual(await observer.checkBudget(), { sent: 1 })
+  assert.equal(client.sent.length, 1)
+  assert.match(client.sent[0].text, /80%/)
+  assert.deepEqual(await observer.checkBudget(), { sent: 0 })
+  assert.equal(client.sent.length, 1)
+
+  const second = makeObserver({
+    config: { budgetAlertEnabled: true, budgetAlertThresholds: [80, 100] },
+    runtime: budgetRuntime(120),
+    state,
+  })
+  assert.deepEqual(await second.observer.checkBudget(), { sent: 1 })
+  assert.equal(second.client.sent.length, 1)
+  assert.match(second.client.sent[0].text, /исчерпан/)
+})
+
+test('budget alerts are skipped when the budget is disabled or absent', async () => {
+  const { observer } = makeObserver({
+    config: { budgetAlertEnabled: true, budgetAlertThresholds: [80] },
+    runtime: {
+      budgetStatus: async () => ({ available: true, budget: { enabled: false, percent: 99 } }),
+    },
+    state: createBudgetState(),
+  })
+  assert.deepEqual(await observer.checkBudget(), { sent: 0, skipped: 'budget disabled or ledger unavailable' })
+})
+
+test('digest includes cost and budget lines', async () => {
+  const { client, observer } = makeObserver({
+    runtime: {
+      ...makeObserver().runtime,
+      costSnapshot: async () => ({
+        available: true,
+        currency: { code: 'CNY', symbol: '¥', decimals: 2 },
+        today: { amount: 5 },
+        month: { amount: 15 },
+        budget: { enabled: true, amount: 100, spent: 15, percent: 15 },
+      }),
+    },
+  })
+  await observer.sendDigest()
+  assert.match(client.sent.at(-1).text, /Сегодня ¥5\.00/)
+  assert.match(client.sent.at(-1).text, /Бюджет: 15\.0%/)
+})

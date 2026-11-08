@@ -570,3 +570,13 @@ test('configured preset buttons are attached under the final reply', async () =>
   const preset = flat.find((button) => button.text === 'Ещё вариант')
   assert.equal(JSON.parse(preset.payload).a, 'preset')
 })
+
+test('cost/budget config keys normalize with safe defaults', () => {
+  const base = normalizeConfig({ botToken: 't', chatId: '1' })
+  assert.equal(base.costMeterEnabled, true)
+  assert.equal(base.budgetAlertEnabled, true)
+  assert.deepEqual(base.budgetAlertThresholds, [80, 100])
+  const custom = normalizeConfig({ botToken: 't', chatId: '1', budgetAlertThresholds: ['90', 50, 50], costMeterFile: '/tmp/l.json' })
+  assert.deepEqual(custom.budgetAlertThresholds, [50, 90])
+  assert.equal(custom.costMeterFile, '/tmp/l.json')
+})

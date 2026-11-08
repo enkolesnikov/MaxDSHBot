@@ -43,6 +43,8 @@ export function createState({ file, logger, chatId } = {}) {
     pendingCards: [],
     /** @type {Array<{tool: string, until: number, createdAt: number}>} */
     approvalRules: [],
+    /** periodKey:threshold -> timestamp of the last sent budget alert */
+    budgetAlerts: {},
   }
 
   try {
@@ -60,6 +62,9 @@ export function createState({ file, logger, chatId } = {}) {
         state.pendingCards = parsed.pendingCards.filter(
           (entry) => entry && typeof entry.token === 'string' && (entry.kind === 'approval' || entry.kind === 'question'),
         )
+      }
+      if (parsed.budgetAlerts && typeof parsed.budgetAlerts === 'object' && !Array.isArray(parsed.budgetAlerts)) {
+        state.budgetAlerts = { ...parsed.budgetAlerts }
       }
       if (Array.isArray(parsed.approvalRules)) {
         state.approvalRules = parsed.approvalRules.filter(
@@ -116,6 +121,7 @@ export function createState({ file, logger, chatId } = {}) {
             processed: state.processed,
             pendingCards: state.pendingCards,
             approvalRules: state.approvalRules,
+            budgetAlerts: state.budgetAlerts,
           },
           null,
           2,
@@ -222,6 +228,14 @@ export function createState({ file, logger, chatId } = {}) {
       if (name === '' || !Number.isFinite(until)) return
       state.approvalRules = state.approvalRules.filter((rule) => rule.tool !== name && rule.until > Date.now())
       state.approvalRules.push({ tool: name, until, createdAt: Date.now() })
+      saveSoon()
+    },
+    getBudgetAlerts() {
+      return { ...state.budgetAlerts }
+    },
+    setBudgetAlerts(alerts) {
+      if (!alerts || typeof alerts !== 'object') return
+      state.budgetAlerts = { ...alerts }
       saveSoon()
     },
     clearApprovalRules() {

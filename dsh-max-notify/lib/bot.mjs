@@ -12,6 +12,8 @@ import { randomUUID } from 'node:crypto'
 import {
   formatAccepted,
   formatApprovalPolicyCard,
+  formatBudgetCard,
+  formatCostStatusLine,
   formatHelpCard,
   formatModelsCard,
   formatPlanStateCard,
@@ -34,6 +36,7 @@ const COMMANDS = [
   { name: 'mode', description: 'Режим уведомлений: all|errors|mute' },
   { name: 'mute', description: 'Тишина: /mute 30m или /mute 2h' },
   { name: 'unmute', description: 'Вернуть уведомления' },
+  { name: 'budget', description: 'Стоимость и бюджет' },
   { name: 'digest', description: 'Дайджест сейчас' },
   { name: 'new', description: 'Новая сессия: /new [папка]' },
   { name: 'model', description: 'Модель: /model или /model N' },
@@ -209,7 +212,11 @@ export function createBot({
 
   async function describeSession(sessionId) {
     const info = (await runtime.statusInfo?.(sessionId)) ?? { sessionId }
-    return formatStatusCard(info)
+    const card = formatStatusCard(info)
+    const snapshot = await runtime.costSnapshot?.()
+    if (!snapshot) return card
+    const sessionAmount = await runtime.costForSession?.(sessionId)
+    return `${card}\n${formatCostStatusLine({ snapshot, sessionAmount })}`
   }
 
   function parseDurationMs(value, fallbackMs) {
@@ -612,6 +619,12 @@ export function createBot({
           return true
         }
         await reply(chatId, `🔐 Политика подтверждений: \`${policy}\``)
+        return true
+      }
+      case 'budget':
+      case 'cost': {
+        const status = (await runtime.budgetStatus?.()) ?? (await runtime.costSnapshot?.())
+        await reply(chatId, formatBudgetCard({ status }))
         return true
       }
       case 'digest': {

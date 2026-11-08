@@ -109,3 +109,15 @@ test('approval rules are scoped by tool and expiry', () => {
   assert.equal(state.approvalRuleFor('deploy'), undefined)
   state.dispose()
 })
+
+test('budget alert timestamps persist across reloads', () => {
+  const file = join(workspace, 'budget-alerts.json')
+  const first = createState({ file, logger: { warn() {} } })
+  first.setBudgetAlerts({ '2026-11:80': 123 })
+  assert.deepEqual(first.getBudgetAlerts(), { '2026-11:80': 123 })
+  first.dispose()
+
+  const second = createState({ file, logger: { warn() {} } })
+  assert.deepEqual(second.getBudgetAlerts(), { '2026-11:80': 123 })
+  second.dispose()
+})

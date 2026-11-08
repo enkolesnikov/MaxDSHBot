@@ -32,7 +32,8 @@ Skill](https://github.com/max-messenger/max-agents-skill), а также наш�
   глобальный лимитер, таймаут approvals, fail-closed-интерактив, `/health`,
   audit/redaction, 161 тест; **v0.7.0**: `/model`, `/rename`, `/fork`,
   `/compact`, `/plan` + review, `/search`, `/archive`, `/pin`, `/workspace`,
-  `/approve`, пресеты, 173 теста.
+  `/approve`, пресеты, 173 теста; **v0.8.0**: read-only cost-meter ledger,
+  `/budget`, стоимость в `/status` и дайджесте, алерты 80/100 %, 187 тестов.
 - Не реализовано из каталога: 5/8/11/12/14–29 (см. ниже); план — `ROADMAP.md`.
 
 ## 0. TL;DR

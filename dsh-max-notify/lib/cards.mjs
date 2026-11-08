@@ -6,6 +6,8 @@
  * tables — cards use plain lines and numbered prefixes.
  */
 
+import { formatMoney, formatPercent } from './cost-meter.mjs'
+
 /** Trim a string to `max` characters with an ellipsis. */
 export function truncate(text, max) {
   const value = String(text ?? '')
@@ -96,6 +98,61 @@ export function formatStatusCard({ title, sessionId, running, agentStatus, model
   return lines.join('\n')
 }
 
+/** One-line cost summary for `/status`. */
+export function formatCostStatusLine({ snapshot, sessionAmount } = {}) {
+  if (!snapshot?.available) {
+    return `💰 Стоимость: нет данных cost-meter${snapshot?.reason ? ` (${snapshot.reason})` : ''}`
+  }
+  const currency = snapshot.currency ?? {}
+  const parts = [`💰 Сегодня ${formatMoney(snapshot.today?.amount, currency)}`]
+  if (Number.isFinite(sessionAmount)) parts.push(`сессия ${formatMoney(sessionAmount, currency)}`)
+  const budget = snapshot.budget
+  if (budget?.enabled && budget.percent !== null) {
+    parts.push(`бюджет ${formatPercent(budget.percent)}`)
+  }
+  return parts.join(' · ')
+}
+
+/** Budget card for `/budget`. */
+export function formatBudgetCard({ status } = {}) {
+  if (!status?.available) {
+    return `💰 **Бюджет**\n\nДанные cost-meter недоступны${status?.reason ? `: ${status.reason}` : '.'}\nПроверь плагин dsh-cost-meter и его ledger.`
+  }
+  const currency = status.currency ?? {}
+  const budget = status.budget ?? {}
+  const today = status.today ?? {}
+  const month = status.month ?? {}
+  const total = status.total ?? {}
+  const lines = ['💰 **Бюджет**', '']
+  if (budget.enabled) {
+    const percent = budget.percent
+    const icon = percent === null ? '⚪' : percent >= 100 ? '🔴' : percent >= 80 ? '🟡' : '🟢'
+    lines.push(`Потрачено: ${formatMoney(budget.spent, currency)} из ${formatMoney(budget.amount, currency)} (${formatPercent(percent)}) ${icon}`)
+    lines.push(`Осталось: ${formatMoney(budget.remaining, currency)}`)
+    lines.push(`Период: ${budget.period} (${budget.start}–${budget.end})`)
+  } else {
+    lines.push('Бюджет в cost-meter выключен — проценты и алерты не считаются.')
+    lines.push('Включить: настройки dsh-cost-meter → Budget.')
+  }
+  lines.push('')
+  lines.push(`Сегодня (${today.date ?? '—'}): ${formatMoney(today.amount, currency)}`)
+  lines.push(`Месяц: ${formatMoney(month.amount, currency)} · всего: ${formatMoney(total.amount, currency)}`)
+  return lines.join('\n')
+}
+
+/** Budget threshold alert. */
+export function formatBudgetAlertCard({ threshold, status } = {}) {
+  const budget = status?.budget ?? {}
+  const currency = status?.currency ?? {}
+  const icon = threshold >= 100 ? '🚨' : '⚠️'
+  const label = threshold >= 100 ? 'Бюджет исчерпан' : 'Бюджет близко к лимиту'
+  const lines = [`${icon} **${label}**`, '']
+  lines.push(`Порог: ${threshold}% · потрачено ${formatPercent(budget.percent)}`)
+  lines.push(`Сумма: ${formatMoney(budget.spent, currency)} из ${formatMoney(budget.amount, currency)}`)
+  lines.push(`Период: ${budget.period} (${budget.start}–${budget.end})`)
+  return lines.join('\n')
+}
+
 function runnerLabel({ running, agentStatus } = {}) {
   if (running || agentStatus === 'busy' || agentStatus === 'running') return '🟢 работает'
   if (agentStatus === 'error') return '🔴 ошибка'
@@ -140,6 +197,7 @@ export function formatHelpCard() {
     '`/approve` — политика подтверждений',
     '`/mode [all|errors|mute]` — режим уведомлений',
     '`/mute [30m|2h]` — тишина, `/unmute` — вернуть',
+    '`/budget` — стоимость и бюджет',
     '`/digest` — дайджест сейчас',
     '`/help` — эта справка',
     '',
@@ -228,7 +286,7 @@ export function formatTodoCard({ title, todos } = {}) {
 }
 
 /** Daily digest. */
-export function formatDigestCard({ date, sessions = [], usage, goals = [], todos = [] } = {}) {
+export function formatDigestCard({ date, sessions = [], usage, goals = [], todos = [], cost } = {}) {
   const lines = [`📊 **Дайджест DSH** · ${date ?? ''}`, '']
   lines.push(`🗂 Активных сессий за сутки: ${sessions.length}`)
   for (const session of sessions.slice(0, 4)) {
@@ -238,6 +296,15 @@ export function formatDigestCard({ date, sessions = [], usage, goals = [], todos
   if (usage && (usage.input || usage.output || usage.total)) {
     const total = usage.total || usage.input + usage.output
     lines.push('', `🧮 Токены (live): in ${usage.input ?? 0} · out ${usage.output ?? 0} · всего ${total}`)
+  }
+  if (cost?.available) {
+    const currency = cost.currency ?? {}
+    lines.push('', `💰 Сегодня ${formatMoney(cost.today?.amount, currency)} · месяц ${formatMoney(cost.month?.amount, currency)}`)
+    if (cost.budget?.enabled && cost.budget.percent !== null) {
+      lines.push(
+        `📊 Бюджет: ${formatPercent(cost.budget.percent)} (${formatMoney(cost.budget.spent, currency)}/${formatMoney(cost.budget.amount, currency)})`,
+      )
+    }
   }
   const activeGoals = goals.filter((goal) => goal?.phase && goal.phase !== 'complete')
   if (activeGoals.length > 0) {

@@ -38,7 +38,8 @@
   сессию (`sessionController.prompt`), ответ приходит обратно.
 - **Команды**: `/status`, `/stop`, `/sessions`, `/use N`, `/current`, `/new [папка]`,
   `/model`, `/rename`, `/fork`, `/compact`, `/plan`, `/search`, `/archive`,
-  `/pin`/`/unpin`, `/workspace`, `/approve`, `/health`, `/version`, `/ping`,
+  `/pin`/`/unpin`, `/workspace`, `/approve`, `/budget`, `/cost`, `/health`,
+  `/version`, `/ping`,
   `/help` (архивные сессии из Workspace в списке и дайджесте не показываются;
   меню команд — `PATCH /me/commands`).
 - **Кнопки под ответом**: «Продолжить», «Стоп», «Открыть GUI».
@@ -97,6 +98,20 @@
   подтверждением.
 - **Кнопки-пресеты** под финальным ответом: `buttonsPresets: [{label, prompt}]`.
 - `/sessions` показывает заголовки и холодных сессий (projection cache).
+
+### Стоимость и бюджет (v0.8)
+
+- **`/budget`** (и `/cost`): бюджет, потрачено/осталось/период, стоимость
+  сегодня/месяц/всего; если бюджет в `dsh-cost-meter` выключен — подсказка.
+- **`/status`** и `/current` показывают стоимость за сегодня, стоимость сессии и
+  процент бюджета.
+- **Дайджест** включает стоимость и процент бюджета.
+- **Алерты бюджета** 80%/100% (`budgetAlertThresholds`) — один раз за период,
+  с сохранением в state и дедупликацией; 100% идёт critical-каналом.
+- Read-only: ledger `$DSH_HOME/storages/cost-meter/ledger.json` не изменяется;
+  нет файла/битая версия — просто нет блока стоимости.
+- Настройки: `costMeterEnabled`, `costMeterFile`, `budgetAlertEnabled`,
+  `budgetAlertThresholds`. Бюджет включается в настройках самого cost-meter.
 
 ## Быстрый старт
 
@@ -179,6 +194,8 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 | `incomingPerMinute` / `incomingBurst` | `30` / `10` | защита от флуда входящих |
 | `auditLog` / `auditFile` | `true` / `$DSH_HOME/max-notify/audit.jsonl` | аудит approvals/вопросов/команд |
 | `heartbeatFile` | — | JSON-файл здоровья для внешнего мониторинга |
+| `costMeterEnabled` / `costMeterFile` | `true` / `$DSH_HOME/storages/cost-meter/ledger.json` | read-only адаптер стоимости |
+| `budgetAlertEnabled` / `budgetAlertThresholds` | `true` / `[80, 100]` | алерты бюджета (один раз за период) |
 
 ## Структура
 
@@ -200,12 +217,13 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 | `dsh-max-notify/lib/health.mjs` | health snapshot для `/health` и heartbeat |
 | `dsh-max-notify/lib/audit.mjs` | JSONL-аудит решений (0600) |
 | `dsh-max-notify/lib/redact.mjs` | redaction токенов в логах |
+| `dsh-max-notify/lib/cost-meter.mjs` | read-only адаптер ledger dsh-cost-meter |
 | `dsh-max-notify/CHANGELOG.md` | история версий |
 | `ROADMAP.md` | дорожная карта 0.6 → 1.0 |
 | `dsh-max-notify/lib/policy.mjs` | режимы уведомлений и тихие часы |
 | `dsh-max-notify/lib/observer.mjs` | события, TODO-прогресс и дайджест |
 | `dsh-max-notify/tools/` | `pair.mjs` (chat_id), `send-test.mjs` |
-| `dsh-max-notify/test/` | `node --test` (173 теста) |
+| `dsh-max-notify/test/` | `node --test` (187 тестов) |
 | `research/` | как писать плагины DSH, MAX Bot API, каталог фич |
 
 ## Ограничения
@@ -237,7 +255,7 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 ## Проверка
 
 ```bash
-cd dsh-max-notify && npm test          # 173 unit test
+cd dsh-max-notify && npm test          # 187 unit test
 node tools/send-test.mjs "проверка"    # реальная отправка
 DSH_HOME=$HOME/.dsh dsh --profile web --dump-config | grep -A12 'id: max-notify'
 ```
