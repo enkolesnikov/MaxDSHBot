@@ -34,13 +34,10 @@ function folderOf(cwd) {
 }
 
 /** Approval card: one tool action waits for a decision. */
-export function formatApprovalCard({ title, toolName, reason, callId } = {}) {
-  const lines = ['🔐 **Требуется разрешение**', '']
-  lines.push(`🔧 Инструмент: \`${toolName || '?'}\``)
-  if (reason) lines.push(`📝 Причина: ${truncate(reason, 500)}`)
-  if (title) lines.push(`🗂 Сессия: ${truncate(title, 120)}`)
-  if (callId) lines.push(`🆔 \`${truncate(String(callId), 40)}\``)
-  lines.push('', 'Разрешить выполнение?')
+export function formatApprovalCard({ title, toolName, reason } = {}) {
+  const lines = [`🔐 **Разрешить \`${truncate(toolName || '?', 40)}\`?**`]
+  if (title) lines.push(`🗂 ${truncate(title, 100)}`)
+  if (reason) lines.push(`📝 ${truncate(reason, 200)}`)
   return lines.join('\n')
 }
 
@@ -48,23 +45,23 @@ export function formatApprovalCard({ title, toolName, reason, callId } = {}) {
 export function formatApprovalResult({ outcome, toolName, by } = {}) {
   const label =
     outcome === 'allowed-once'
-      ? '✅ **Разрешено**'
+      ? '✅ Разрешено'
       : outcome === 'rejected'
-        ? '⛔ **Отклонено**'
+        ? '⛔ Отклонено'
         : outcome === 'cancelled'
-          ? '⏹ **Отменено**'
-          : '⚠️ **Решение недоступно**'
+          ? '⏹ Отменено'
+          : '⚠️ Недоступно'
   const where =
     by === 'gui'
-      ? ' (в GUI)'
+      ? ' (GUI)'
       : by === 'max'
-        ? ' (в MAX)'
+        ? ' (MAX)'
         : by === 'timeout'
           ? ' (таймаут)'
           : by === 'rule'
-            ? ' (авто-правило)'
+            ? ' (правило)'
             : ''
-  return `${label}${where}${toolName ? `\n\n🔧 ${toolName}` : ''}`
+  return `${label}${where}${toolName ? ` · ${truncate(toolName, 40)}` : ''}`
 }
 
 /** Question card (single or multiple questions). */
@@ -89,12 +86,11 @@ export function formatQuestionCard({ questions, answered = 0 } = {}) {
 
 /** Status card. */
 export function formatStatusCard({ title, sessionId, running, agentStatus, model, provider, cwd, updatedAt } = {}) {
-  const lines = ['🤖 **Статус**', '']
-  lines.push(`🗂 Сессия: ${truncate(title || '—', 160)} \`${shortSessionId(sessionId)}\``)
-  lines.push(`⚙️ Состояние: ${runnerLabel({ running, agentStatus })}`)
-  if (model) lines.push(`🧠 Модель: \`${provider ? `${provider}/` : ''}${model}\``)
-  if (cwd) lines.push(`📁 Папка: \`${truncate(cwd, 200)}\``)
-  if (updatedAt) lines.push(`🕒 Обновлена: ${clock(updatedAt)}`)
+  const lines = [`🤖 **${truncate(title || 'Сессия', 100)}**`]
+  const state = `${runnerLabel({ running, agentStatus })}${model ? ` · \`${provider ? `${provider}/` : ''}${model}\`` : ''}`
+  lines.push(state)
+  if (cwd) lines.push(`📁 \`${truncate(cwd, 160)}\``)
+  if (updatedAt) lines.push(`🕒 ${clock(updatedAt)}${sessionId ? ` · ${shortSessionId(sessionId)}` : ''}`)
   return lines.join('\n')
 }
 
@@ -175,38 +171,46 @@ export function formatSessionsCard({ items, activeId } = {}) {
   return lines.join('\n')
 }
 
-/** Command help card. */
+/** Compact help: the 12 everyday commands. */
 export function formatHelpCard() {
   return [
     '🕹 **Пульт DSH**',
     '',
-    '`/status` — статус активной сессии',
-    '`/stop` — остановить текущий ход',
-    '`/sessions` — список сессий',
-    '`/use N` — выбрать сессию',
-    '`/current` — текущая сессия',
-    '`/new [папка]` — новая сессия (папка создаётся)',
-    '`/model [N|provider/model]` — модель сессии',
-    '`/rename <название>` — переименовать сессию',
-    '`/fork` — ответвить сессию',
-    '`/compact` — сжать историю',
-    '`/plan` / `/plan off` — режим плана',
-    '`/search <текст>` — поиск по сессиям',
-    '`/archive` — архивировать текущую, `/pin` / `/unpin`',
-    '`/workspace` — папки, `/workspace N` — папка для `/new`',
-    '`/approve` — политика подтверждений',
-    '`/mode [all|errors|mute]` — режим уведомлений',
-    '`/mute [30m|2h]` — тишина, `/unmute` — вернуть',
-    '`/budget` — стоимость и бюджет',
-    '`/schedules` — запланированные задачи (pause/resume/cancel)',
-    '`/schedules mode N inherit|read-only|auto` — автономный режим задачи',
-    '`/digest` — дайджест сейчас',
-    '`/say <текст>` — озвучить текст голосом',
-    '`/diff [--staged] [путь]` — git diff файлом',
-    '`/send <путь>` — отправить файл из папки сессии',
-    '`/help` — эта справка',
+    '`/status` — сессия, модель, стоимость',
+    '`/stop` — остановить ход',
+    '`/sessions` · `/use N` — выбрать сессию',
+    '`/new [папка]` — новая сессия',
+    '`/model` — модель',
+    '`/mode all|errors|mute` · `/mute 30m`',
+    '`/budget` — деньги и бюджет',
+    '`/schedules` — задачи',
+    '`/health` — состояние плагина',
+    '`/help all` — все команды',
     '',
-    'Просто текст — отправится агенту как следующее сообщение. Под ответом есть кнопки «Продолжить»/«Стоп».',
+    'Просто текст — отправится агенту.',
+  ].join('\n')
+}
+
+/** Full help, including advanced/hidden commands. */
+export function formatHelpAllCard() {
+  return [
+    '🕹 **Все команды**',
+    '',
+    '**Основные**',
+    '`/status` · `/stop` · `/sessions` · `/use N` · `/new` · `/model`',
+    '`/mode` · `/mute` · `/budget` · `/schedules` · `/health`',
+    '',
+    '**Сессии и проект**',
+    '`/current` (алиас status) · `/rename` · `/fork` · `/compact`',
+    '`/search` · `/archive` · `/pin` / `/unpin` · `/workspace`',
+    '',
+    '**Управление и файлы**',
+    '`/approve` · `/schedules mode` · `/diff` · `/send`',
+    '',
+    '**Прочее**',
+    '`/digest` · `/settings` · `/say` · `/version` · `/ping` · `/unmute`',
+    '',
+    'Скрытые команды работают, но не показываются в меню.',
   ].join('\n')
 }
 
@@ -231,48 +235,39 @@ const TODO_ICON = { completed: '✅', in_progress: '🔄', pending: '⬜' }
 const GOAL_ICON = { active: '🎯', paused: '⏸️', blocked: '⛔', complete: '✅' }
 
 /** Subagent finished running. */
-export function formatSubagentCard({ title, childId, stopReason, excerpt } = {}) {
-  const lines = ['🤖 **Дочерний агент завершён**', '']
-  if (title) lines.push(`🗂 Родитель: ${truncate(title, 120)}`)
-  if (childId) lines.push(`🧩 Дочерний: \`${truncate(String(childId), 40)}\``)
-  if (stopReason) lines.push(`🏁 Итог: \`${truncate(String(stopReason), 60)}\``)
-  if (excerpt) lines.push('', `💬 ${truncate(excerpt, 500)}`)
-  return lines.join('\n')
+export function formatSubagentCard({ childId, stopReason, excerpt } = {}) {
+  const parts = ['🤖 Дочерний агент', stopReason ? truncate(String(stopReason), 40) : '']
+  if (childId) parts.push(truncate(String(childId), 30))
+  if (excerpt) parts.push(truncate(excerpt, 140))
+  return parts.filter(Boolean).join(' · ')
 }
 
 /** Background job settled. */
 export function formatJobCard({ job } = {}) {
   const status = job?.status ?? 'settled'
   const icon = status === 'completed' ? '✅' : status === 'killed' ? '⏹' : status === 'failed' ? '❌' : 'ℹ️'
-  const lines = [`${icon} **Фоновая задача: ${status}**`, '']
-  if (job?.label) lines.push(`🏷 ${truncate(job.label, 120)}`)
-  if (job?.id) lines.push(`🆔 \`${truncate(String(job.id), 60)}\``)
-  if (job?.detail) lines.push(`📝 ${truncate(job.detail, 300)}`)
-  return lines.join('\n')
+  const label = job?.label || job?.id || 'задача'
+  return `${icon} Фоновая задача · ${truncate(String(label), 100)}`
 }
 
 /** Goal lifecycle change. */
 export function formatGoalCard({ title, goal, operation } = {}) {
   const phase = goal?.phase ?? 'active'
   const icon = GOAL_ICON[phase] ?? '🎯'
-  const lines = [`${icon} **Цель: ${phase}**${operation ? ` (${operation})` : ''}`, '']
-  if (goal?.objective) lines.push(`🎯 ${truncate(goal.objective, 500)}`)
-  if (goal?.maxGoalRounds !== undefined) {
-    lines.push(`🔁 Раундов: ${goal.roundsStarted ?? 0}/${goal.maxGoalRounds}`)
-  }
-  if (goal?.blockedReason?.message) lines.push(`⛔ ${truncate(goal.blockedReason.message, 300)}`)
-  if (title) lines.push(`🗂 Сессия: ${truncate(title, 120)}`)
-  return lines.join('\n')
+  const objective = goal?.objective ? truncate(goal.objective, 120) : ''
+  const parts = [`${icon} Цель: ${phase}${operation ? ` (${operation})` : ''}`]
+  if (objective) parts.push(objective)
+  if (title) parts.push(truncate(title, 80))
+  return parts.join(' · ')
 }
 
 /** Agent failure. */
 export function formatErrorCard({ title, turn, step, error } = {}) {
   const message =
     typeof error === 'string' ? error : (error && (error.message || error.toString?.())) || 'неизвестная ошибка'
-  const lines = ['❌ **Ошибка агента**', '']
+  const lines = [`❌ Ошибка${title ? ` · ${truncate(title, 100)}` : ''}`]
   if (turn !== undefined || step !== undefined) lines.push(`📍 Ход ${turn ?? '?'}, шаг ${step ?? '?'}`)
-  if (title) lines.push(`🗂 Сессия: ${truncate(title, 120)}`)
-  lines.push('', `\`${truncate(message, 800)}\``)
+  lines.push(truncate(message, 300))
   return lines.join('\n')
 }
 
@@ -290,43 +285,31 @@ export function formatTodoCard({ title, todos } = {}) {
   return lines.join('\n')
 }
 
-/** Daily digest. */
-export function formatDigestCard({ date, sessions = [], usage, goals = [], todos = [], cost } = {}) {
-  const lines = [`📊 **Дайджест DSH** · ${date ?? ''}`, '']
-  lines.push(`🗂 Активных сессий за сутки: ${sessions.length}`)
-  for (const session of sessions.slice(0, 4)) {
-    const mark = session.running ? ' 🟢' : ''
-    lines.push(`• ${truncate(session.title || shortSessionId(session.sessionId), 80)}${mark}`)
-  }
-  if (usage && (usage.input || usage.output || usage.total)) {
-    const total = usage.total || usage.input + usage.output
-    lines.push('', `🧮 Токены (live): in ${usage.input ?? 0} · out ${usage.output ?? 0} · всего ${total}`)
-  }
+/** Daily digest / briefing. */
+export function formatDigestCard({ date, sessions = [], usage, goals = [], todos = [], cost, pending } = {}) {
+  const lines = [`📊 **Брифинг** · ${date ?? ''}`]
+  const active = Array.isArray(sessions) ? sessions.filter((item) => item?.running).length : 0
+  lines.push(`✅ Сделано: ${active} активных · ${sessions.length} сессий за сутки`)
+  const approvals = Number(pending?.approvals) || 0
+  const questions = Number(pending?.questions) || 0
+  lines.push(
+    approvals + questions > 0
+      ? `⏳ Ждёт тебя: ${approvals} approval · ${questions} вопрос`
+      : '⏳ Ждёт тебя: ничего',
+  )
   if (cost?.available) {
     const currency = cost.currency ?? {}
-    lines.push('', `💰 Сегодня ${formatMoney(cost.today?.amount, currency)} · месяц ${formatMoney(cost.month?.amount, currency)}`)
-    if (cost.budget?.enabled && cost.budget.percent !== null) {
-      lines.push(
-        `📊 Бюджет: ${formatPercent(cost.budget.percent)} (${formatMoney(cost.budget.spent, currency)}/${formatMoney(cost.budget.amount, currency)})`,
-      )
-    }
+    let money = `💰 Деньги: ${formatMoney(cost.today?.amount, currency)} сегодня`
+    if (cost.budget?.enabled && cost.budget.percent !== null) money += ` · бюджет ${formatPercent(cost.budget.percent)}`
+    lines.push(money)
   }
-  const activeGoals = goals.filter((goal) => goal?.phase && goal.phase !== 'complete')
-  if (activeGoals.length > 0) {
-    lines.push('', `🎯 Цели: ${activeGoals.length}`)
-    for (const goal of activeGoals.slice(0, 3)) {
-      lines.push(`• ${GOAL_ICON[goal.phase] ?? '🎯'} ${truncate(goal.objective ?? '', 120)}`)
-    }
+  const goalsCount = Array.isArray(goals) ? goals.filter((goal) => goal?.phase && goal.phase !== 'complete').length : 0
+  const todoCount = Array.isArray(todos) ? todos.filter((entry) => entry.todos?.length > 0).length : 0
+  if (goalsCount + todoCount > 0) lines.push(`🎯 Дальше: ${goalsCount} целей · ${todoCount} TODO`)
+  if (usage && (usage.input || usage.output || usage.total)) {
+    const total = usage.total || usage.input + usage.output
+    lines.push(`🧮 Токены: ${total}`)
   }
-  const todoSummaries = todos.filter((entry) => entry.todos?.length > 0)
-  if (todoSummaries.length > 0) {
-    lines.push('', '📋 Задачи:')
-    for (const entry of todoSummaries.slice(0, 3)) {
-      const completed = entry.todos.filter((item) => item?.status === 'completed').length
-      lines.push(`• ${truncate(entry.title || '—', 80)}: ${completed}/${entry.todos.length}`)
-    }
-  }
-  lines.push('', 'Подробнее: `/status`, `/sessions`.')
   return lines.join('\n')
 }
 
@@ -391,21 +374,13 @@ export function formatPlanStateCard({ active, pending, action } = {}) {
 
 /** Read-only effective settings card for `/settings`. */
 export function formatSettingsCard(settings = {}) {
-  const lines = ['⚙️ **Настройки dsh-max-notify**', '']
-  lines.push(`🧩 версия: ${settings.version ?? '?'}`)
-  lines.push(`📡 transport: ${settings.transport ?? 'polling'}`)
-  lines.push(`🕹 интерактив: ${settings.interactive ? 'вкл' : 'выкл'} · allowlist: ${settings.allowlist?.users ?? 0} users / ${settings.allowlist?.chats ?? 0} chats`)
-  if (settings.mode) lines.push(`🔔 режим: ${settings.mode}`)
-  if (settings.digest) lines.push(`📊 дайджест: ${settings.digest}`)
-  if (settings.quietHours) lines.push(`🌙 тихие часы: ${settings.quietHours.start}–${settings.quietHours.end}`)
-  lines.push(`🧵 reply-ветки: ${settings.threads ? 'вкл' : 'выкл'} · таблицы файлами: ${settings.tableFiles ? 'вкл' : 'выкл'}`)
-  lines.push(`🔐 таймаут approvals: ${settings.approvalTimeoutMs ? `${Math.round(settings.approvalTimeoutMs / 1000)} с` : 'выкл'}`)
-  lines.push(`📥 приём файлов: ${settings.receiveFiles ? 'вкл' : 'выкл'} · outbox: ${settings.outboxEnabled ? 'вкл' : 'выкл'}`)
-  if (settings.voiceTts !== undefined) lines.push(`🔊 TTS: ${settings.voiceTts ? `вкл (${settings.voiceTtsMode || 'short'})` : 'выкл'} · STT: ${settings.voiceTranscribe ? 'вкл' : 'выкл'}`)
-  if (settings.autonomyEnabled !== undefined) lines.push(`🤖 автономные расписания: ${settings.autonomyEnabled ? 'вкл' : 'выкл'}`)
-  lines.push(`💰 cost-meter: ${settings.costMeterEnabled ? 'вкл' : 'выкл'} · алерты бюджета: ${settings.budgetAlertEnabled ? 'вкл' : 'выкл'}`)
-  if (settings.buttonsPresets > 0) lines.push(`🔘 пресетов: ${settings.buttonsPresets}`)
-  lines.push('', 'Полный конфиг — `cordis.patch.yml` профиля.')
+  const lines = ['⚙️ **Настройки**', '']
+  lines.push(`${settings.version ?? '?'} · ${settings.transport ?? 'polling'} · режим: ${settings.mode ?? '?'}`)
+  lines.push(`allowlist: ${settings.allowlist?.users ?? 0} users / ${settings.allowlist?.chats ?? 0} chats`)
+  lines.push(`reply-ветки: ${settings.threads ? 'вкл' : 'выкл'} · таблицы: ${settings.tableFiles ? 'вкл' : 'выкл'}`)
+  lines.push(`approvals: ${settings.approvalTimeoutMs ? `${Math.round(settings.approvalTimeoutMs / 1000)} с` : 'выкл'} · файлы: ${settings.receiveFiles ? 'вкл' : 'выкл'}`)
+  if (settings.voiceTts || settings.voiceTranscribe) lines.push(`голос: STT ${settings.voiceTranscribe ? 'вкл' : 'выкл'} · TTS ${settings.voiceTts ? 'вкл' : 'выкл'}`)
+  lines.push('', 'Полный конфиг — в GUI плагина.')
   return lines.join('\n')
 }
 

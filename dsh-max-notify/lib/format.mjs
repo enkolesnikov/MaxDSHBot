@@ -31,6 +31,7 @@ function formatClock(date) {
  * @param {'markdown'|'html'|null} [params.format] - MAX text format; header is styled accordingly.
  * @param {boolean} [params.includeHeader] - include the `DSH · time · folder` line.
  * @param {boolean} [params.includeSessionId] - append a short session tag to the header.
+ * @param {'compact'|'detailed'} [params.messageStyle] - header style; compact is the default.
  * @param {Date} [params.now] - clock override (tests).
  * @returns {string}
  */
@@ -43,22 +44,34 @@ export function formatNotification({
   format = 'markdown',
   includeHeader = true,
   includeSessionId = false,
+  messageStyle = 'compact',
   now = new Date(),
 } = {}) {
   const body = String(text ?? '').trim()
   if (!includeHeader) return body
 
-  const brand = format === 'html' ? '<b>DSH</b>' : format === 'markdown' ? '**DSH**' : 'DSH'
-  const parts = [brand, formatClock(now)]
   const label = typeof title === 'string' && title.trim() !== '' ? title.trim() : shortCwd(cwd)
-  if (label) parts.push(label.length > 60 ? `${label.slice(0, 57)}…` : label)
+  const reasonNote = describeReason(reason)
+
+  if (messageStyle === 'detailed') {
+    const brand = format === 'html' ? '<b>DSH</b>' : format === 'markdown' ? '**DSH**' : 'DSH'
+    const parts = [brand, formatClock(now)]
+    if (label) parts.push(label.length > 60 ? `${label.slice(0, 57)}…` : label)
+    if (includeSessionId && typeof sessionId === 'string' && sessionId.length > 0) {
+      parts.push(sessionId.length > 12 ? sessionId.slice(-8) : sessionId)
+    }
+    let header = parts.join(' · ')
+    if (reasonNote) header += ` · _${reasonNote}_`
+    return body ? `${header}\n\n${body}` : header
+  }
+
+  const clock = `${pad2(now.getHours())}:${pad2(now.getMinutes())}`
+  const parts = [`🕒 ${clock}`]
+  if (label) parts.push(label.length > 40 ? `${label.slice(0, 37)}…` : label)
   if (includeSessionId && typeof sessionId === 'string' && sessionId.length > 0) {
     parts.push(sessionId.length > 12 ? sessionId.slice(-8) : sessionId)
   }
   let header = parts.join(' · ')
-
-  const reasonNote = describeReason(reason)
-  if (reasonNote) header += ` · _${reasonNote}_`
-
+  if (reasonNote) header += ` · ${reasonNote}`
   return body ? `${header}\n\n${body}` : header
 }

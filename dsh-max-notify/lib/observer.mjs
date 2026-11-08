@@ -207,6 +207,11 @@ export function createObserver({ client, config, logger, target, policy, runtime
     const cutoff = Date.now() - 24 * 60 * 60 * 1000
     const recent = sessions.filter((item) => !item.updatedAt || item.updatedAt >= cutoff)
     const cost = await runtime?.costSnapshot?.()
+    const pendingCards = state?.listPendingCards?.() ?? []
+    const pending = {
+      approvals: pendingCards.filter((card) => card?.kind === 'approval').length,
+      questions: pendingCards.filter((card) => card?.kind === 'question').length,
+    }
     const text = formatDigestCard({
       date: new Date().toLocaleDateString('ru-RU'),
       sessions: recent,
@@ -214,6 +219,7 @@ export function createObserver({ client, config, logger, target, policy, runtime
       goals: [...goals.values()],
       todos: [...todos.entries()].map(([sessionId, entry]) => ({ sessionId, ...entry })),
       cost,
+      pending,
     })
     send('digest', text, { dedupeKey: `digest:${localDayKey()}` })
     state?.setDigestDate?.(localDayKey())

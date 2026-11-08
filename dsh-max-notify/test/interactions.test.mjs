@@ -80,7 +80,7 @@ test('approval answered from MAX resolves allowed-once and marks the card', asyn
   await tick()
 
   assert.equal(client.sent.length, 1)
-  assert.match(client.sent[0].text, /Требуется разрешение/)
+  assert.match(client.sent[0].text, /Разрешить/)
   const buttons = cardButtons(client)
   assert.equal(buttons.length, 2)
 
@@ -107,7 +107,7 @@ test('GUI winning the approval race edits the MAX card and returns the GUI outco
   const { client, interactions } = makeInteractions()
   const outcome = await interactions.handleApproval(approvalRequest(), async () => 'rejected')
   assert.equal(outcome, 'rejected')
-  assert.match(client.edits.at(-1).text, /Отклонено.*\(в GUI\)/)
+  assert.match(client.edits.at(-1).text, /Отклонено.*\(GUI\)/)
 })
 
 test('subagent approvals are delegated to the GUI only', async () => {
@@ -194,7 +194,7 @@ test('GUI winning the question race returns the GUI answer and edits the card', 
     answers: [{ id: 'q1', selected: ['Да'] }],
   }))
   assert.deepEqual(answer.answers, [{ id: 'q1', selected: ['Да'] }])
-  assert.match(client.edits.at(-1).text, /Ответ дан в GUI/)
+  assert.match(client.edits.at(-1).text, /Ответ дан \(GUI\)/)
 })
 
 test('dispose resolves pending approvals as cancelled', async () => {

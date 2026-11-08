@@ -83,6 +83,7 @@ const DEFAULTS = {
   disableLinkPreview: true,
   includeHeader: true,
   includeSessionId: false,
+  messageStyle: 'compact',
   includeSubagents: false,
   includeTitle: true,
   allowedUserIds: [],
@@ -137,12 +138,13 @@ const DEFAULTS = {
   registerCommands: true,
   greetOnStart: true,
   // notifications ("Наблюдатель")
-  notifySubagents: true,
-  notifyJobs: true,
+  notifySubagents: false,
+  notifyJobs: false,
   notifyAwaitedJobs: false,
-  notifyGoals: true,
+  notifyGoals: false,
   notifyErrors: true,
-  todoProgress: true,
+  todoProgress: false,
+  guiNotices: false,
   quietHours: undefined,
   mode: 'all',
   digestEnabled: false,
@@ -316,6 +318,7 @@ export function normalizeConfig(raw = {}) {
     stateFile: String(merged.stateFile || env.MAX_NOTIFY_STATE_FILE || '').trim() || undefined,
     webUrl: String(merged.webUrl || env.DSH_WEB_URL || '').trim() || undefined,
     notifySubagents: asBoolean(merged.notifySubagents, DEFAULTS.notifySubagents),
+  guiNotices: asBoolean(merged.guiNotices, DEFAULTS.guiNotices),
     notifyJobs: asBoolean(merged.notifyJobs, DEFAULTS.notifyJobs),
     notifyAwaitedJobs: asBoolean(merged.notifyAwaitedJobs, DEFAULTS.notifyAwaitedJobs),
     notifyGoals: asBoolean(merged.notifyGoals, DEFAULTS.notifyGoals),
@@ -940,6 +943,12 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       notify: config.notify,
       progress: config.progress,
       typing: config.typing,
+      messageStyle: config.messageStyle,
+      notifySubagents: config.notifySubagents,
+      notifyJobs: config.notifyJobs,
+      notifyGoals: config.notifyGoals,
+      notifyErrors: config.notifyErrors,
+      todoProgress: config.todoProgress,
       threads: config.threads,
       tableFiles: config.tableFiles,
       tableMaxFiles: config.tableMaxFiles,
@@ -1081,6 +1090,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
   function applyRuntimeSettings(values = {}) {
     const safe = [
       'mode', 'digestEnabled', 'digestTime', 'quietHours', 'notify', 'progress', 'typing',
+      'messageStyle', 'notifySubagents', 'notifyJobs', 'notifyGoals', 'notifyErrors', 'todoProgress',
       'threads', 'tableFiles', 'tableMaxFiles', 'approvalTimeoutMs', 'receiveFiles',
       'nativeIncomingImages', 'voiceTranscribe', 'voiceTts', 'voiceTtsMode', 'voiceTtsVoice',
       'voiceTtsModel', 'voiceTtsMaxChars', 'buttonsPresets',
@@ -1662,6 +1672,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       format: config.format,
       includeHeader: config.includeHeader,
       includeSessionId: config.includeSessionId,
+      messageStyle: config.messageStyle,
     })
     const chunks = splitText(payload, MAX_TEXT_LIMIT).slice(0, 8)
     if (config.dryRun) {
@@ -2003,3 +2014,4 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     })
   }
 }
+

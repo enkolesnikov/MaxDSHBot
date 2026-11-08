@@ -424,10 +424,10 @@ export function createInteractions({ client, config, logger, target, resolveTitl
         return winner.answer
       }
       if (winner.from === 'gui-error') {
-        await editCard(record.messageId, '⚠️ **Ответ не получен (ошибка GUI)**')
+        await editCard(record.messageId, '⚠️ GUI не ответил')
         throw winner.error
       }
-      await editCard(record.messageId, '🖥 **Ответ дан в GUI**')
+      await editCard(record.messageId, '✅ Ответ дан (GUI)')
       return winner.answer
     } finally {
       pending.delete(token)

@@ -11,7 +11,7 @@ test('formatNotification builds a markdown header with folder and body', () => {
     reason: { kind: 'completed' },
     now: date,
   })
-  assert.equal(text, '**DSH** · 22:15:03 · MaxBot\n\nГотово: добавил плагин.')
+  assert.equal(text, '🕒 22:15 · MaxBot\n\nГотово: добавил плагин.')
 })
 
 test('formatNotification can omit the header', () => {
@@ -26,7 +26,7 @@ test('formatNotification styles the header per format and marks abnormal endings
     reason: { kind: 'aborted', reason: 'user' },
     now: date,
   })
-  assert.match(html, /^<b>DSH<\/b> · 22:15:03 · work · _прерван: user_\n\nx$/)
+  assert.match(html, /^🕒 22:15 · work · прерван: user\n\nx$/)
 })
 
 test('formatNotification adds a short session tag when asked', () => {
@@ -40,7 +40,7 @@ test('formatNotification adds a short session tag when asked', () => {
 })
 
 test('formatNotification handles an empty cwd and trims the body', () => {
-  assert.equal(formatNotification({ text: '  ok  ', now: date }), '**DSH** · 22:15:03\n\nok')
+  assert.equal(formatNotification({ text: '  ok  ', now: date }), '🕒 22:15\n\nok')
 })
 
 test('formatNotification prefers the session title over the folder name', () => {
@@ -50,10 +50,21 @@ test('formatNotification prefers the session title over the folder name', () => 
     title: 'Настройка MAX-плагина',
     now: date,
   })
-  assert.equal(text, '**DSH** · 22:15:03 · Настройка MAX-плагина\n\nx')
+  assert.equal(text, '🕒 22:15 · Настройка MAX-плагина\n\nx')
 })
 
 test('formatNotification truncates very long session titles', () => {
   const text = formatNotification({ text: 'x', title: 'т'.repeat(80), now: date })
-  assert.match(text, /· т{57}…\n\nx$/)
+  assert.match(text, /· т{37}…\n\nx$/)
+})
+
+
+test('messageStyle detailed keeps the legacy DSH header', () => {
+  const text = formatNotification({
+    text: 'x',
+    cwd: '/path/to/MaxBot',
+    messageStyle: 'detailed',
+    now: date,
+  })
+  assert.equal(text, '**DSH** · 22:15:03 · MaxBot\n\nx')
 })

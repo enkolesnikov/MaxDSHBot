@@ -139,7 +139,7 @@ test('forwards exactly one message per completed turn with the last assistant te
   assert.equal(client.sent.length, 1)
   assert.equal(client.sent[0].chatId, '123456789')
   assert.match(client.sent[0].text, /Финальный ответ$/)
-  assert.match(client.sent[0].text, /^\*\*DSH\*\* · \d\d:\d\d:\d\d · MaxBot\n\n/)
+  assert.match(client.sent[0].text, /^🕒 \d\d:\d\d · MaxBot\n\n/)
 })
 
 test('does not forward when no assistant text was seen or the turn number does not match', async () => {
@@ -264,7 +264,7 @@ test('uses the session title in the header when the title service is available',
   await tick()
 
   assert.equal(client.sent.length, 1)
-  assert.match(client.sent[0].text, /^\*\*DSH\*\* · \d\d:\d\d:\d\d · Настройка MAX\n\ndone$/)
+  assert.match(client.sent[0].text, /^🕒 \d\d:\d\d · Настройка MAX\n\ndone$/)
 })
 
 test('allowlist lets a dialog with the allowed user through and sends once', async () => {
@@ -765,7 +765,7 @@ test('the settings API route is registered and persists the overlay', async () =
   postReq.method = 'POST'
   postReq.destroy = () => {}
   setTimeout(() => {
-    postReq.emit('data', Buffer.from(JSON.stringify({ mode: 'mute', threads: false })))
+    postReq.emit('data', Buffer.from(JSON.stringify({ mode: 'mute', threads: false, messageStyle: 'detailed', notifyJobs: true })))
     postReq.emit('end')
   }, 10)
   await route.handler(postReq, postRes)
@@ -775,6 +775,8 @@ test('the settings API route is registered and persists the overlay', async () =
   assert.equal(saved.values.mode, 'mute')
   assert.equal(saved.values.threads, false)
   assert.equal(saved.applied.mode, 'mute')
+  assert.equal(saved.applied.messageStyle, 'detailed')
+  assert.equal(saved.applied.notifyJobs, true)
 })
 
 test('a short final answer is also spoken when TTS is enabled', async () => {

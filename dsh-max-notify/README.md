@@ -77,6 +77,16 @@ Published on npm: https://www.npmjs.com/package/dsh-max-notify
   budget alerts (80/100 by default) fire once per period and survive reloads.
   `costMeterFile`, `budgetAlertEnabled`, `budgetAlertThresholds` configure it.
 
+## Compact UX (v1.4)
+
+- 12 core commands in the MAX menu; `/help` is short, `/help all` is complete.
+- Final header: `🕒 20:03 · title` (`messageStyle: detailed` restores the old one).
+- Quiet defaults: subagent/job/goal/TODO notifications off; final, errors,
+  approvals/questions and budget alerts stay on.
+- Approval cards hide call IDs; results are one line; GUI answers edit the card
+  instead of adding a new one; digest is a four-part briefing.
+- Advanced commands are hidden from the menu but still work; see `docs/ux.md`.
+
 ## Autonomous schedules (v1.3)
 
 `/schedules mode N inherit|read-only|auto` attaches a policy to one schedule.
@@ -127,7 +137,7 @@ for per-run `new` sessions, the title plus a recent delivery receipt.
 | `lib/autonomy.mjs` | schedule autonomy policies/matching |
 | `lib/settings.mjs` | GUI settings validation/overlay/API |
 | `client/client.js` | hand-written settings page bundle |
-| `test/*.test.mjs` | `node --test` (341 unit tests) |
+| `test/*.test.mjs` | `node --test` (349 unit tests) |
 
 ## Config
 
@@ -165,7 +175,9 @@ Set in `cordis.patch.yml` (or override the row by id from the profile's own
 | `receiveFiles` / `inboxDir` / `maxIncomingFiles` / `maxIncomingBytes` | `true` / `<cwd>/max-inbox` / `4` / `25 MiB` | Incoming MAX attachments |
 | `registerCommands` / `greetOnStart` | `true` / `true` | MAX command menu and Start greeting |
 | `stateFile` | `$DSH_HOME/max-notify/state.json` | Polling marker, active session, mode, digest date |
-| `notifySubagents` / `notifyJobs` / `notifyGoals` / `notifyErrors` | `true` | Event notifications |
+| `messageStyle` | `compact` | Compact or detailed message header |
+| `notifySubagents` / `notifyJobs` / `notifyGoals` | `false` | Event notifications (quiet by default) |
+| `notifyErrors` / `todoProgress` | `true` / `false` | Agent errors and TODO progress |
 | `notifyAwaitedJobs` | `false` | Also notify jobs the agent already waited for |
 | `todoProgress` | `true` | TODO progress notifications |
 | `quietHours` | — | `{start, end}`: non-critical delivered without push |
@@ -199,7 +211,7 @@ Set in `cordis.patch.yml` (or override the row by id from the profile's own
 
 ## Remote control ("Пульт")
 
-New in 1.2: `/say <text>`, `/diff [--staged] [path]`, `/send <path>`.
+Core 1.2 commands: `/say <text>`, `/diff [--staged] [path]`, `/send <path>`; in 1.4 they are hidden from the compact menu and available via `/help all`.
 
 Write to the bot in MAX — the text becomes the next prompt of the active
 session (default: most recent session; `/use N` to switch). Commands:

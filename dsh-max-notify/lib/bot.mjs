@@ -14,6 +14,7 @@ import {
   formatApprovalPolicyCard,
   formatBudgetCard,
   formatCostStatusLine,
+  formatHelpAllCard,
   formatHelpCard,
   formatModelsCard,
   formatPlanStateCard,
@@ -29,37 +30,18 @@ import { formatBytes } from './incoming.mjs'
 import { deleteSchedule, formatSchedulesCard, listSchedules, setScheduleActive } from './schedules.mjs'
 
 const COMMANDS = [
-  { name: 'help', description: 'Справка по командам' },
-  { name: 'status', description: 'Статус активной сессии' },
+  { name: 'help', description: 'Справка; /help all — все команды' },
+  { name: 'status', description: 'Сессия, модель, стоимость' },
   { name: 'stop', description: 'Остановить текущий ход' },
   { name: 'sessions', description: 'Список сессий' },
   { name: 'use', description: 'Выбрать сессию: /use N' },
-  { name: 'current', description: 'Текущая сессия' },
-  { name: 'mode', description: 'Режим уведомлений: all|errors|mute' },
-  { name: 'mute', description: 'Тишина: /mute 30m или /mute 2h' },
-  { name: 'unmute', description: 'Вернуть уведомления' },
-  { name: 'budget', description: 'Стоимость и бюджет' },
-  { name: 'digest', description: 'Дайджест сейчас' },
   { name: 'new', description: 'Новая сессия: /new [папка]' },
   { name: 'model', description: 'Модель: /model или /model N' },
-  { name: 'rename', description: 'Переименовать сессию: /rename <название>' },
-  { name: 'fork', description: 'Ответвить сессию от текущей' },
-  { name: 'compact', description: 'Сжать историю сессии' },
-  { name: 'plan', description: 'Режим плана: /plan | /plan off' },
-  { name: 'search', description: 'Поиск по сессиям: /search <текст>' },
-  { name: 'archive', description: 'Архивировать текущую сессию' },
-  { name: 'pin', description: 'Закрепить текущую сессию' },
-  { name: 'unpin', description: 'Открепить текущую сессию' },
-  { name: 'workspace', description: 'Рабочие папки: /workspace [N|add path]' },
-  { name: 'approve', description: 'Политика подтверждений' },
-  { name: 'schedules', description: 'Расписания: /schedules [pause|resume|cancel N]' },
-  { name: 'settings', description: 'Эффективные настройки плагина' },
-  { name: 'say', description: 'Озвучить текст: /say <текст>' },
-  { name: 'diff', description: 'Git diff сессии файлом: /diff [--staged] [путь]' },
-  { name: 'send', description: 'Отправить файл из папки сессии: /send <путь>' },
-  { name: 'health', description: 'Здоровье плагина и очередь' },
-  { name: 'version', description: 'Версия плагина' },
-  { name: 'ping', description: 'Проверка отклика' },
+  { name: 'mode', description: 'Уведомления: all|errors|mute' },
+  { name: 'mute', description: 'Тишина: /mute 30m или /mute 2h' },
+  { name: 'budget', description: 'Стоимость и бюджет' },
+  { name: 'schedules', description: 'Расписания: список/пауза' },
+  { name: 'health', description: 'Состояние плагина и очередь' },
 ]
 
 const UPDATE_TYPES = 'message_created,message_callback,bot_started,bot_added,bot_removed'
@@ -257,7 +239,7 @@ export function createBot({
     switch (name) {
       case 'start':
       case 'help': {
-        await reply(chatId, formatHelpCard())
+        await reply(chatId, arg.toLowerCase() === 'all' ? formatHelpAllCard() : formatHelpCard())
         return true
       }
       case 'status': {
@@ -803,7 +785,7 @@ export function createBot({
         return true
       }
       default: {
-        await reply(chatId, `Неизвестная команда \`/${name}\`.\n\n${formatHelpCard()}`)
+        await reply(chatId, `Неизвестная команда \`/${name}\`.\n\n/help — основные · /help all — все`)
         return true
       }
     }

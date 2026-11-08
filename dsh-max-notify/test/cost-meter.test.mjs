@@ -163,8 +163,8 @@ test('formatting helpers and cards include cost and budget', () => {
   assert.match(alert, /¥15\.00/)
 
   const digest = formatDigestCard({ date: '09.11.2026', sessions: [], usage: {}, cost: snapshot })
-  assert.match(digest, /Сегодня ¥5\.00/)
-  assert.match(digest, /Бюджет: 15\.0%/)
+  assert.match(digest, /Деньги: ¥5\.00 сегодня/)
+  assert.match(digest, /бюджет 15\.0%/)
 })
 
 test('localDayKey matches the cost-meter calendar key', () => {

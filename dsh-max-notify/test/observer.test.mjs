@@ -71,7 +71,7 @@ test('subagent completion notifies with its final message', async () => {
     lastAssistantMessage: [{ type: 'text', text: 'дочерний итог' }],
   })
   assert.ok(await waitFor(() => client.sent.length === 1))
-  assert.match(client.sent[0].text, /Дочерний агент завершён/)
+  assert.match(client.sent[0].text, /Дочерний агент/)
   assert.match(client.sent[0].text, /дочерний итог/)
   assert.match(client.sent[0].text, /session-child/)
 })
@@ -80,7 +80,7 @@ test('settled unawaited jobs notify; awaited ones are skipped by default', async
   const first = makeObserver()
   first.observer.onJobEvent({ type: 'settled', awaited: false, job: { id: 'bash-abc', kind: 'bash', label: 'pnpm test', status: 'completed', detail: 'exit code: 0' } })
   assert.ok(await waitFor(() => first.client.sent.length === 1))
-  assert.match(first.client.sent[0].text, /Фоновая задача: completed/)
+  assert.match(first.client.sent[0].text, /Фоновая задача/)
   assert.match(first.client.sent[0].text, /pnpm test/)
 
   const second = makeObserver()
@@ -99,7 +99,7 @@ test('agent errors always notify (critical)', async () => {
   const { client, observer } = makeObserver()
   observer.onAgentError({ agent: { session: session() }, turn: 3, step: 1, error: new Error('boom') })
   assert.ok(await waitFor(() => client.sent.length === 1))
-  assert.match(client.sent[0].text, /Ошибка агента/)
+  assert.match(client.sent[0].text, /Ошибка/)
   assert.match(client.sent[0].text, /boom/)
 })
 
@@ -171,9 +171,9 @@ test('digest contains sessions, live token usage and persists the day', async ()
   })
   await observer.sendDigest()
   assert.ok(await waitFor(() => client.sent.length === 1))
-  assert.match(client.sent[0].text, /Дайджест DSH/)
-  assert.match(client.sent[0].text, /Активных сессий за сутки: 1/)
-  assert.match(client.sent[0].text, /Токены \(live\): in 100 · out 50 · всего 150/)
+  assert.match(client.sent[0].text, /Брифинг/)
+  assert.match(client.sent[0].text, /Сделано: 1 активных/)
+  assert.match(client.sent[0].text, /Токены: 150/)
   assert.equal(digestDates.length, 1)
 })
 
@@ -320,6 +320,6 @@ test('digest includes cost and budget lines', async () => {
     },
   })
   await observer.sendDigest()
-  assert.match(client.sent.at(-1).text, /Сегодня ¥5\.00/)
-  assert.match(client.sent.at(-1).text, /Бюджет: 15\.0%/)
+  assert.match(client.sent.at(-1).text, /Деньги: ¥5\.00 сегодня/)
+  assert.match(client.sent.at(-1).text, /бюджет 15\.0%/)
 })

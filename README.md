@@ -18,7 +18,7 @@
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/enkolesnikov/MaxDSHBot?style=flat-square"/></a>
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img alt="DSH" src="https://img.shields.io/badge/DSH-0.2.x-6C5CE7?style=flat-square"/></a>
   <a href="https://max.ru"><img alt="MAX" src="https://img.shields.io/badge/MAX-messenger-8B5CF6?style=flat-square"/></a>
-  <img alt="Tests" src="https://img.shields.io/badge/tests-341%20passed-2ecc71?style=flat-square"/>
+  <img alt="Tests" src="https://img.shields.io/badge/tests-349%20passed-2ecc71?style=flat-square"/>
   <a href="https://nodejs.org"><img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A524.9-339933?style=flat-square&logo=nodedotjs&logoColor=white"/></a>
   <img alt="Runtime dependencies" src="https://img.shields.io/badge/runtime%20deps-0-brightgreen?style=flat-square"/>
   <a href="https://github.com/enkolesnikov/MaxDSHBot/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/enkolesnikov/MaxDSHBot?style=flat-square"/></a>
@@ -183,6 +183,19 @@ MAX будет сам присылать обновления на публич�
 long polling и пишет warning в лог. Официальная документация MAX:
 [webhooks](https://dev.max.ru/docs-api/methods/POST/subscriptions).
 
+## UX-аудит (v1.4)
+
+- **12 команд в меню** вместо 31; `/help` ≤450 символов, полный список — `/help all`.
+- **Компактный заголовок** `🕒 20:03 · Название`; старый подробный режим —
+  `messageStyle: detailed`.
+- **Тише по умолчанию**: subagent/job/goal/TODO-уведомления выключены; остаются
+  финальные ответы, ошибки, approvals/questions и бюджетные алерты.
+- Approval-карточка без callId; результат одной строкой; GUI-ответы не создают
+  отдельную карточку; job/subagent/goal — одна строка; digest — «брифинг».
+- Продвинутые команды (`/diff`, `/send`, `/approve`, `/workspace`, `/say`, …)
+  скрыты из меню, но работают; аудит и причины — в
+  [docs/ux.md](docs/ux.md).
+
 ## Автономные расписания (v1.3)
 
 - **`/schedules mode N inherit|read-only|auto`** — политика для конкретной
@@ -255,6 +268,7 @@ long polling и пишет warning в лог. Официальная докум�
 | `notify` | `true` | push-уведомления |
 | `disableLinkPreview` | `true` | отправляется **query-параметром** (требование MAX) |
 | `includeHeader` / `includeTitle` / `includeSessionId` | `true` / `true` / `false` | заголовок сообщения и сессии |
+| `messageStyle` | `compact` | `compact` (`🕒 20:03 · title`) или `detailed` (старый DSH-заголовок) |
 | `includeSubagents` | `false` | пересылать и дочерние агент-сессии |
 | `allowedUserIds` / `allowedChatIds` | env `MAX_ALLOWED_USER_IDS` / `..._CHAT_IDS` | allowlist получателя, fail-closed |
 | `skipReasons` | `[interrupted, forked]` | окончания хода, которые не пересылаются |
@@ -273,7 +287,8 @@ long polling и пишет warning в лог. Официальная докум�
 | `maxIncomingFiles` / `maxIncomingBytes` | `4` / `25 MiB` | лимиты входящих |
 | `registerCommands` / `greetOnStart` | `true` / `true` | меню команд MAX и приветствие по Start |
 | `newSessionDir` | — | папка для `/new` (по умолчанию — папка активной сессии) |
-| `notifySubagents` / `notifyJobs` / `notifyGoals` / `notifyErrors` | `true` | уведомления о событиях |
+| `notifySubagents` / `notifyJobs` / `notifyGoals` | `false` | уведомления о событиях (тихие по умолчанию) |
+| `notifyErrors` / `todoProgress` | `true` / `false` | ошибки, TODO-прогресс |
 | `todoProgress` | `true` | TODO-прогресс в MAX |
 | `quietHours` | — | `{start: '23:00', end: '08:00'}` — без push ночью |
 | `digestEnabled` / `digestTime` | `false` / `21:00` | ежедневный дайджест |
@@ -361,7 +376,7 @@ long polling и пишет warning в лог. Официальная докум�
 ## Проверка
 
 ```bash
-cd dsh-max-notify && npm test          # 341 unit tests
+cd dsh-max-notify && npm test          # 349 unit tests
 npm run check                          # синтаксис всех модулей
 node tools/smoke.mjs --env ../.env     # read-only: GET /me, state, outbox
 node tools/send-test.mjs "проверка"    # реальная отправка

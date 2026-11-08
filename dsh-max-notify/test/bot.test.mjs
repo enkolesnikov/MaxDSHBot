@@ -176,19 +176,24 @@ test('plain MAX text is injected into the active session and confirmed', async (
   assert.match(client.sent[0].text, /Отправлено в «Рабочая»/)
 })
 
-test('/help and unknown commands answer with the command list', async () => {
+test('/help is compact, /help all is complete, unknown commands stay short', async () => {
   const { bot, client } = makeBot()
   await bot.handleUpdate(messageUpdate({ text: '/help' }))
   assert.match(client.sent[0].text, /Пульт DSH/)
   assert.match(client.sent[0].text, /\/status/)
+  assert.doesNotMatch(client.sent[0].text, /\/diff/)
+  assert.ok(client.sent[0].text.length <= 450)
+  await bot.handleUpdate(messageUpdate({ text: '/help all' }))
+  assert.match(client.sent[1].text, /Все команды/)
+  assert.match(client.sent[1].text, /\/diff/)
   await bot.handleUpdate(messageUpdate({ text: '/nope' }))
-  assert.match(client.sent[1].text, /Неизвестная команда/)
+  assert.match(client.sent[2].text, /Неизвестная команда/)
+  assert.ok(client.sent[2].text.length < 160)
 })
 
 test('/status shows the active session, model and state', async () => {
   const { bot, client } = makeBot()
   await bot.handleUpdate(messageUpdate({ text: '/status' }))
-  assert.match(client.sent[0].text, /Статус/)
   assert.match(client.sent[0].text, /Рабочая/)
   assert.match(client.sent[0].text, /deepseek\/deepseek-flash/)
   assert.match(client.sent[0].text, /работает/)
@@ -293,11 +298,13 @@ test('pollOnce primes the marker first and then processes new updates', async ()
   assert.equal(state.marker, 777)
 })
 
-test('bot registers the command menu', async () => {
+test('bot registers exactly the 12 core commands', async () => {
   const { bot, client } = makeBot()
   await bot.registerCommands()
   assert.equal(client.commands.length, 1)
-  assert.ok(client.commands[0].some((command) => command.name === 'status'))
+  assert.equal(client.commands[0].length, 12)
+  const names = client.commands[0].map((command) => command.name)
+  assert.deepEqual(names, ['help', 'status', 'stop', 'sessions', 'use', 'new', 'model', 'mode', 'mute', 'budget', 'schedules', 'health'])
 })
 
 function fakePolicy(initial = 'all') {
@@ -803,10 +810,9 @@ test('/settings renders effective settings', async () => {
     },
   })
   await bot.handleUpdate(messageUpdate({ text: '/settings' }))
-  assert.match(client.sent[0].text, /Настройки dsh-max-notify/)
+  assert.match(client.sent[0].text, /Настройки/)
   assert.match(client.sent[0].text, /webhook/)
   assert.match(client.sent[0].text, /reply-ветки: вкл/)
-  assert.match(client.sent[0].text, /пресетов: 2/)
 })
 
 test('an incoming image is passed through promptIncoming', async () => {

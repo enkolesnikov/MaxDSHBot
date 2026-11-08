@@ -4,6 +4,30 @@ All notable changes to `dsh-max-notify` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] — 2026-11-09
+
+UX-аудит: тише, короче, понятнее.
+
+### Changed
+
+- **Компактный заголовок** финального ответа: `🕒 20:03 · Название` вместо
+  `**DSH** · 20:03:28 · Название`; `messageStyle: detailed` возвращает старый вид.
+- **12 команд в меню** вместо 31; компактный `/help` (≤450 символов) и полный
+  `/help all`; продвинутые команды скрыты из меню, но работают.
+- **Тихие уведомления по умолчанию**: subagent/job/goal/TODO выключены;
+  остаются final, errors, approvals/questions, budget alerts.
+- Approval-карточка: без callId, причина ≤200 символов, короткие кнопки;
+  результат — одна строка; GUI-ответы больше не создают отдельную карточку.
+- Job/subagent/goal-карточки — одна строка; ошибки — 1–3 строки.
+- Digest стал «брифингом»: сделано / ждёт тебя / деньги / дальше.
+- GUI: toggles уведомлений и формата сообщений; TTS-секция скрыта (TTS frozen).
+- `docs/ux.md`: аудит функций и список «оставлено / скрыто / потенциально удалить».
+
+### Tests
+
+349 tests (was 341): compact header/cards/help, quiet defaults, GUI notices,
+live settings keys, feature-audit regressions.
+
 ## [1.3.0] — 2026-11-09
 
 Автономные расписания.
