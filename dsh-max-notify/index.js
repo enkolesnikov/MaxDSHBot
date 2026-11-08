@@ -87,6 +87,7 @@ const DEFAULTS = {
   approvalChannel: 'both',
   questionChannel: 'both',
   buttons: true,
+  buttonsPresets: [],
   webUrl: undefined,
   progress: true,
   progressDelayMs: 2500,
@@ -142,6 +143,19 @@ function asBoolean(value, fallback) {
   if (['1', 'true', 'yes', 'on'].includes(normalized)) return true
   if (['0', 'false', 'no', 'off'].includes(normalized)) return false
   return fallback
+}
+
+function normalizePresets(value) {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((item) => {
+      if (typeof item === 'string') return { label: item.trim().slice(0, 40), prompt: item.trim() }
+      const label = String(item?.label ?? '').trim().slice(0, 40)
+      const prompt = String(item?.prompt ?? '').trim()
+      return label && prompt ? { label, prompt } : undefined
+    })
+    .filter(Boolean)
+    .slice(0, 6)
 }
 
 function asStringArray(value, fallback) {
@@ -205,6 +219,7 @@ export function normalizeConfig(raw = {}) {
     pollTimeoutSec: asInteger(merged.pollTimeoutSec, DEFAULTS.pollTimeoutSec, 0, 90),
     interactive: asBoolean(merged.interactive, DEFAULTS.interactive),
     buttons: asBoolean(merged.buttons, DEFAULTS.buttons),
+    buttonsPresets: normalizePresets(merged.buttonsPresets),
     progress: asBoolean(merged.progress, DEFAULTS.progress),
     typing: asBoolean(merged.typing, DEFAULTS.typing),
     deliverables: asBoolean(merged.deliverables, DEFAULTS.deliverables),
@@ -477,6 +492,27 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     return titleOf(sessionOrId)
   }
 
+  /** Title of a cold session from its projection cache (or `undefined`). */
+  async function coldTitle(sessionId) {
+    const id = String(sessionId ?? '')
+    if (id === '') return undefined
+    const cached = titleCache.get(id)
+    if (cached) return cached
+    const controller = getService('sessionController')
+    if (!controller?.projections) return undefined
+    try {
+      const value = await controller.projections({ sessionId: id }, AbortSignal.timeout(2500))
+      const title = value?.kind === 'sequenced' ? value.values?.title : value?.values?.title
+      if (typeof title === 'string' && title.trim() !== '') {
+        titleCache.set(id, title.trim())
+        return title.trim()
+      }
+    } catch {
+      // projection reads are best-effort
+    }
+    return undefined
+  }
+
   async function listSessions() {
     const controller = getService('sessionController')
     if (!controller?.list) return []
@@ -485,16 +521,23 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       (item) => item && !item.blank && item.origin !== 'subagent',
     )
     const archived = archivedIdsOf(getService('workspaceRegistry'))
-    return filterArchivedSessions(items, archived)
+    const summaries = filterArchivedSessions(items, archived)
       .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
       .slice(0, 10)
-      .map((item) => ({
-        sessionId: item.sessionId,
-        running: item.running === true,
-        cwd: item.cwd,
-        updatedAt: item.updatedAt,
-        title: titleFor(String(item.sessionId)),
-      }))
+    return Promise.all(
+      summaries.map(async (item) => {
+        const hinted = item?.projections?.values?.title
+        let title = titleFor(String(item.sessionId)) ?? (typeof hinted === 'string' && hinted.trim() !== '' ? hinted.trim() : undefined)
+        if (!title) title = await coldTitle(item.sessionId)
+        return {
+          sessionId: item.sessionId,
+          running: item.running === true,
+          cwd: item.cwd,
+          updatedAt: item.updatedAt,
+          title,
+        }
+      }),
+    )
   }
 
   async function statusInfo(sessionId) {
@@ -517,6 +560,238 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       cwd: summary?.cwd ?? agent?.session?.header?.cwd,
       updatedAt: summary?.updatedAt,
     }
+  }
+
+  /** Resolve (or resume) the live Agent for a session; undefined when unavailable. */
+  async function liveAgent(sessionId) {
+    const controller = getService('sessionController')
+    if (controller?.resolveAgent) {
+      try {
+        const result = await controller.resolveAgent(sessionId)
+        if (result?.agent) return result.agent
+        if (result?.error) {
+          logger.warn('cannot resolve session %s: %s', sessionId, result.error?.code ?? 'unknown')
+          return undefined
+        }
+      } catch (error) {
+        logger.warn('resolveAgent failed for %s: %s', sessionId, error?.message || String(error))
+      }
+    }
+    return getService('agents')?.get?.(sessionId)
+  }
+
+  /** Execute one slash command against the session's live agent. */
+  async function runCommand(sessionId, line) {
+    const commands = getService('commands')
+    if (!commands?.execute) return { ok: false, error: 'сервис команд недоступен' }
+    const agent = await liveAgent(sessionId)
+    if (!agent) return { ok: false, error: 'сессия недоступна: не удалось активировать агента' }
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 90000)
+    timer.unref?.()
+    try {
+      const execution = await commands.execute(agent, line, [], controller.signal)
+      if (!execution) return { ok: false, error: `команда ${line} не найдена` }
+      const result = execution.result ?? {}
+      return {
+        ok: result.kind !== 'error',
+        text: result.text,
+        kind: result.kind,
+      }
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) }
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  async function modelCatalog() {
+    const controller = getService('sessionController')
+    if (!controller?.modelCatalog) return undefined
+    try {
+      return await controller.modelCatalog()
+    } catch (error) {
+      logger.warn('modelCatalog failed: %s', error?.message || String(error))
+      return undefined
+    }
+  }
+
+  async function listModels() {
+    const catalog = await modelCatalog()
+    if (!catalog) return { items: [], failures: [] }
+    const items = []
+    for (const group of catalog.groups ?? []) {
+      for (const model of group.models ?? []) {
+        items.push({
+          provider: group.id,
+          providerName: group.name,
+          model: model.id,
+          name: model.name ?? model.id,
+          reasoning: model.reasoning?.efforts ?? [],
+        })
+      }
+    }
+    return { items: items.slice(0, 30), failures: catalog.failures ?? [], default: catalog.default }
+  }
+
+  async function currentModel(sessionId) {
+    const agent = getService('agents')?.get?.(sessionId)
+    const info = await statusInfo(sessionId)
+    return {
+      provider: agent?.options?.provider ?? info.provider,
+      model: agent?.options?.model ?? info.model,
+      reasoningEffort: agent?.options?.reasoningEffort,
+    }
+  }
+
+  async function selectModel(sessionId, selection) {
+    const controller = getService('sessionController')
+    if (!controller?.selectModel) return { ok: false, error: 'выбор модели недоступен' }
+    try {
+      const value = await controller.selectModel({ sessionId, ...selection })
+      return { ok: true, selection: value?.selected ?? selection }
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) }
+    }
+  }
+
+  async function renameSession(sessionId, title) {
+    const controller = getService('sessionController')
+    if (!controller?.rename) return { ok: false, error: 'переименование недоступно' }
+    try {
+      const value = await controller.rename({ sessionId, title })
+      titleCache.set(String(sessionId), value?.title ?? title)
+      return { ok: true, title: value?.title ?? title }
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) }
+    }
+  }
+
+  async function forkSession(sessionId) {
+    const controller = getService('sessionController')
+    if (!controller?.fork) return { ok: false, error: 'fork недоступен' }
+    try {
+      const value = await controller.fork({ sessionId })
+      return { ok: true, sessionId: value?.sessionId }
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) }
+    }
+  }
+
+  async function searchSessions(query) {
+    const controller = getService('sessionController')
+    if (!controller?.search) return { ok: false, error: 'поиск недоступен' }
+    try {
+      const value = await controller.search({ query }, AbortSignal.timeout(15000))
+      const items = await Promise.all(
+        (value?.items ?? []).map(async (item) => ({
+          sessionId: item.sessionId,
+          snippet: item.snippet,
+          title: titleFor(String(item.sessionId)) ?? (await coldTitle(item.sessionId)),
+        })),
+      )
+      return { ok: true, items, hasMore: value?.hasMore === true }
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) }
+    }
+  }
+
+  async function archiveSession(sessionId) {
+    const registry = getService('workspaceRegistry')
+    if (!registry?.archiveSession) return { ok: false, error: 'архив недоступен' }
+    try {
+      await registry.archiveSession(sessionId)
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) }
+    }
+  }
+
+  async function pinSession(sessionId, pinned) {
+    const registry = getService('workspaceRegistry')
+    const method = pinned ? 'pinSession' : 'unpinSession'
+    if (!registry?.[method]) return { ok: false, error: 'pin недоступен' }
+    try {
+      await registry[method](sessionId)
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) }
+    }
+  }
+
+  function listWorkspaces() {
+    const registry = getService('workspaceRegistry')
+    if (!registry?.list) return []
+    try {
+      return registry.list().map((workspace) => ({
+        id: workspace.id,
+        path: workspace.path,
+        title: workspace.title,
+      }))
+    } catch {
+      return []
+    }
+  }
+
+  async function createWorkspace(path, title) {
+    const registry = getService('workspaceRegistry')
+    if (!registry?.create) return { ok: false, error: 'workspace-сервис недоступен' }
+    try {
+      const workspace = await registry.create(path, title)
+      return { ok: true, path: workspace?.path, title: workspace?.title }
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) }
+    }
+  }
+
+  async function getApprovalPolicy(sessionId) {
+    const service = getService('approval')
+    if (!service?.overrideOf) return { ok: false, error: 'политика approvals недоступна' }
+    const agent = getService('agents')?.get?.(sessionId) ?? (await liveAgent(sessionId))
+    if (!agent?.session) return { ok: false, error: 'сессия недоступна' }
+    const override = service.overrideOf(agent.session)
+    return { ok: true, policy: override ?? 'ask', override: override !== undefined }
+  }
+
+  async function setApprovalPolicy(sessionId, policy) {
+    const service = getService('approval')
+    if (!service?.setPolicy) return { ok: false, error: 'политика approvals недоступна' }
+    const agent = getService('agents')?.get?.(sessionId) ?? (await liveAgent(sessionId))
+    if (!agent) return { ok: false, error: 'сессия недоступна' }
+    service.setPolicy(agent, policy)
+    return { ok: true, policy }
+  }
+
+  async function setPlanMode(sessionId, active) {
+    const planMode = getService('planMode')
+    if (!planMode?.set) return { ok: false, error: 'plan-mode не смонтирован в профиле' }
+    const agent = getService('agents')?.get?.(sessionId) ?? (await liveAgent(sessionId))
+    if (!agent) return { ok: false, error: 'сессия недоступна' }
+    try {
+      const state = planMode.set(agent, active === true)
+      const view = planMode.get?.(agent) ?? { active: active === true }
+      return { ok: true, state, ...view }
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) }
+    }
+  }
+
+  async function planState(sessionId) {
+    const planMode = getService('planMode')
+    if (!planMode?.get) return { ok: false, error: 'plan-mode не смонтирован в профиле' }
+    const agent = getService('agents')?.get?.(sessionId) ?? (await liveAgent(sessionId))
+    if (!agent) return { ok: false, error: 'сессия недоступна' }
+    try {
+      return { ok: true, ...planMode.get(agent) }
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) }
+    }
+  }
+
+  let preferredWorkspacePath
+
+  function setPreferredWorkspace(path) {
+    preferredWorkspacePath = typeof path === 'string' && path !== '' ? path : undefined
   }
 
   async function promptSession(sessionId, text) {
@@ -559,12 +834,15 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     const controller = getService('sessionController')
     if (!controller?.create) return { ok: false, error: 'sessionController недоступен' }
     const baseCwd = sessionId ? (await statusInfo(sessionId))?.cwd : undefined
-    const cwd = resolveSessionDir({
-      arg: sessionArg,
-      baseCwd,
-      configuredDir: config.newSessionDir,
-      fallbackCwd: process.cwd(),
-    })
+    const cwd =
+      !sessionArg && preferredWorkspacePath
+        ? preferredWorkspacePath
+        : resolveSessionDir({
+            arg: sessionArg,
+            baseCwd,
+            configuredDir: config.newSessionDir,
+            fallbackCwd: process.cwd(),
+          })
     try {
       mkdirSync(cwd, { recursive: true })
     } catch (error) {
@@ -669,6 +947,23 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       titleFor,
       saveIncoming: (attachments, sessionId) => incomingLocal.save(attachments, sessionId),
       createSession: (sessionId, sessionArg) => createSession(sessionId, sessionArg),
+      listModels,
+      currentModel,
+      selectModel,
+      renameSession,
+      forkSession,
+      runCommand,
+      liveAgent,
+      setPlanMode,
+      planState,
+      searchSessions,
+      archiveSession,
+      pinSession,
+      listWorkspaces,
+      createWorkspace,
+      setPreferredWorkspace,
+      getApprovalPolicy,
+      setApprovalPolicy,
     },
   })
 
@@ -745,6 +1040,16 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
         { type: 'callback', text: '⏹ Стоп', payload: JSON.stringify({ t: 'qa', a: 'stop', s: sessionId }) },
       ],
     ]
+    const presets = Array.isArray(config.buttonsPresets) ? config.buttonsPresets.slice(0, 4) : []
+    for (let index = 0; index < presets.length; index += 2) {
+      rows.push(
+        presets.slice(index, index + 2).map((preset, offset) => ({
+          type: 'callback',
+          text: preset.label,
+          payload: JSON.stringify({ t: 'qa', a: 'preset', s: sessionId, i: index + offset }),
+        })),
+      )
+    }
     if (config.webUrl) rows.push([{ type: 'link', text: '🖥 Открыть GUI', url: config.webUrl }])
     return [{ type: 'inline_keyboard', payload: { buttons: rows } }]
   }

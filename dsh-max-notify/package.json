@@ -1,7 +1,7 @@
 {
   "name": "dsh-max-notify",
-  "version": "0.6.0",
-  "description": "DSH → MAX messenger plugin: reliable agent replies (durable outbox, dedupe, rate limits), remote control with approval timeouts and audit, observability, images and two-way file exchange",
+  "version": "0.7.0",
+  "description": "DSH → MAX messenger plugin: reliable agent replies (durable outbox, dedupe, rate limits), full session control (model, fork, compact, plan, search, archive, workspaces), approvals with timeouts and audit, observability, images and two-way file exchange",
   "type": "module",
   "main": "index.js",
   "exports": {

@@ -129,6 +129,15 @@ export function formatHelpCard() {
     '`/use N` — выбрать сессию',
     '`/current` — текущая сессия',
     '`/new [папка]` — новая сессия (папка создаётся)',
+    '`/model [N|provider/model]` — модель сессии',
+    '`/rename <название>` — переименовать сессию',
+    '`/fork` — ответвить сессию',
+    '`/compact` — сжать историю',
+    '`/plan` / `/plan off` — режим плана',
+    '`/search <текст>` — поиск по сессиям',
+    '`/archive` — архивировать текущую, `/pin` / `/unpin`',
+    '`/workspace` — папки, `/workspace N` — папка для `/new`',
+    '`/approve` — политика подтверждений',
     '`/mode [all|errors|mute]` — режим уведомлений',
     '`/mute [30m|2h]` — тишина, `/unmute` — вернуть',
     '`/digest` — дайджест сейчас',
@@ -246,5 +255,68 @@ export function formatDigestCard({ date, sessions = [], usage, goals = [], todos
     }
   }
   lines.push('', 'Подробнее: `/status`, `/sessions`.')
+  return lines.join('\n')
+}
+
+/** Model picker card for `/model`. */
+export function formatModelsCard({ current, models, failures = [] } = {}) {
+  const list = Array.isArray(models) ? models : []
+  const lines = ['🧠 **Модели**', '']
+  if (current) lines.push(`Текущая: \`${current.provider ? `${current.provider}/` : ''}${current.model}${current.reasoningEffort ? ` · ${current.reasoningEffort}` : ''}\``, '')
+  if (list.length === 0) lines.push('Каталог моделей недоступен.')
+  else {
+    list.forEach((item, index) => {
+      const mark = current && item.provider === current.provider && item.model === current.model ? ' ▶️' : ''
+      lines.push(`${index + 1}) \`${item.provider}/${item.model}\` — ${truncate(item.name ?? item.model, 80)}${mark}`)
+    })
+    lines.push('', 'Выбери: `/model N` или `/model provider/model`.')
+  }
+  if (failures.length > 0) {
+    lines.push('', `⚠️ Провайдеры с ошибкой: ${failures.map((item) => item.id).join(', ')}`)
+  }
+  return lines.join('\n')
+}
+
+/** Search results card. */
+export function formatSearchCard({ query, items } = {}) {
+  const list = Array.isArray(items) ? items : []
+  if (list.length === 0) return `🔎 По запросу «${truncate(query ?? '', 80)}» ничего не найдено.`
+  const lines = [`🔎 **Поиск:** «${truncate(query ?? '', 80)}»`, '']
+  list.forEach((item, index) => {
+    lines.push(`${index + 1}) ${item.title ? `«${truncate(item.title, 80)}»` : `\`${shortSessionId(item.sessionId)}\``}`)
+    if (item.snippet) lines.push(`   ${truncate(item.snippet.replace(/\s+/g, ' '), 200)}`)
+  })
+  lines.push('', 'Выбрать: `/use N`.')
+  return lines.join('\n')
+}
+
+/** Workspace (folder) list card for `/workspace`. */
+export function formatWorkspacesCard({ items, activePath } = {}) {
+  const list = Array.isArray(items) ? items : []
+  if (list.length === 0) return '📁 Рабочих папок пока нет. Добавь: `/workspace add /path/to/dir`.'
+  const lines = ['📁 **Рабочие папки**', '']
+  list.forEach((item, index) => {
+    const mark = activePath && item.path === activePath ? ' ▶️' : ''
+    lines.push(`${index + 1}) ${truncate(item.title || folderOf(item.path) || item.path, 80)} — \`${truncate(item.path, 200)}\`${mark}`)
+  })
+  lines.push('', 'Выбрать папку для `/new`: `/workspace N`. Добавить: `/workspace add <path>`.')
+  return lines.join('\n')
+}
+
+/** Plan-mode status card. */
+export function formatPlanStateCard({ active, pending, action } = {}) {
+  const lines = ['🧭 **Режим плана**', '']
+  lines.push(`Состояние: ${active ? 'включён' : 'выключен'}${pending ? ' (переключение в следующем шаге)' : ''}`)
+  if (action) lines.push(`Действие: ${action}`)
+  lines.push('', '`/plan` — включить, `/plan off` — выключить.')
+  return lines.join('\n')
+}
+
+/** Approval policy card. */
+export function formatApprovalPolicyCard({ policy, override, title } = {}) {
+  const lines = ['🔐 **Политика подтверждений**', '']
+  if (title) lines.push(`🗂 Сессия: ${truncate(title, 120)}`)
+  lines.push(`Текущая: \`${policy ?? 'ask'}\`${override ? ' (явно задана для сессии)' : ' (по умолчанию)'}`)
+  lines.push('', '`/approve ask` — спрашивать, `/approve never` — не спрашивать (с подтверждением).')
   return lines.join('\n')
 }

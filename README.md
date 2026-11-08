@@ -37,8 +37,10 @@
 - **Двусторонний чат**: текст, отправленный боту в MAX, уходит в активную
   сессию (`sessionController.prompt`), ответ приходит обратно.
 - **Команды**: `/status`, `/stop`, `/sessions`, `/use N`, `/current`, `/new [папка]`,
-  `/health`, `/version`, `/ping`, `/help` (архивные сессии из Workspace в списке и
-  дайджесте не показываются; меню команд — `PATCH /me/commands`).
+  `/model`, `/rename`, `/fork`, `/compact`, `/plan`, `/search`, `/archive`,
+  `/pin`/`/unpin`, `/workspace`, `/approve`, `/health`, `/version`, `/ping`,
+  `/help` (архивные сессии из Workspace в списке и дайджесте не показываются;
+  меню команд — `PATCH /me/commands`).
 - **Кнопки под ответом**: «Продолжить», «Стоп», «Открыть GUI».
 - **Live-прогресс**: одно сообщение редактируется во время работы
   (инструмент, текст, таймер) + `typing_on`; удаляется в конце хода.
@@ -77,6 +79,24 @@
   health snapshot (последний poll/ошибка, глубина outbox, ожидания лимитера),
   audit log `$DSH_HOME/max-notify/audit.jsonl` (0600), redaction токенов в логах.
 - **Защита от флуда** входящих сообщений и единая очередь всех HTTP-вызовов MAX.
+
+### Управление сессиями (v0.7)
+
+- **`/model`** — каталог моделей с выбором по номеру или `provider/model`;
+  **`/rename`**, **`/fork`** (ветка становится активной), **`/compact`**.
+- **`/plan`** / **`/plan off`** / **`/plan status`** — режим плана; **review
+  плана в MAX**: полный план приходит файлом `plan.md`, кнопки «Approve /
+  Keep planning», свободный текст уходит агенту как фидбек.
+- **`/search <текст>`** — поиск по содержимому сессий (результаты выбираются
+  через `/use N`).
+- **`/archive`** — архивирует текущую сессию и переключает на следующую;
+  **`/pin`** / **`/unpin`**.
+- **`/workspace`** — список рабочих папок; `/workspace N` задаёт папку для
+  последующих `/new`, `/workspace add <path>` регистрирует новую.
+- **`/approve`** — политика подтверждений (`ask`/`never`) с двухшаговым
+  подтверждением.
+- **Кнопки-пресеты** под финальным ответом: `buttonsPresets: [{label, prompt}]`.
+- `/sessions` показывает заголовки и холодных сессий (projection cache).
 
 ## Быстрый старт
 
@@ -135,6 +155,7 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 | `interactive` | `true` | приём сообщений/кнопок и команды |
 | `approvalChannel` / `questionChannel` | `both` | `both` (MAX + GUI гонка), `max`, `gui` |
 | `buttons` / `webUrl` | `true` / env `DSH_WEB_URL` | кнопки под ответом и ссылка на GUI |
+| `buttonsPresets` | `[]` | пресеты-кнопки: `[{label, prompt}]` (до 4) |
 | `progress` / `progressDelayMs` / `progressThrottleMs` / `typing` | `true` / `2500` / `2000` / `true` | live-карточка прогресса |
 | `deliverables` | `true` | отправлять файлы из `present` вложениями |
 | `forwardImages` / `forwardToolImages` / `maxImages` | `true` / `true` / `4` | картинки из ответа и tool-результатов |
@@ -184,7 +205,7 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 | `dsh-max-notify/lib/policy.mjs` | режимы уведомлений и тихие часы |
 | `dsh-max-notify/lib/observer.mjs` | события, TODO-прогресс и дайджест |
 | `dsh-max-notify/tools/` | `pair.mjs` (chat_id), `send-test.mjs` |
-| `dsh-max-notify/test/` | `node --test` (161 тест) |
+| `dsh-max-notify/test/` | `node --test` (173 теста) |
 | `research/` | как писать плагины DSH, MAX Bot API, каталог фич |
 
 ## Ограничения
@@ -216,7 +237,7 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 ## Проверка
 
 ```bash
-cd dsh-max-notify && npm test          # 161 unit test
+cd dsh-max-notify && npm test          # 173 unit test
 node tools/send-test.mjs "проверка"    # реальная отправка
 DSH_HOME=$HOME/.dsh dsh --profile web --dump-config | grep -A12 'id: max-notify'
 ```

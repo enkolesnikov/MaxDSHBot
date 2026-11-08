@@ -30,7 +30,9 @@ Skill](https://github.com/max-messenger/max-agents-skill), а также наш�
 - **v0.4.0**: приём файлов из MAX; **v0.5.0**: `/new [папка]`, скрытие
   архивных сессий; **v0.6.0**: durable outbox, at-least-once polling с dedupe,
   глобальный лимитер, таймаут approvals, fail-closed-интерактив, `/health`,
-  audit/redaction, 161 тест.
+  audit/redaction, 161 тест; **v0.7.0**: `/model`, `/rename`, `/fork`,
+  `/compact`, `/plan` + review, `/search`, `/archive`, `/pin`, `/workspace`,
+  `/approve`, пресеты, 173 теста.
 - Не реализовано из каталога: 5/8/11/12/14–29 (см. ниже); план — `ROADMAP.md`.
 
 ## 0. TL;DR

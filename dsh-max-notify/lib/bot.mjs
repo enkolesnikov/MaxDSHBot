@@ -11,9 +11,14 @@
 import { randomUUID } from 'node:crypto'
 import {
   formatAccepted,
+  formatApprovalPolicyCard,
   formatHelpCard,
+  formatModelsCard,
+  formatPlanStateCard,
+  formatSearchCard,
   formatSessionsCard,
   formatStatusCard,
+  formatWorkspacesCard,
   shortSessionId,
   truncate,
 } from './cards.mjs'
@@ -31,6 +36,17 @@ const COMMANDS = [
   { name: 'unmute', description: 'Вернуть уведомления' },
   { name: 'digest', description: 'Дайджест сейчас' },
   { name: 'new', description: 'Новая сессия: /new [папка]' },
+  { name: 'model', description: 'Модель: /model или /model N' },
+  { name: 'rename', description: 'Переименовать сессию: /rename <название>' },
+  { name: 'fork', description: 'Ответвить сессию от текущей' },
+  { name: 'compact', description: 'Сжать историю сессии' },
+  { name: 'plan', description: 'Режим плана: /plan | /plan off' },
+  { name: 'search', description: 'Поиск по сессиям: /search <текст>' },
+  { name: 'archive', description: 'Архивировать текущую сессию' },
+  { name: 'pin', description: 'Закрепить текущую сессию' },
+  { name: 'unpin', description: 'Открепить текущую сессию' },
+  { name: 'workspace', description: 'Рабочие папки: /workspace [N|add path]' },
+  { name: 'approve', description: 'Политика подтверждений' },
   { name: 'health', description: 'Здоровье плагина и очередь' },
   { name: 'version', description: 'Версия плагина' },
   { name: 'ping', description: 'Проверка отклика' },
@@ -58,6 +74,14 @@ export function createBot({
   let disposed = false
   /** chatKey -> ordered session ids for `/use N` */
   const choices = new Map()
+  /** chatKey -> numbered model list for `/model N` */
+  const modelChoices = new Map()
+  /** chatKey -> numbered workspace list for `/workspace N` */
+  const workspaceChoices = new Map()
+  /** chatKey -> { policy, at } pending `/approve <policy> confirm` */
+  const approvalConfirms = new Map()
+  /** workspace path chosen for subsequent `/new` calls */
+  let preferredWorkspacePath
   /** chatKey -> token bucket for incoming flood protection */
   const incomingBuckets = new Map()
   /** chatKey -> last "too fast" warning */
@@ -331,6 +355,265 @@ export function createBot({
         await reply(chatId, `🏓 pong · ${Date.now() - startedAt} мс`)
         return true
       }
+      case 'model': {
+        const sessionId = await activeSession(chatId)
+        if (!sessionId) {
+          await reply(chatId, 'Нет активной сессии.')
+          return true
+        }
+        const listed = (await runtime.listModels?.()) ?? { items: [], failures: [] }
+        const models = listed.items ?? []
+        if (arg === '' || arg === 'list') {
+          modelChoices.set(chatKey(chatId), models)
+          const current = await runtime.currentModel?.(sessionId)
+          await reply(chatId, formatModelsCard({ current, models, failures: listed.failures }))
+          return true
+        }
+        let picked
+        if (/^\d+$/.test(arg)) {
+          let cached = modelChoices.get(chatKey(chatId))
+          if (!cached) {
+            cached = models
+            modelChoices.set(chatKey(chatId), cached)
+          }
+          picked = cached[Number(arg) - 1]
+        } else {
+          const normalized = arg.trim()
+          const [provider, model] = normalized.includes('/') ? normalized.split('/') : ['', normalized]
+          picked = models.find(
+            (item) =>
+              (provider === '' || item.provider === provider) &&
+              (item.model === model || `${item.provider}/${item.model}` === normalized),
+          )
+        }
+        if (!picked) {
+          await reply(chatId, `Не нашёл модель «${truncate(arg, 80)}». Посмотри список: /model`)
+          return true
+        }
+        const selected = await runtime.selectModel?.(sessionId, { provider: picked.provider, model: picked.model })
+        if (!selected?.ok) {
+          await reply(chatId, `❌ Не удалось переключить модель: ${selected?.error ?? 'неизвестная ошибка'}`)
+          return true
+        }
+        await reply(chatId, `🧠 Модель: \`${picked.provider}/${picked.model}\` — ${truncate(picked.name ?? picked.model, 80)}`)
+        return true
+      }
+      case 'rename': {
+        const sessionId = await activeSession(chatId)
+        if (!sessionId) {
+          await reply(chatId, 'Нет активной сессии.')
+          return true
+        }
+        const title = arg.trim()
+        if (title === '') {
+          await reply(chatId, 'Использование: `/rename новое название`')
+          return true
+        }
+        const renamed = await runtime.renameSession?.(sessionId, title)
+        if (!renamed?.ok) {
+          await reply(chatId, `❌ Не удалось переименовать: ${renamed?.error ?? 'неизвестная ошибка'}`)
+          return true
+        }
+        await reply(chatId, `✏️ Сессия переименована: «${truncate(renamed.title ?? title, 120)}»`)
+        return true
+      }
+      case 'fork': {
+        const sessionId = await activeSession(chatId)
+        if (!sessionId) {
+          await reply(chatId, 'Нет активной сессии.')
+          return true
+        }
+        const forked = await runtime.forkSession?.(sessionId)
+        if (!forked?.ok || !forked.sessionId) {
+          await reply(chatId, `❌ Не удалось ответвить: ${forked?.error ?? 'неизвестная ошибка'}`)
+          return true
+        }
+        state?.setSession?.(chatId, forked.sessionId)
+        await reply(chatId, `🌿 Создана ветка: \`${shortSessionId(forked.sessionId)}\`\nОна стала активной.`)
+        return true
+      }
+      case 'compact': {
+        const sessionId = await activeSession(chatId)
+        if (!sessionId) {
+          await reply(chatId, 'Нет активной сессии.')
+          return true
+        }
+        const result = await runtime.runCommand?.(sessionId, '/compact')
+        if (!result?.ok) {
+          await reply(chatId, `❌ Сжатие не удалось: ${result?.error ?? 'неизвестная ошибка'}`)
+          return true
+        }
+        await reply(chatId, `🗜 ${truncate(result.text ?? 'История сжата.', 800)}`)
+        return true
+      }
+      case 'plan': {
+        const sessionId = await activeSession(chatId)
+        if (!sessionId) {
+          await reply(chatId, 'Нет активной сессии.')
+          return true
+        }
+        const requested = arg.trim().toLowerCase()
+        if (requested === 'status' || requested === '?') {
+          const view = await runtime.planState?.(sessionId)
+          if (!view?.ok) {
+            await reply(chatId, `❌ ${view?.error ?? 'режим плана недоступен'}`)
+            return true
+          }
+          await reply(chatId, formatPlanStateCard({ active: view.active, pending: view.pending }))
+          return true
+        }
+        const active = requested !== 'off'
+        const result = await runtime.setPlanMode?.(sessionId, active)
+        if (!result?.ok) {
+          await reply(chatId, `❌ ${result?.error ?? 'режим плана недоступен'}`)
+          return true
+        }
+        await reply(chatId, formatPlanStateCard({ active: result.active, pending: result.pending, action: result.state }))
+        return true
+      }
+      case 'search': {
+        const query = arg.trim()
+        if (query === '') {
+          await reply(chatId, 'Использование: `/search текст запроса`')
+          return true
+        }
+        const found = await runtime.searchSessions?.(query)
+        if (!found?.ok) {
+          await reply(chatId, `❌ Поиск не удался: ${found?.error ?? 'неизвестная ошибка'}`)
+          return true
+        }
+        choices.set(
+          chatKey(chatId),
+          found.items.map((item) => item.sessionId),
+        )
+        await reply(chatId, formatSearchCard({ query, items: found.items }))
+        return true
+      }
+      case 'archive': {
+        const sessionId = await activeSession(chatId)
+        if (!sessionId) {
+          await reply(chatId, 'Нет активной сессии.')
+          return true
+        }
+        const archived = await runtime.archiveSession?.(sessionId)
+        if (!archived?.ok) {
+          await reply(chatId, `❌ Не удалось архивировать: ${archived?.error ?? 'неизвестная ошибка'}`)
+          return true
+        }
+        state?.forgetSession?.(chatId)
+        const items = await listSessions()
+        const next = items[0]
+        if (next) {
+          state?.setSession?.(chatId, next.sessionId)
+          await reply(
+            chatId,
+            `📦 Сессия \`${shortSessionId(sessionId)}\` в архиве.\n▶️ Активная: ${next.title ? `«${truncate(next.title, 80)}»` : `\`${shortSessionId(next.sessionId)}\``}`,
+          )
+        } else {
+          await reply(chatId, `📦 Сессия \`${shortSessionId(sessionId)}\` в архиве. Активных сессий не осталось.`)
+        }
+        return true
+      }
+      case 'pin':
+      case 'unpin': {
+        const sessionId = await activeSession(chatId)
+        if (!sessionId) {
+          await reply(chatId, 'Нет активной сессии.')
+          return true
+        }
+        const pinned = name === 'pin'
+        const result = await runtime.pinSession?.(sessionId, pinned)
+        if (!result?.ok) {
+          await reply(chatId, `❌ Не удалось: ${result?.error ?? 'неизвестная ошибка'}`)
+          return true
+        }
+        await reply(chatId, pinned ? '📌 Сессия закреплена.' : '📌 Сессия откреплена.')
+        return true
+      }
+      case 'workspace': {
+        const registry = (await runtime.listWorkspaces?.()) ?? []
+        if (arg === '' || arg === 'list') {
+          workspaceChoices.set(chatKey(chatId), registry)
+          await reply(chatId, formatWorkspacesCard({ items: registry, activePath: preferredWorkspacePath }))
+          return true
+        }
+        if (/^add\s+/i.test(arg)) {
+          const path = arg.replace(/^add\s+/i, '').trim()
+          if (path === '') {
+            await reply(chatId, 'Использование: `/workspace add /path/to/dir`')
+            return true
+          }
+          const created = await runtime.createWorkspace?.(path)
+          if (!created?.ok) {
+            await reply(chatId, `❌ Не удалось добавить папку: ${created?.error ?? 'неизвестная ошибка'}`)
+            return true
+          }
+          await reply(chatId, `📁 Папка добавлена: \`${truncate(created.path ?? path, 200)}\``)
+          return true
+        }
+        if (/^\d+$/.test(arg)) {
+          let cached = workspaceChoices.get(chatKey(chatId))
+          if (!cached) {
+            cached = registry
+            workspaceChoices.set(chatKey(chatId), cached)
+          }
+          const picked = cached[Number(arg) - 1]
+          if (!picked) {
+            await reply(chatId, `Укажи номер из /workspace (сейчас ${cached.length}).`)
+            return true
+          }
+          preferredWorkspacePath = picked.path
+          runtime.setPreferredWorkspace?.(picked.path)
+          await reply(chatId, `📁 Новые сессии (/new) будут в \`${truncate(picked.path, 200)}\``)
+          return true
+        }
+        await reply(chatId, 'Использование: `/workspace`, `/workspace N`, `/workspace add /path/to/dir`')
+        return true
+      }
+      case 'approve': {
+        const sessionId = await activeSession(chatId)
+        if (!sessionId) {
+          await reply(chatId, 'Нет активной сессии.')
+          return true
+        }
+        const tokens = arg.trim().toLowerCase().split(/\s+/).filter(Boolean)
+        if (tokens.length === 0 || tokens[0] === 'status' || tokens[0] === '?') {
+          const result = await runtime.getApprovalPolicy?.(sessionId)
+          if (!result?.ok) {
+            await reply(chatId, `❌ ${result?.error ?? 'политика недоступна'}`)
+            return true
+          }
+          await reply(
+            chatId,
+            formatApprovalPolicyCard({ policy: result.policy, override: result.override, title: runtime.titleFor?.(sessionId) }),
+          )
+          return true
+        }
+        const policy = tokens[0]
+        if (policy !== 'ask' && policy !== 'never') {
+          await reply(chatId, 'Использование: `/approve`, `/approve ask`, `/approve never`')
+          return true
+        }
+        const key = chatKey(chatId)
+        const pending = approvalConfirms.get(key)
+        const confirmed = tokens.includes('confirm')
+        if (!confirmed || !pending || pending.policy !== policy || Date.now() - pending.at > 60_000) {
+          approvalConfirms.set(key, { policy, at: Date.now() })
+          await reply(
+            chatId,
+            `⚠️ Политика \`${policy}\` изменит поведение approvals. Подтверди в течение минуты: \`/approve ${policy} confirm\``,
+          )
+          return true
+        }
+        approvalConfirms.delete(key)
+        const result = await runtime.setApprovalPolicy?.(sessionId, policy)
+        if (!result?.ok) {
+          await reply(chatId, `❌ Не удалось изменить политику: ${result?.error ?? 'неизвестная ошибка'}`)
+          return true
+        }
+        await reply(chatId, `🔐 Политика подтверждений: \`${policy}\``)
+        return true
+      }
       case 'digest': {
         if (!observer?.sendDigest) {
           await reply(chatId, 'Дайджест недоступен.')
@@ -417,6 +700,17 @@ export function createBot({
     if (!data || data.t !== 'qa') return false
     const sessionId = typeof data.s === 'string' ? data.s : undefined
     try {
+      if (data.a === 'preset') {
+        const preset = (config.buttonsPresets ?? [])[Number(data.i)]
+        if (!preset || !sessionId) {
+          await client.answerCallback(callbackId, { notification: 'Пресет больше недоступен.' })
+          return true
+        }
+        await client.answerCallback(callbackId, { notification: `📨 ${preset.label}` })
+        const ok = await runtime.promptSession?.(sessionId, preset.prompt)
+        if (!ok) await reply(undefined, '❌ Не удалось отправить пресет.')
+        return true
+      }
       if (data.a === 'cont' && sessionId) {
         await client.answerCallback(callbackId, { notification: '📨 Продолжаю…' })
         const ok = await runtime.promptSession?.(sessionId, 'продолжай')

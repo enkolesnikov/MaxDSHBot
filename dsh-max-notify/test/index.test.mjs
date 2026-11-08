@@ -540,3 +540,33 @@ test('replaying the same turn after a reload does not duplicate the final reply'
   await tick(60)
   assert.equal(client.sent.length, 1)
 })
+
+test('configured preset buttons are attached under the final reply', async () => {
+  const { ctx, emit } = createFakeCtx()
+  const client = createFakeClient()
+  apply(
+    ctx,
+    {
+      botToken: 't',
+      chatId: '1',
+      buttonsPresets: [
+        { label: 'Ещё вариант', prompt: 'дай ещё вариант' },
+        { label: 'Объясни', prompt: 'объясни подробнее' },
+      ],
+    },
+    { createClient: () => client },
+  )
+  const s = session('session-presets')
+  emit('session/event', s, evt('turn/start', { turn: 1 }))
+  emit('session/event', s, assistantEvent(1, 1, 'готово'))
+  emit('session/event', s, evt('turn/end', { turn: 1, reason: { kind: 'completed' } }))
+  await tick(60)
+
+  const keyboard = (client.sent.at(-1).attachments ?? []).find((item) => item.type === 'inline_keyboard')
+  const flat = (keyboard?.payload?.buttons ?? []).flat()
+  const labels = flat.map((button) => button.text)
+  assert.ok(labels.includes('Ещё вариант'))
+  assert.ok(labels.includes('Объясни'))
+  const preset = flat.find((button) => button.text === 'Ещё вариант')
+  assert.equal(JSON.parse(preset.payload).a, 'preset')
+})

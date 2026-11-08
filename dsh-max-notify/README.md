@@ -48,6 +48,15 @@ file deliverables.
   (notifications still work); `allowUnlistedUsers: true` is the explicit escape.
 - **Health & secrets**: `/health`, `/version`, `/ping`, optional heartbeat file,
   token/upload-credential redaction in logs, incoming flood protection.
+- **Session control (v0.7)**: `/model` (catalog + `selectModel`), `/rename`,
+  `/fork`, `/compact` (via `commands.execute`), `/plan`/`/plan off`, `/search`,
+  `/archive`, `/pin`/`/unpin`, `/workspace` (list/select/add), `/approve`
+  policy with two-step confirmation, and configurable preset buttons.
+- **Plan review in MAX**: a `user-questions` request with
+  `intent.kind === 'plan-review'` is rendered as a dedicated card; the complete
+  plan is attached as `plan.md` and the agent receives either an approval or
+  free-text feedback.
+- `/sessions` resolves titles of cold sessions through the projection cache.
 
 ## Package layout
 
@@ -67,7 +76,7 @@ file deliverables.
 | `lib/health.mjs` | health snapshot for `/health` and heartbeat files |
 | `lib/audit.mjs` | metadata-only JSONL audit of approvals/commands (0600) |
 | `lib/redact.mjs` | token/credential redaction for log sinks |
-| `test/*.test.mjs` | `node --test` (161 unit tests) |
+| `test/*.test.mjs` | `node --test` (173 unit tests) |
 
 ## Config
 
@@ -97,6 +106,7 @@ Set in `cordis.patch.yml` (or override the row by id from the profile's own
 | `interactive` | `true` | Accept chats/callbacks and commands |
 | `approvalChannel` / `questionChannel` | `both` | `both` (MAX+GUI race), `max`, `gui` |
 | `buttons` / `webUrl` | `true` / `DSH_WEB_URL` | Quick-action buttons + GUI link |
+| `buttonsPresets` | `[]` | Preset buttons under the final reply: `[{label, prompt}]` (up to 4) |
 | `progress` / `progressDelayMs` / `progressThrottleMs` / `typing` | `true` / `2500` / `2000` / `true` | Live progress card |
 | `deliverables` | `true` | Send `present` files as attachments |
 | `forwardImages` / `forwardToolImages` / `maxImages` | `true` / `true` / `4` | Attach images from the final answer and tool results |
@@ -135,6 +145,16 @@ session (default: most recent session; `/use N` to switch). Commands:
 | `/mute [30m\|2h]`, `/unmute` | Mute/unmute non-critical notifications |
 | `/digest` | Send the digest now |
 | `/new [folder]` | Create a new session (folder is created if missing; relative to the active session's cwd) |
+| `/model [N\|provider/model]` | List models or select one |
+| `/rename <title>` | Rename the active session |
+| `/fork` | Fork the active session (the fork becomes active) |
+| `/compact` | Condense the session history |
+| `/plan`, `/plan off`, `/plan status` | Toggle/show plan mode |
+| `/search <query>` | Search session content; results work with `/use N` |
+| `/archive` | Archive the active session and switch to the next one |
+| `/pin`, `/unpin` | Pin/unpin the active session |
+| `/workspace [N\|add <path>]` | List/select workspaces or register a new folder |
+| `/approve` | Show/change the approval policy (`ask`/`never`, two-step) |
 | `/health` | Polling/outbox/limiter/health snapshot |
 | `/version` | Plugin version |
 | `/ping` | Round-trip check |

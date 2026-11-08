@@ -11,10 +11,16 @@ function createFakeClient() {
   const sent = []
   const edits = []
   const answers = []
+  const uploads = []
   return {
     sent,
     edits,
     answers,
+    uploads,
+    async uploadMedia({ buffer, filename, type }) {
+      uploads.push({ buffer, filename, type })
+      return { token: `file-token-${uploads.length}` }
+    },
     async sendMessage(params) {
       sent.push(params)
       return { message: { body: { mid: `mid-${sent.length}` } } }
@@ -270,4 +276,67 @@ test('dispose marks pending cards as stale', async () => {
   interactions.dispose()
   assert.equal(await outcomePromise, 'cancelled')
   assert.match(client.edits.at(-1).text, /перезагружен/i)
+})
+
+test('plan review sends the full plan as a file and approves from a button', async () => {
+  const { client, interactions } = makeInteractions()
+  const plan = `# План обновления\n\n${'шаг '.repeat(800)}`
+  const request = {
+    agent: { session: { id: 'session-plan', header: {} } },
+    questions: [
+      {
+        id: 'review-1',
+        header: 'Plan review',
+        question: 'Approve this plan and leave plan mode?',
+        detail: plan,
+        options: [
+          { label: 'Approve', description: 'leave plan mode' },
+          { label: 'Keep planning', description: 'stay' },
+        ],
+        intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan' },
+      },
+    ],
+    signal: new AbortController().signal,
+  }
+  const answerPromise = interactions.handleQuestions(request, () => new Promise(() => {}))
+  await tick()
+
+  assert.equal(client.uploads.length, 1)
+  assert.equal(client.uploads[0].filename, 'plan.md')
+  assert.match(client.sent[0].text, /Review плана/)
+  const attachments = client.sent[0].attachments ?? []
+  assert.ok(attachments.some((item) => item.type === 'file' && item.payload?.token === 'file-token-1'))
+  const rows = attachments.find((item) => item.type === 'inline_keyboard')?.payload?.buttons ?? []
+  assert.equal(rows.length, 2)
+
+  const approve = rows[0][0].payload
+  assert.equal(JSON.parse(approve).t, 'q')
+  await interactions.handleCallback({ callbackId: 'cb-plan-approve', payload: approve })
+  const answer = await answerPromise
+  assert.deepEqual(answer.answers, [{ id: 'review-1', selected: ['Approve'] }])
+  assert.match(client.edits.at(-1).text, /одобрен/i)
+})
+
+test('plan review free-text feedback becomes a custom answer', async () => {
+  const { client, interactions } = makeInteractions()
+  const request = {
+    agent: { session: { id: 'session-plan-2', header: {} } },
+    questions: [
+      {
+        id: 'review-2',
+        header: 'Plan review',
+        question: 'Approve this plan?',
+        detail: '# План\n\nСделать А и Б.',
+        options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+        intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan-2' },
+      },
+    ],
+    signal: new AbortController().signal,
+  }
+  const answerPromise = interactions.handleQuestions(request, () => new Promise(() => {}))
+  await tick()
+  await interactions.tryAnswerText({ chatId: 123456789, text: 'добавь ещё тесты' })
+  const answer = await answerPromise
+  assert.equal(answer.answers[0].custom, 'добавь ещё тесты')
+  assert.match(client.edits.at(-1).text, /Фидбек/i)
 })

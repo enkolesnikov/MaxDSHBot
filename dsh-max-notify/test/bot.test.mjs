@@ -127,8 +127,9 @@ function runtimeStub(overrides = {}) {
 
 function makeBot(overrides = {}) {
   const client = createFakeClient()
-  const state = createMemoryState()
-  const { runtime, calls } = runtimeStub()
+  const state = createMemoryState(overrides.state)
+  const { runtime: baseRuntime, calls } = runtimeStub()
+  const runtime = { ...baseRuntime, ...(overrides.runtime ?? {}) }
   const bot = createBot({
     client,
     config: config(overrides.config),
@@ -470,4 +471,193 @@ test('incoming flood protection answers once per warning window', async () => {
   assert.equal(calls.prompts.length, 1)
   const warnings = client.sent.filter((item) => /Слишком часто/.test(item.text))
   assert.equal(warnings.length, 1)
+})
+
+function v07Runtime(extra = {}) {
+  const calls = { prompts: [], models: [], selected: [], renamed: [], forked: [], commands: [], plans: [], searches: [], archived: [], pinned: [] }
+  const runtime = {
+    ...runtimeStub().runtime,
+    promptSession: async (sessionId, text) => {
+      calls.prompts.push({ sessionId, text })
+      return true
+    },
+    listModels: async () => ({
+      items: [
+        { provider: 'deepseek', model: 'deepseek-flash', name: 'Flash' },
+        { provider: 'deepseek', model: 'deepseek-pro', name: 'Pro' },
+      ],
+      failures: [],
+    }),
+    currentModel: async () => ({ provider: 'deepseek', model: 'deepseek-flash' }),
+    selectModel: async (sessionId, selection) => {
+      calls.selected.push({ sessionId, ...selection })
+      return { ok: true, selection }
+    },
+    renameSession: async (sessionId, title) => {
+      calls.renamed.push({ sessionId, title })
+      return { ok: true, title }
+    },
+    forkSession: async (sessionId) => {
+      calls.forked.push(sessionId)
+      return { ok: true, sessionId: 'session-forked' }
+    },
+    runCommand: async (sessionId, line) => {
+      calls.commands.push({ sessionId, line })
+      return { ok: true, text: 'Сжато 12 элементов, сохранено ~2k токенов.' }
+    },
+    setPlanMode: async (sessionId, active) => {
+      calls.plans.push({ sessionId, active })
+      return { ok: true, state: 'committed', active, pending: false }
+    },
+    planState: async () => ({ ok: true, active: true, pending: false }),
+    searchSessions: async (query) => {
+      calls.searches.push(query)
+      return { ok: true, items: [{ sessionId: 'session-search', snippet: 'нашлось вот это', title: 'Найденная' }] }
+    },
+    archiveSession: async (sessionId) => {
+      calls.archived.push(sessionId)
+      return { ok: true }
+    },
+    pinSession: async (sessionId, pinned) => {
+      calls.pinned.push({ sessionId, pinned })
+      return { ok: true }
+    },
+    listWorkspaces: async () => [
+      { id: 'w1', path: '/work/app', title: 'app' },
+      { id: 'w2', path: '/work/lib', title: 'lib' },
+    ],
+    createWorkspace: async (path) => ({ ok: true, path, title: path.split('/').pop() }),
+    setPreferredWorkspace: (path) => calls.pinned.push({ preferred: path }),
+    getApprovalPolicy: async () => ({ ok: true, policy: 'ask', override: false }),
+    setApprovalPolicy: async (sessionId, policy) => {
+      calls.selected.push({ policySet: policy })
+      return { ok: true, policy }
+    },
+    ...extra,
+  }
+  return { runtime, calls }
+}
+
+test('/model lists models and switches by number', async () => {
+  const { runtime, calls } = v07Runtime()
+  const { bot, client } = makeBot({ runtime })
+  await bot.handleUpdate(messageUpdate({ text: '/model' }))
+  assert.match(client.sent[0].text, /Модели/)
+  assert.match(client.sent[0].text, /deepseek\/deepseek-flash/)
+  await bot.handleUpdate(messageUpdate({ text: '/model 2' }))
+  assert.deepEqual(calls.selected, [{ sessionId: 'session-aaaaaaaa', provider: 'deepseek', model: 'deepseek-pro' }])
+  assert.match(client.sent[1].text, /deepseek\/deepseek-pro/)
+})
+
+test('/rename, /fork and /compact drive the session', async () => {
+  const { runtime, calls } = v07Runtime()
+  const { bot, client, state } = makeBot({ runtime })
+  await bot.handleUpdate(messageUpdate({ text: '/rename Новое имя' }))
+  assert.deepEqual(calls.renamed, [{ sessionId: 'session-aaaaaaaa', title: 'Новое имя' }])
+  assert.match(client.sent[0].text, /Новое имя/)
+
+  await bot.handleUpdate(messageUpdate({ text: '/fork' }))
+  assert.deepEqual(calls.forked, ['session-aaaaaaaa'])
+  assert.equal(state.sessionFor(123456789), 'session-forked')
+
+  await bot.handleUpdate(messageUpdate({ text: '/compact' }))
+  assert.deepEqual(calls.commands, [{ sessionId: 'session-forked', line: '/compact' }])
+  assert.match(client.sent[2].text, /Сжато/)
+})
+
+test('/plan toggles plan mode and shows status', async () => {
+  const { runtime, calls } = v07Runtime()
+  const { bot, client } = makeBot({ runtime })
+  await bot.handleUpdate(messageUpdate({ text: '/plan' }))
+  assert.deepEqual(calls.plans, [{ sessionId: 'session-aaaaaaaa', active: true }])
+  assert.match(client.sent[0].text, /включён/)
+  await bot.handleUpdate(messageUpdate({ text: '/plan off' }))
+  assert.deepEqual(calls.plans.at(-1), { sessionId: 'session-aaaaaaaa', active: false })
+  await bot.handleUpdate(messageUpdate({ text: '/plan status' }))
+  assert.match(client.sent[2].text, /Режим плана/)
+})
+
+test('/search stores results for /use and /use switches to a found session', async () => {
+  const { runtime, calls } = v07Runtime()
+  const { bot, client, state } = makeBot({ runtime })
+  await bot.handleUpdate(messageUpdate({ text: '/search нашлось' }))
+  assert.deepEqual(calls.searches, ['нашлось'])
+  assert.match(client.sent[0].text, /Поиск/)
+  await bot.handleUpdate(messageUpdate({ text: '/use 1' }))
+  assert.equal(state.sessionFor(123456789), 'session-search')
+})
+
+test('/archive archives the active session and switches to the next one', async () => {
+  const sessions = [
+    { sessionId: 'session-aaaaaaaa', running: false, cwd: '/work/app', updatedAt: 2, title: 'Первая' },
+    { sessionId: 'session-bbbbbbbb', running: false, cwd: '/work/lib', updatedAt: 1, title: 'Вторая' },
+  ]
+  const removed = []
+  const { runtime } = v07Runtime({
+    listSessions: async () => sessions.filter((item) => !removed.includes(item.sessionId)),
+    archiveSession: async (sessionId) => {
+      removed.push(sessionId)
+      return { ok: true }
+    },
+  })
+  const { bot, client, state } = makeBot({ runtime })
+  state.setSession(123456789, 'session-aaaaaaaa')
+  await bot.handleUpdate(messageUpdate({ text: '/archive' }))
+  assert.deepEqual(removed, ['session-aaaaaaaa'])
+  assert.equal(state.sessionFor(123456789), 'session-bbbbbbbb')
+  assert.match(client.sent[0].text, /в архиве/)
+})
+
+test('/pin and /unpin call the registry', async () => {
+  const { runtime, calls } = v07Runtime()
+  const { bot } = makeBot({ runtime })
+  await bot.handleUpdate(messageUpdate({ text: '/pin' }))
+  await bot.handleUpdate(messageUpdate({ text: '/unpin' }))
+  assert.deepEqual(calls.pinned, [
+    { sessionId: 'session-aaaaaaaa', pinned: true },
+    { sessionId: 'session-aaaaaaaa', pinned: false },
+  ])
+})
+
+test('/workspace lists folders, selects one and adds a new one', async () => {
+  const { runtime, calls } = v07Runtime()
+  const { bot, client } = makeBot({ runtime })
+  await bot.handleUpdate(messageUpdate({ text: '/workspace' }))
+  assert.match(client.sent[0].text, /Рабочие папки/)
+  await bot.handleUpdate(messageUpdate({ text: '/workspace 2' }))
+  assert.deepEqual(calls.pinned.at(-1), { preferred: '/work/lib' })
+  await bot.handleUpdate(messageUpdate({ text: '/workspace add /work/new' }))
+  assert.match(client.sent[2].text, /\/work\/new/)
+})
+
+test('/approve requires a confirmation before changing the policy', async () => {
+  const { runtime, calls } = v07Runtime()
+  const { bot, client } = makeBot({ runtime })
+  await bot.handleUpdate(messageUpdate({ text: '/approve' }))
+  assert.match(client.sent[0].text, /Политика подтверждений/)
+  await bot.handleUpdate(messageUpdate({ text: '/approve never' }))
+  assert.match(client.sent[1].text, /Подтверди/)
+  assert.equal(calls.selected.length, 0)
+  await bot.handleUpdate(messageUpdate({ text: '/approve never confirm' }))
+  assert.deepEqual(calls.selected, [{ policySet: 'never' }])
+  assert.match(client.sent[2].text, /never/)
+})
+
+test('preset buttons prompt the session with the configured text', async () => {
+  const { runtime, calls } = v07Runtime()
+  const { bot, client } = makeBot({
+    runtime,
+    config: { buttonsPresets: [{ label: 'Ещё вариант', prompt: 'дай ещё вариант' }] },
+  })
+  await bot.handleUpdate({
+    update_type: 'message_callback',
+    callback: {
+      callback_id: 'cb-preset',
+      payload: JSON.stringify({ t: 'qa', a: 'preset', s: 'session-aaaaaaaa', i: 0 }),
+      user: { user_id: 987654321 },
+    },
+    message: { recipient: { chat_id: 123456789 } },
+  })
+  assert.deepEqual(calls.prompts, [{ sessionId: 'session-aaaaaaaa', text: 'дай ещё вариант' }])
+  assert.equal(client.callbacks.at(-1).body.notification, '📨 Ещё вариант')
 })

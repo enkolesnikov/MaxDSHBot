@@ -4,6 +4,41 @@ All notable changes to `dsh-max-notify` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — 2026-11-09
+
+«Полное управление»: все частые действия из MAX без возврата в веб-GUI.
+
+### Added
+
+- `/model` — каталог моделей (`sessionController.modelCatalog`) с выбором по
+  номеру или `provider/model` (`selectModel`).
+- `/rename <title>`, `/fork` (новая сессия становится активной), `/compact`
+  (исполнение `/compact` через `commands.execute`).
+- `/plan`, `/plan off`, `/plan status` через `ctx.planMode` (`set`/`get`).
+- **Plan review в MAX**: `user-questions` с `intent.kind === 'plan-review'`
+  рендерится отдельной карточкой, полный план уходит файлом `plan.md`,
+  кнопки «Approve / Keep planning», свободный текст — фидбек агенту.
+- `/search <query>` по содержимому сессий; результаты нумеруются и работают с
+  `/use N`.
+- `/archive` (архивирует текущую и переключает на следующую), `/pin`/`/unpin`.
+- `/workspace`, `/workspace N`, `/workspace add <path>`: выбор папки для
+  последующих `/new` и регистрация новой папки.
+- `/approve` — просмотр политики approvals, переключение `ask`/`never` через
+  двухшаговое подтверждение.
+- Кнопки-пресеты под финальным ответом (`buttonsPresets:
+  [{label, prompt}]`, до 4).
+- `/sessions` показывает заголовки холодных сессий через projection cache.
+
+### Changed
+
+- `/help` и меню команд MAX расширены новыми командами.
+- `package.json` 0.7.0.
+
+### Tests
+
+173 unit tests (was 161): model/rename/fork/compact/plan/search/archive/pin/
+workspace/approve, preset callbacks, plan-review file card and free-text feedback.
+
 ## [0.6.0] — 2026-11-08
 
 «Надёжность и безопасность»: доставка без потерь и дублей, approvals без

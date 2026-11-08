@@ -66,7 +66,7 @@ export function createInteractions({ client, config, logger, target, resolveTitl
     return String(chatId ?? target?.chatId ?? target?.userId ?? 'default')
   }
 
-  async function sendCard(text, rows) {
+  async function sendCard(text, rows, extraAttachments = []) {
     const params = {
       ...targetQuery(),
       text,
@@ -75,7 +75,10 @@ export function createInteractions({ client, config, logger, target, resolveTitl
       disableLinkPreview: true,
       priority: PRIORITY.critical,
     }
-    if (rows) params.attachments = keyboard(rows)
+    const attachments = []
+    if (rows) attachments.push(...keyboard(rows))
+    if (Array.isArray(extraAttachments) && extraAttachments.length > 0) attachments.push(...extraAttachments)
+    if (attachments.length > 0) params.attachments = attachments
     const response = await client.sendMessage(params)
     return response?.message?.body?.mid
   }
@@ -241,6 +244,63 @@ export function createInteractions({ client, config, logger, target, resolveTitl
     return formatQuestionCard({ questions: record.questions, answered: record.answers.size })
   }
 
+  /** Plan-mode review arrives through `user-questions` with intent.kind = plan-review. */
+  function planQuestionOf(record) {
+    const question = record?.questions?.[0]
+    return question?.intent?.kind === 'plan-review' ? question : undefined
+  }
+
+  function planLabels(record) {
+    const question = planQuestionOf(record)
+    const options = Array.isArray(question?.options) ? question.options : []
+    const approve = question?.intent?.approve ?? options[0]?.label ?? 'Approve'
+    const keep = options.find((option) => option?.label !== approve)?.label ?? 'Keep planning'
+    return { approve, keep }
+  }
+
+  /** Upload the full plan as a .md file; returns the attachment list (best effort). */
+  async function planFileAttachments(record) {
+    const question = planQuestionOf(record)
+    const plan = String(question?.detail ?? '')
+    if (plan === '' || typeof client.uploadMedia !== 'function') return []
+    try {
+      const uploaded = await client.uploadMedia({
+        buffer: Buffer.from(plan, 'utf8'),
+        filename: 'plan.md',
+        type: 'file',
+      })
+      if (!uploaded?.token) return []
+      return [{ type: 'file', payload: { token: uploaded.token } }]
+    } catch (error) {
+      logger?.warn?.('cannot upload plan.md to MAX: %s', error?.message || String(error))
+      return []
+    }
+  }
+
+  function renderPlanCard(record) {
+    const question = planQuestionOf(record)
+    const plan = String(question?.detail ?? '')
+    const header = question?.header ? `${question.header}: ` : ''
+    const lines = ['🧭 **Review плана**', '']
+    lines.push(`${header}${question?.question ?? ''}`)
+    lines.push('')
+    lines.push(truncate(plan, 1800))
+    if (plan.length > 1800) lines.push('', '📄 Полный план — в файле `plan.md`.')
+    return lines.join('\n')
+  }
+
+  function isPlanReview(record) {
+    return planQuestionOf(record) !== undefined
+  }
+
+  function planAnswerText(record, answer) {
+    const { approve } = planLabels(record)
+    const selected = answer?.selected?.[0]
+    if (selected === approve) return '✅ **План одобрен** — выходим из режима плана.'
+    if (answer?.custom) return `📝 **Фидбек отправлен агенту:**\n\n${truncate(answer.custom, 800)}`
+    return '📝 **Остаёмся в режиме плана** — правь план дальше.'
+  }
+
   function optionRows(record) {
     if (record.questions.length !== 1) return undefined
     const question = record.questions[0]
@@ -278,7 +338,12 @@ export function createInteractions({ client, config, logger, target, resolveTitl
     }
 
     try {
-      record.messageId = await sendCard(renderQuestionCard(record), optionRows(record))
+      if (isPlanReview(record)) {
+        const attachments = await planFileAttachments(record)
+        record.messageId = await sendCard(renderPlanCard(record), optionRows(record), attachments)
+      } else {
+        record.messageId = await sendCard(renderQuestionCard(record), optionRows(record))
+      }
     } catch (error) {
       logger?.warn?.('cannot send question card to MAX: %s', error?.message || String(error))
       return guiPromise
@@ -312,7 +377,12 @@ export function createInteractions({ client, config, logger, target, resolveTitl
       if (disposed) return { answers: answersArray(record) }
       if (winner.from === 'chat') {
         void guiPromise.catch(() => {})
-        await editCard(record.messageId, `✅ **Ответ отправлен из MAX**\n\n${truncate(describeAnswers(record), 800)}`)
+        if (isPlanReview(record)) {
+          const first = record.questions[0]
+          await editCard(record.messageId, planAnswerText(record, record.answers.get(first.id)))
+        } else {
+          await editCard(record.messageId, `✅ **Ответ отправлен из MAX**\n\n${truncate(describeAnswers(record), 800)}`)
+        }
         return winner.answer
       }
       if (winner.from === 'gui-error') {
@@ -356,7 +426,12 @@ export function createInteractions({ client, config, logger, target, resolveTitl
     applyTextAnswer(record, value)
 
     if (allAnswered(record)) {
-      await editCard(record.messageId, `✅ **Ответ отправлен из MAX**\n\n${truncate(describeAnswers(record), 800)}`)
+      if (isPlanReview(record)) {
+        const first = record.questions[0]
+        await editCard(record.messageId, planAnswerText(record, record.answers.get(first.id)))
+      } else {
+        await editCard(record.messageId, `✅ **Ответ отправлен из MAX**\n\n${truncate(describeAnswers(record), 800)}`)
+      }
       pending.delete(token)
       state?.removePendingCard?.(token)
       dropQuestionToken(record)
@@ -480,7 +555,11 @@ export function createInteractions({ client, config, logger, target, resolveTitl
       } catch (error) {
         logger?.debug?.('cannot answer question callback: %s', error?.message || String(error))
       }
-      await editCard(record.messageId, `✅ **Ответ отправлен из MAX**\n\n${truncate(describeAnswers(record), 800)}`)
+      if (isPlanReview(record)) {
+        await editCard(record.messageId, planAnswerText(record, record.answers.get(question.id)))
+      } else {
+        await editCard(record.messageId, `✅ **Ответ отправлен из MAX**\n\n${truncate(describeAnswers(record), 800)}`)
+      }
       record.resolve({ answers: answersArray(record) })
     } else {
       try {
