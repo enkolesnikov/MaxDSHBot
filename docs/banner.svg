@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="420" viewBox="0 0 1280 420" role="img" aria-label="dsh-max-notify — DSH to MAX messenger bridge">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#080b18"/>
+      <stop offset="0.45" stop-color="#140f35"/>
+      <stop offset="1" stop-color="#241048"/>
+    </linearGradient>
+    <radialGradient id="glowA" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#7c5cff" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#7c5cff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowB" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#22d3ee" stop-opacity="0.4"/>
+      <stop offset="1" stop-color="#22d3ee" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#a78bfa"/>
+      <stop offset="0.5" stop-color="#8b5cf6"/>
+      <stop offset="1" stop-color="#22d3ee"/>
+    </linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#ffffff" stroke-opacity="0.05" stroke-width="1"/>
+    </pattern>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="60"/>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="420" fill="url(#bg)"/>
+  <rect width="1280" height="420" fill="url(#grid)"/>
+  <circle cx="1080" cy="70" r="220" fill="url(#glowA)" filter="url(#soft)"/>
+  <circle cx="150" cy="400" r="200" fill="url(#glowB)" filter="url(#soft)"/>
+
+  <g font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif">
+    <text x="72" y="118" fill="#a78bfa" font-size="18" font-weight="700" letter-spacing="4">DEEPSEEK HARNESS PLUGIN</text>
+    <text x="72" y="186" fill="#ffffff" font-size="62" font-weight="800" letter-spacing="-1.5">dsh-max-notify</text>
+    <text x="72" y="230" fill="#c9c4ea" font-size="24" font-weight="500">DSH → MAX messenger bridge · reply, control, observability</text>
+
+    <!-- terminal card -->
+    <g>
+      <rect x="72" y="268" width="650" height="112" rx="16" fill="#0b0f1e" stroke="#2d2a4d" stroke-width="1.5"/>
+      <circle cx="96" cy="290" r="5" fill="#ff5f56"/>
+      <circle cx="114" cy="290" r="5" fill="#ffbd2e"/>
+      <circle cx="132" cy="290" r="5" fill="#27c93f"/>
+      <text x="156" y="295" fill="#6b7194" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12">dsh web · /path/to/MaxBot</text>
+      <text x="94" y="326" fill="#7ee787" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17">$ dsh web</text>
+      <text x="94" y="352" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15">✓ turn/end → MAX · outbox 0 · limiter ok</text>
+      <text x="430" y="352" fill="#a5b4fc" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15">/status /budget /plan</text>
+    </g>
+
+    <!-- chat card -->
+    <g>
+      <rect x="786" y="84" width="422" height="304" rx="22" fill="#0f1327" stroke="#31305a" stroke-width="1.5"/>
+      <rect x="786" y="84" width="422" height="54" rx="22" fill="#171b36"/>
+      <rect x="786" y="116" width="422" height="22" fill="#171b36"/>
+      <circle cx="816" cy="111" r="12" fill="#8b5cf6"/>
+      <text x="816" y="116" fill="#ffffff" font-size="12" font-weight="700" text-anchor="middle">M</text>
+      <text x="838" y="108" fill="#ffffff" font-size="15" font-weight="700">MAX · личный диалог</text>
+      <text x="838" y="126" fill="#8f93b8" font-size="12">bot @… · allowlist · fail-closed</text>
+
+      <rect x="808" y="158" width="300" height="58" rx="14" fill="#1c2140"/>
+      <text x="824" y="181" fill="#c9c4ea" font-size="13">Агент · turn 42</text>
+      <text x="824" y="202" fill="#ffffff" font-size="14">готово: тесты 187/187 ✅</text>
+
+      <rect x="892" y="230" width="296" height="46" rx="14" fill="#2a1d54" stroke="#6d4bd6"/>
+      <text x="908" y="258" fill="#e6ddff" font-size="14">/budget → ¥6.43 · 6.4%</text>
+
+      <rect x="808" y="288" width="340" height="80" rx="14" fill="#101427" stroke="#2d2a4d"/>
+      <text x="824" y="312" fill="#8f93b8" font-size="12">кнопки</text>
+      <rect x="824" y="322" width="142" height="30" rx="9" fill="#1c2140" stroke="#343a63"/>
+      <text x="895" y="342" fill="#cfd2ff" font-size="12" text-anchor="middle">Approve</text>
+      <rect x="978" y="322" width="142" height="30" rx="9" fill="#1c2140" stroke="#343a63"/>
+      <text x="1049" y="342" fill="#cfd2ff" font-size="12" text-anchor="middle">Keep planning</text>
+    </g>
+
+    <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
+      <text x="72" y="404" fill="#6f6a91" font-size="13">v0.8.0 · 187 tests · runtime deps 0 · Node ≥24.9 · DSH 0.2.x</text>
+      <text x="1208" y="404" fill="#6f6a91" font-size="13" text-anchor="end">github.com/enkolesnikov/MaxDSHBot</text>
+    </g>
+  </g>
+</svg>

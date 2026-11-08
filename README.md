@@ -1,117 +1,91 @@
-# dsh-max-notify
+<div align="center">
+  <img src="docs/banner.svg" alt="dsh-max-notify — DSH → MAX messenger bridge" width="100%"/>
+</div>
 
-Плагин для [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
-(DSH), который отправляет **последнее сообщение агента после каждого хода** в
-мессенджер [MAX](https://max.ru) через бота.
+<h1 align="center">dsh-max-notify</h1>
 
-- Ноль runtime-зависимостей: `node:` builtins + относительные импорты (требование
-  для `link:`-установленных DSH-плагинов, которые не могут резолвить
-  `@deepseek-ai/*`).
-- Слушает `session/event` (`assistant/message` + `turn/end`) — ровно одно
-  сообщение на ход, а не на каждый шаг инструментов.
-- С собой везёт цепочку **Russian Trusted Root CA**: `platform-api2.max.ru`
-  не доверяется системным хранилищем (Node/curl по умолчанию падают).
-- Учитывает лимиты MAX: 4000 символов (чанкинг по абзацам), 2 сообщения/сек на
-  чат, ретраи `429 Retry-After` и 5xx/сетевых ошибок.
-- Фильтры: subagent-сессии игнорируются; `interrupted`/`forked` (синтетические
-  закрытия восстановления со старым текстом) пропускаются.
-- **Recipient allowlist (fail-closed)** — «только мне»: проверка `GET
-  /chats/{chatId}`, что это личный диалог с разрешённым пользователем.
-- Плохой/отсутствующий конфиг не ломает профиль: плагин просто логирует
-  предупреждение и остаётся выключенным.
+<p align="center">
+  <b>Последний ответ агента — в MAX. Пульт управления, approvals, стоимость и наблюдаемость — оттуда же.</b><br/>
+  Плагин для <a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek Harness</a> ·
+  мессенджер <a href="https://max.ru">MAX</a> · ноль runtime-зависимостей
+</p>
 
-### Наблюдатель (v0.3)
+<p align="center">
+  <a href="https://github.com/enkolesnikov/MaxDSHBot/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/enkolesnikov/MaxDSHBot/ci.yml?branch=main&label=tests&logo=github&style=flat-square"/></a>
+  <a href="https://github.com/enkolesnikov/MaxDSHBot/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/enkolesnikov/MaxDSHBot?style=flat-square&label=release"/></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/enkolesnikov/MaxDSHBot?style=flat-square"/></a>
+  <a href="https://github.com/deepseek-ai/deepseek-harness"><img alt="DSH" src="https://img.shields.io/badge/DSH-0.2.x-6C5CE7?style=flat-square"/></a>
+  <a href="https://max.ru"><img alt="MAX" src="https://img.shields.io/badge/MAX-messenger-8B5CF6?style=flat-square"/></a>
+  <img alt="Tests" src="https://img.shields.io/badge/tests-187%20passed-2ecc71?style=flat-square"/>
+  <a href="https://nodejs.org"><img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A524.9-339933?style=flat-square&logo=nodedotjs&logoColor=white"/></a>
+  <img alt="Runtime dependencies" src="https://img.shields.io/badge/runtime%20deps-0-brightgreen?style=flat-square"/>
+  <a href="https://github.com/enkolesnikov/MaxDSHBot/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/enkolesnikov/MaxDSHBot?style=flat-square"/></a>
+</p>
 
-- **События**: уведомления о завершении дочернего агента (с итогом), фоновых
-  задач (`ctx.jobs`), изменении цели (`goal/changed`), ошибках агента.
-- **TODO-прогресс**: «📋 2/5» при изменении числа выполненных задач
-  (`todo_write`), без спама на промежуточных статусах.
-- **Режимы уведомлений**: `/mode all|errors|mute`, `/mute 30m|2h`, `/unmute`;
-  `quietHours` («не будить ночью»): некритичные уведомления приходят без push,
-  критичные (подтверждения/вопросы/ошибки) — всегда.
-- **Дайджест**: ежедневно в `digestTime` (или `/digest` вручную) — активные
-  сессии, live-токены, цели, прогресс задач; дата отправки хранится в state.
+<p align="center">
+  <a href="#быстрый-старт">Быстрый старт</a> ·
+  <a href="#что-умеет">Возможности</a> ·
+  <a href="#команды-в-max">Команды</a> ·
+  <a href="#архитектура">Архитектура</a> ·
+  <a href="#конфигурация">Конфигурация</a> ·
+  <a href="ROADMAP.md">Roadmap</a> ·
+  <a href="dsh-max-notify/CHANGELOG.md">Changelog</a>
+</p>
 
-### Пульт управления (v0.2)
+---
 
-- **Двусторонний чат**: текст, отправленный боту в MAX, уходит в активную
-  сессию (`sessionController.prompt`), ответ приходит обратно.
-- **Команды**: `/status`, `/stop`, `/sessions`, `/use N`, `/current`, `/new [папка]`,
-  `/model`, `/rename`, `/fork`, `/compact`, `/plan`, `/search`, `/archive`,
-  `/pin`/`/unpin`, `/workspace`, `/approve`, `/budget`, `/cost`, `/health`,
-  `/version`, `/ping`,
-  `/help` (архивные сессии из Workspace в списке и дайджесте не показываются;
-  меню команд — `PATCH /me/commands`).
-- **Кнопки под ответом**: «Продолжить», «Стоп», «Открыть GUI».
-- **Live-прогресс**: одно сообщение редактируется во время работы
-  (инструмент, текст, таймер) + `typing_on`; удаляется в конце хода.
-- **Подтверждения и вопросы из MAX**: waterfall-перехват
-  `approval/request`/`user-questions/request` с `prepend`, гонка «MAX vs GUI»
-  (`Promise.race`): кто ответил первым — тот и прав, вторая сторона получает
-  «решено в другом месте». Таймаут/обрыв — fail-closed.
-- **Файлы**: `deliverables/presented` загружается в MAX (`POST /uploads`) и
-  приходит вложениями (изображения — фото, остальное — файлами).
-- **Картинки из финального ответа** (v0.3.1): image-блоки сообщения,
-  изображения из tool-результатов и упомянутые в тексте (`![alt](path)`,
-  `./shot.png`, `https://…/pic.png`) уходят в MAX фотографиями; код-фрагменты
-  игнорируются, дубли с `present` не отправляются.
-- **Приём файлов из MAX** (v0.4.0): файл/фото, отправленный боту, скачивается
-  в `<рабочая папка сессии>/max-inbox/`, агенту передаётся промпт с путями и
-  типами (read/read_image); лимиты размера/количества, безопасные имена,
-  отчёт об ошибках в чат.
+> [!NOTE]
+> Плагин ставится в web-профиль DSH через `link:` и переживает перезагрузки:
+> состояние (маркер polling, outbox, дедуп-ключи, health) лежит вне репозитория,
+> в `$DSH_HOME/max-notify/`. Доступ — только по allowlist, интерактив
+> fail-closed. Всё, что агент пишет, уходит на серверы MAX — для чувствительных
+> сессий используйте `enabled: false` или `dryRun: true`.
 
-### Надёжность и безопасность (v0.6)
+## Что умеет
 
-- **Durable outbox**: финальные ответы и уведомления переживают недоступность
-  MAX и перезагрузку плагина; exponential backoff, TTL 48 ч, приоритетная
-  очередь, дедупликация по бизнес-ключу.
-- **At-least-once long polling**: marker сдвигается только после обработки
-  батча, обработанные update-id сохраняются — повторная доставка не создаёт
-  второй промпт.
-- **Глобальный лимитер**: 2 запроса/с на чат и 30/с суммарно; approvals и
-  ошибки идут в critical-lane и не ждут очереди уведомлений.
-- **Approvals без зависаний**: таймаут 120 с (настраивается) отклоняет запрос,
-  карточка помечается «таймаут»; кнопка «Разрешить и запомнить» хранит правило
-  для инструмента на 1 ч (только для явного `approvalRememberTools`).
-- **Fail-closed**: без `allowedUserIds`/`allowedChatIds` интерактив (команды,
-  approvals, polling) выключен; уведомления работают. Осознанный escape —
-  `allowUnlistedUsers: true`.
-- **Наблюдаемость**: `/health`, `/version`, `/ping`, heartbeat-файл,
-  health snapshot (последний poll/ошибка, глубина outbox, ожидания лимитера),
-  audit log `$DSH_HOME/max-notify/audit.jsonl` (0600), redaction токенов в логах.
-- **Защита от флуда** входящих сообщений и единая очередь всех HTTP-вызовов MAX.
+| | Возможность | Что даёт |
+|---|---|---|
+| 💬 | **Ответы агента** | Один MAX-месседж на ход (`turn/end`), чанкинг 4000 символов, картинки и файлы `present` вложениями, входящие файлы из MAX → `max-inbox/` |
+| 🕹 | **Пульт** | Двусторонний чат, 25+ команд (`/status`, `/model`, `/plan`, `/sessions`, `/budget`…), инлайн-кнопки, live-прогресс |
+| 🔐 | **Approvals** | Подтверждения и вопросы из MAX с гонкой MAX↔GUI, таймаутом, «запомнить для инструмента», audit-логом |
+| 👀 | **Наблюдатель** | Subagent/job/goal/error, TODO-прогресс, режимы молчания, тихие часы, ежедневный дайджест |
+| 🛡 | **Надёжность** | Durable outbox, at-least-once polling с дедупом, глобальный лимитер, health/heartbeat, redaction секретов |
+| 💰 | **Стоимость** | Read-only интеграция с `dsh-cost-meter`: `/budget`, cost-строки в `/status` и дайджесте, алерты 80/100 % |
 
-### Управление сессиями (v0.7)
+## Архитектура
 
-- **`/model`** — каталог моделей с выбором по номеру или `provider/model`;
-  **`/rename`**, **`/fork`** (ветка становится активной), **`/compact`**.
-- **`/plan`** / **`/plan off`** / **`/plan status`** — режим плана; **review
-  плана в MAX**: полный план приходит файлом `plan.md`, кнопки «Approve /
-  Keep planning», свободный текст уходит агенту как фидбек.
-- **`/search <текст>`** — поиск по содержимому сессий (результаты выбираются
-  через `/use N`).
-- **`/archive`** — архивирует текущую сессию и переключает на следующую;
-  **`/pin`** / **`/unpin`**.
-- **`/workspace`** — список рабочих папок; `/workspace N` задаёт папку для
-  последующих `/new`, `/workspace add <path>` регистрирует новую.
-- **`/approve`** — политика подтверждений (`ask`/`never`) с двухшаговым
-  подтверждением.
-- **Кнопки-пресеты** под финальным ответом: `buttonsPresets: [{label, prompt}]`.
-- `/sessions` показывает заголовки и холодных сессий (projection cache).
+```mermaid
+flowchart LR
+  subgraph DSH["DeepSeek Harness (web profile)"]
+    EV["session/event<br/>turn/end · assistant/message"]
+    W["approval / user-questions<br/>waterfalls"]
+    CM["commands · planMode<br/>workspaceRegistry · sessionController"]
+    LEDGER[("cost-meter<br/>ledger.json")]
+  end
 
-### Стоимость и бюджет (v0.8)
+  subgraph PLUGIN["dsh-max-notify"]
+    NOTIFY["notify + format"]
+    BOT["bot · commands · cards"]
+    INTER["interactions<br/>approve / questions"]
+    OUTBOX["outbox · limiter"]
+    HEALTH["health · audit · redact"]
+    COST["cost adapter"]
+  end
 
-- **`/budget`** (и `/cost`): бюджет, потрачено/осталось/период, стоимость
-  сегодня/месяц/всего; если бюджет в `dsh-cost-meter` выключен — подсказка.
-- **`/status`** и `/current` показывают стоимость за сегодня, стоимость сессии и
-  процент бюджета.
-- **Дайджест** включает стоимость и процент бюджета.
-- **Алерты бюджета** 80%/100% (`budgetAlertThresholds`) — один раз за период,
-  с сохранением в state и дедупликацией; 100% идёт critical-каналом.
-- Read-only: ledger `$DSH_HOME/storages/cost-meter/ledger.json` не изменяется;
-  нет файла/битая версия — просто нет блока стоимости.
-- Настройки: `costMeterEnabled`, `costMeterFile`, `budgetAlertEnabled`,
-  `budgetAlertThresholds`. Бюджет включается в настройках самого cost-meter.
+  MAX[("MAX Bot API<br/>platform-api2.max.ru")]
+
+  EV --> NOTIFY --> OUTBOX --> MAX
+  BOT <-->|long polling / replies| MAX
+  W --> INTER --> BOT
+  CM --> BOT
+  LEDGER --> COST --> BOT
+  OUTBOX --> HEALTH
+  PLUGIN -->|"0 runtime deps · node builtins"| DSH
+```
+
+Плагин не форкает DSH и не патчит ядро: он использует штатные швы
+`session/event`, waterfall-события approvals/questions, `sessionController`,
+`commands`, `planMode`, `workspaceRegistry` и read-only ledger `dsh-cost-meter`.
 
 ## Быстрый старт
 
@@ -126,14 +100,14 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 ./dsh-max-notify/install.sh              # профиль web (или: ./install.sh tui)
 ```
 
-Установка использует `dsh plugin --profile <p> add link:<путь>`: пакет
-добавляется в `dsh.profile.bundles`, его `cordis.patch.yml` вставляет строку
-`max-notify`, а DSH пересобирает профиль (HMR) или подхватывает при следующем
-запуске.
+Установка вызывает `dsh plugin --profile <p> add link:<путь>`, добавляет пакет в
+`dsh.profile.bundles`, а его `cordis.patch.yml` вставляет строку `max-notify`.
 
-**Приватные значения не коммитьте.** `botTokenFile`/`chatId`/`allowedUserIds`
-лучше держать в собственном `cordis.patch.yml` профиля
-(`$DSH_HOME/profiles/<p>/cordis.patch.yml`) как override строки с тем же `id`:
+<details>
+<summary><b>Приватная конфигурация (не коммитить)</b></summary>
+
+`botTokenFile` / `chatId` / `allowedUserIds` — в собственном
+`$DSH_HOME/profiles/<p>/cordis.patch.yml`, как override строки с тем же `id`:
 
 ```yaml
 - id: max-notify
@@ -143,11 +117,46 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
     allowedUserIds: [987654321]
 ```
 
-Конфиг в override **заменяет объект целиком**.
+Конфиг в override **заменяет объект целиком**. В репозитории нет ни токенов,
+ни chat/user id.
+
+</details>
+
+## Команды в MAX
+
+| Команда | Действие |
+|---|---|
+| `/status`, `/current` | Сессия, модель, папка, стоимость, бюджет |
+| `/stop` | Остановить текущий ход |
+| `/sessions`, `/use N` | Список сессий и переключение (включая холодные — с заголовками) |
+| `/new [папка]` | Новая сессия (папка создаётся) |
+| `/model [N\|provider/model]` | Каталог моделей и переключение |
+| `/rename <название>`, `/fork`, `/compact` | Переименовать / ответвить / сжать историю |
+| `/plan`, `/plan off`, `/plan status` | Режим плана; review плана приходит файлом `plan.md` с кнопками |
+| `/search <текст>` | Поиск по содержимому сессий |
+| `/archive`, `/pin`, `/unpin` | Архивировать текущую / закрепить / открепить |
+| `/workspace [N\|add <path>]` | Рабочие папки; папка для следующих `/new` |
+| `/approve` | Политика подтверждений `ask`/`never` (двухшаговое подтверждение) |
+| `/mode`, `/mute`, `/unmute`, `/digest` | Режимы уведомлений, тишина, дайджест |
+| `/budget`, `/cost` | Стоимость и бюджет из `dsh-cost-meter` |
+| `/health`, `/version`, `/ping`, `/help` | Диагностика и справка |
+
+Текст без `/` уходит агенту как следующее сообщение. Под финальным ответом —
+кнопки «Продолжить», «Стоп», «Открыть GUI» и настраиваемые пресеты.
+
+## Надёжность и безопасность
+
+- **Durable outbox** — финальные ответы и уведомления переживают недоступность MAX и reload; retry с backoff, TTL, приоритеты, дедуп по `session:turn:seq`.
+- **At-least-once polling** — marker сдвигается после обработки; обработанные update-id сохраняются, повторная доставка не дублирует промпты.
+- **Лимитер** — 2 запроса/с на чат, 30/с суммарно; approvals/ошибки идут critical-каналом.
+- **Fail-closed** — без `allowedUserIds`/`allowedChatIds` команды, approvals и polling выключены; уведомления работают. `allowUnlistedUsers: true` — осознанный escape.
+- **Approvals** — таймаут 120 с, «запомнить» только для явного `approvalRememberTools`, audit `$DSH_HOME/max-notify/audit.jsonl` (0600).
+- **Health/redaction** — `/health`, heartbeat-файл, redaction токенов в логах, rate-limit входящих.
 
 ## Конфигурация
 
-Все ключи — в `dsh-max-notify/cordis.patch.yml` (или в override профиля):
+<details>
+<summary><b>Все ключи (cordis.patch.yml / override профиля)</b></summary>
 
 | Ключ | По умолчанию | Смысл |
 |---|---|---|
@@ -156,9 +165,7 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 | `format` | `markdown` | `markdown` / `html` / текст |
 | `notify` | `true` | push-уведомления |
 | `disableLinkPreview` | `true` | отправляется **query-параметром** (требование MAX) |
-| `includeHeader` | `true` | строка `**DSH** · 22:15 · <заголовок>` |
-| `includeTitle` | `true` | заголовок сессии (`ctx.get('sessionTitle')`), иначе папка |
-| `includeSessionId` | `false` | короткий тег сессии в заголовке |
+| `includeHeader` / `includeTitle` / `includeSessionId` | `true` / `true` / `false` | заголовок сообщения и сессии |
 | `includeSubagents` | `false` | пересылать и дочерние агент-сессии |
 | `allowedUserIds` / `allowedChatIds` | env `MAX_ALLOWED_USER_IDS` / `..._CHAT_IDS` | allowlist получателя, fail-closed |
 | `skipReasons` | `[interrupted, forked]` | окончания хода, которые не пересылаются |
@@ -169,14 +176,12 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 | `polling` / `pollTimeoutSec` | `true` / `25` | long polling `GET /updates` (один поллер на токен) |
 | `interactive` | `true` | приём сообщений/кнопок и команды |
 | `approvalChannel` / `questionChannel` | `both` | `both` (MAX + GUI гонка), `max`, `gui` |
-| `buttons` / `webUrl` | `true` / env `DSH_WEB_URL` | кнопки под ответом и ссылка на GUI |
-| `buttonsPresets` | `[]` | пресеты-кнопки: `[{label, prompt}]` (до 4) |
+| `buttons` / `buttonsPresets` / `webUrl` | `true` / `[]` / env `DSH_WEB_URL` | кнопки, пресеты, ссылка на GUI |
 | `progress` / `progressDelayMs` / `progressThrottleMs` / `typing` | `true` / `2500` / `2000` / `true` | live-карточка прогресса |
 | `deliverables` | `true` | отправлять файлы из `present` вложениями |
 | `forwardImages` / `forwardToolImages` / `maxImages` | `true` / `true` / `4` | картинки из ответа и tool-результатов |
-| `receiveFiles` | `true` | принимать файлы/фото из MAX |
-| `inboxDir` | `<cwd>/max-inbox` | папка для входящих (поддерживает `%cwd%`) |
-| `maxIncomingFiles` / `maxIncomingBytes` | `4` / `25 MiB` | лимиты входящих вложений |
+| `receiveFiles` / `inboxDir` | `true` / `<cwd>/max-inbox` | приём файлов из MAX |
+| `maxIncomingFiles` / `maxIncomingBytes` | `4` / `25 MiB` | лимиты входящих |
 | `registerCommands` / `greetOnStart` | `true` / `true` | меню команд MAX и приветствие по Start |
 | `newSessionDir` | — | папка для `/new` (по умолчанию — папка активной сессии) |
 | `notifySubagents` / `notifyJobs` / `notifyGoals` / `notifyErrors` | `true` | уведомления о событиях |
@@ -184,97 +189,78 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 | `quietHours` | — | `{start: '23:00', end: '08:00'}` — без push ночью |
 | `digestEnabled` / `digestTime` | `false` / `21:00` | ежедневный дайджест |
 | `mode` | `all` | стартовый режим: `all`, `errors`, `mute` |
-| `stateFile` | `$DSH_HOME/max-notify/state.json` | marker, активная сессия, health, dedupe-ключи (вне репозитория) |
-| `outboxEnabled` / `outboxMaxItems` / `outboxTtlHours` | `true` / `200` / `48` | durable-очередь недоставленных сообщений |
-| `outboxFile` | `$DSH_HOME/max-notify/outbox.json` | файл outbox (вне репозитория) |
-| `ratePerChatPerSecond` / `rateGlobalPerSecond` | `2` / `30` | глобальный лимитер MAX API |
+| `stateFile` | `$DSH_HOME/max-notify/state.json` | marker, сессии, health, dedupe-ключи |
+| `outboxEnabled` / `outboxMaxItems` / `outboxTtlHours` | `true` / `200` / `48` | durable-очередь |
+| `ratePerChatPerSecond` / `rateGlobalPerSecond` | `2` / `30` | глобальный лимитер |
 | `approvalTimeoutMs` | `120000` | таймаут approvals, `0` — ждать бесконечно |
-| `approvalRememberTools` / `approvalRememberMs` | `[]` / `3600000` | «запомнить разрешение» только для явно перечисленных инструментов |
-| `allowUnlistedUsers` | `false` | разрешить интерактив без allowlist (небезопасно) |
-| `incomingPerMinute` / `incomingBurst` | `30` / `10` | защита от флуда входящих |
-| `auditLog` / `auditFile` | `true` / `$DSH_HOME/max-notify/audit.jsonl` | аудит approvals/вопросов/команд |
-| `heartbeatFile` | — | JSON-файл здоровья для внешнего мониторинга |
+| `approvalRememberTools` / `approvalRememberMs` | `[]` / `3600000` | «запомнить» только для явных инструментов |
+| `allowUnlistedUsers` | `false` | интерактив без allowlist (небезопасно) |
+| `incomingPerMinute` / `incomingBurst` | `30` / `10` | защита от флуда |
+| `auditLog` / `auditFile` | `true` / `$DSH_HOME/max-notify/audit.jsonl` | аудит решений |
+| `heartbeatFile` | — | JSON здоровья для мониторинга |
 | `costMeterEnabled` / `costMeterFile` | `true` / `$DSH_HOME/storages/cost-meter/ledger.json` | read-only адаптер стоимости |
-| `budgetAlertEnabled` / `budgetAlertThresholds` | `true` / `[80, 100]` | алерты бюджета (один раз за период) |
+| `budgetAlertEnabled` / `budgetAlertThresholds` | `true` / `[80, 100]` | алерты бюджета (раз за период) |
+
+</details>
 
 ## Структура
 
+<details>
+<summary><b>Файлы плагина</b></summary>
+
 | Путь | Что это |
 |---|---|
-| `dsh-max-notify/index.js` | cordis-плагин: `name`, `inject`, `apply(ctx, config)` |
-| `dsh-max-notify/lib/transport.mjs` | клиент MAX Bot API на `node:https` с встроенным CA |
-| `dsh-max-notify/lib/extract.mjs` | видимый текст ассистента и разбор `turn/end` |
-| `dsh-max-notify/lib/format.mjs` | заголовок и тело уведомления |
-| `dsh-max-notify/certs/ca-chain.pem` | Russian Trusted Sub CA + Root CA |
-| `dsh-max-notify/cordis.patch.yml` | bundle-patch: вставка строки `max-notify` |
-| `dsh-max-notify/lib/bot.mjs` | long polling, команды, маршрутизация сообщений |
-| `dsh-max-notify/lib/interactions.mjs` | approvals/вопросы/кнопки, гонка MAX vs GUI |
-| `dsh-max-notify/lib/progress.mjs` | live-карточка прогресса и typing |
-| `dsh-max-notify/lib/deliverables.mjs` | uploads файлов из `present` |
-| `dsh-max-notify/lib/state.mjs` | marker, сессии, health, dedupe-ключи, approval-правила (вне репозитория) |
-| `dsh-max-notify/lib/limits.mjs` | глобальный лимитер MAX API (2/с на чат, 30/с) |
-| `dsh-max-notify/lib/outbox.mjs` | durable-очередь с retry и дедупликацией |
-| `dsh-max-notify/lib/health.mjs` | health snapshot для `/health` и heartbeat |
-| `dsh-max-notify/lib/audit.mjs` | JSONL-аудит решений (0600) |
-| `dsh-max-notify/lib/redact.mjs` | redaction токенов в логах |
-| `dsh-max-notify/lib/cost-meter.mjs` | read-only адаптер ledger dsh-cost-meter |
-| `dsh-max-notify/CHANGELOG.md` | история версий |
-| `ROADMAP.md` | дорожная карта 0.6 → 1.0 |
-| `dsh-max-notify/lib/policy.mjs` | режимы уведомлений и тихие часы |
-| `dsh-max-notify/lib/observer.mjs` | события, TODO-прогресс и дайджест |
-| `dsh-max-notify/tools/` | `pair.mjs` (chat_id), `send-test.mjs` |
-| `dsh-max-notify/test/` | `node --test` (187 тестов) |
-| `research/` | как писать плагины DSH, MAX Bot API, каталог фич |
+| `dsh-max-notify/index.js` | cordis-плагин: конфиг, проводка, сессии, дедуп финала |
+| `lib/transport.mjs` | MAX Bot API на `node:https` + встроенный Russian Trusted CA |
+| `lib/bot.mjs` | long polling, команды, маршрутизация, flood protection |
+| `lib/interactions.mjs` | approvals/questions, план-review, гонка MAX↔GUI |
+| `lib/progress.mjs` | live-карточка и typing |
+| `lib/deliverables.mjs`, `lib/incoming.mjs` | файлы в обе стороны |
+| `lib/outbox.mjs`, `lib/limits.mjs` | durable-очередь и лимитер |
+| `lib/state.mjs`, `lib/health.mjs`, `lib/audit.mjs`, `lib/redact.mjs` | состояние, health, аудит, секреты |
+| `lib/cost-meter.mjs` | read-only ledger `dsh-cost-meter` |
+| `lib/observer.mjs`, `lib/policy.mjs` | события, дайджест, режимы, алерты бюджета |
+| `certs/ca-chain.pem` | Russian Trusted Sub CA + Root CA |
+| `test/` | 187 тестов (`node --test`) |
+| `tools/` | `pair.mjs`, `send-test.mjs`, `smoke.mjs` |
+
+</details>
 
 ## Ограничения
 
-- Пересылается только финальный текст хода (не стрим и не tool-шаги).
+<details>
+<summary><b>Что важно знать</b></summary>
+
+- Пересылается только финальный текст хода, не стрим и не tool-шаги.
 - MAX markdown не поддерживает списки/таблицы: `- пункт` отрисуется текстом.
-- **Fail-closed**: без `allowedUserIds`/`allowedChatIds` интерактив выключен
-  (уведомления идут). Это защита от «кто угодно управляет агентом»; вернуть
-  старое поведение можно `allowUnlistedUsers: true`, но тогда бот открыт всем,
-  кто знает чат.
-- Приём сообщений — long polling (`GET /updates`): **один поллер на токен**;
-  запущенный `tools/pair.mjs` конкурирует с плагином за события. Webhook —
-  в дорожной карте (0.9): MAX требует публичный HTTPS :443 с доверенным
-  сертификатом; nginx с Let's Encrypt на этом сервере уже готов.
-- Approvals по умолчанию истекают через 120 с (fail-closed). Если нужно ждать
-  дольше — `approvalTimeoutMs: 0`.
-- Outbox гарантирует **at-least-once**: при сбое между отправкой и записью
-  ключа возможен повтор; дедупликация закрывает типовые случаи (reload,
-  повторный батч polling).
-- Approvals/вопросы в режиме `both` гоняются с Web GUI: кто ответил первым, тот
-  и прав; карточка в проигравшем канале помечается «решено в другом месте».
-- `interactive`/`polling` требуют `sessionController` (есть в web-профиле);
-  без него остаются уведомления и кнопки, но не команды/инъекция промптов.
-- **Всё, что агент пишет, уходит на серверы MAX.** Для чувствительных сессий —
-  `enabled: false` или `dryRun: true`.
-- Один `chatId` на строку `max-notify`; для нескольких получателей — отдельные
-  профили/патчи.
+- Fail-closed: без allowlist интерактив выключен (уведомления идут). `allowUnlistedUsers: true` открывает бота всем, кто знает чат.
+- Long polling — **один поллер на токен**; `tools/pair.mjs` конкурирует с плагином за события. Webhook — в roadmap 0.9 (MAX требует публичный HTTPS :443; nginx с Let's Encrypt готов).
+- Approvals по умолчанию истекают через 120 с; `approvalTimeoutMs: 0` — ждать бесконечно.
+- Outbox гарантирует **at-least-once**: редкий повтор возможен при сбое между отправкой и записью ключа; типовые reload/батч закрыты дедупом.
+- Один `chatId` на строку `max-notify`; для нескольких получателей — отдельные профили/патчи.
+- Бюджет и алерты работают только когда Budget включён в настройках `dsh-cost-meter`.
+
+</details>
 
 ## Проверка
 
 ```bash
-cd dsh-max-notify && npm test          # 187 unit test
+cd dsh-max-notify && npm test          # 187 unit tests
+npm run check                          # синтаксис всех модулей
+node tools/smoke.mjs --env ../.env     # read-only: GET /me, state, outbox
 node tools/send-test.mjs "проверка"    # реальная отправка
-DSH_HOME=$HOME/.dsh dsh --profile web --dump-config | grep -A12 'id: max-notify'
 ```
 
-TLS-цепочка проверена `openssl verify` (leaf → Russian Trusted Sub CA →
-Russian Trusted Root CA), живая отправка — HTTP 200 с `mid`, серверный
-markdown-разбор (`strong`, `monospaced`, `link`) подтверждён `GET /messages`.
+TLS-цепочка проверена `openssl verify` (leaf → Russian Trusted Sub CA → Root CA);
+живая отправка — HTTP 200 с `mid`, markdown-разбор подтверждён `GET /messages`.
 
-## Исследование
+## Документация
 
-- [research/dsh/plugin-api.md](research/dsh/plugin-api.md) — как устроены
-  плагины DSH (entry, config, события, установка/HMR), 900+ строк с file:line.
-- [research/max/max-api.md](research/max/max-api.md) — MAX Bot API: auth, TLS,
-  сообщения, лимиты, pairing.
-- [research/max/max-interactive.md](research/max/max-interactive.md) —
-  интерактивный бот: `/updates`, webhook, правка сообщений, кнопки/callback,
-  команды, uploads, typing.
-- [research/messenger-features.md](research/messenger-features.md) — каталог
-  возможностей и план развития (двусторонний чат, approvals, live-прогресс).
+- [ROADMAP.md](ROADMAP.md) — план 0.9 → 1.0.
+- [CHANGELOG.md](dsh-max-notify/CHANGELOG.md) — история версий.
+- [SECURITY.md](SECURITY.md) — секреты, allowlist, аудит.
+- [research/](research/) — устройство DSH-плагинов, MAX Bot API, каталог фич.
+- [dsh-max-notify/README.md](dsh-max-notify/README.md) — справка по пакету (EN).
 
 ## Лицензия
 
