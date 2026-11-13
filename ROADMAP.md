@@ -1,6 +1,6 @@
 # Дорожная карта `dsh-max-notify`
 
-Текущая версия: **1.6.1** (аудит + вынос конфига). План рассчитан на
+Текущая версия: **1.7.0** (техдолг: модули, state/outbox, CI, тесты). План рассчитан на
 DSH 0.2.x (проверено на 0.2.2-rc.2, Node 24.22+).
 
 Цель: из «уведомлятора + пульта» сделать надёжный продукт: доставка без
@@ -22,7 +22,8 @@ DSH 0.2.x (проверено на 0.2.2-rc.2, Node 24.22+).
 | **1.4** | UX-аудит | компактный вывод, 12 команд, тихие уведомления, feature-audit | ✅ реализовано |
 | **1.5** | Брифинг и статус | `/brief`, компактный `/status`, деньги/склонения | ✅ реализовано |
 | **1.6** | Аудит и hardening | rc.2 routes, allowlist, token hosts, durable webhook, 358 тестов | ✅ реализовано |
-| 1.7+ | Backlog | распил `index.js`, observability, автопилот, Mini App, proxy, каталог | backlog |
+| **1.7** | Техдолг | config/forwarding modules, dead settings, state/outbox durability, CI matrix | ✅ реализовано |
+| 1.8+ | Backlog | полный распил `index.js`, observability, автопилот, Mini App, proxy, каталог | backlog |
 
 ## 0.6 — сделано
 

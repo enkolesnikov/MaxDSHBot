@@ -38,7 +38,8 @@ import { createDeliverables } from './lib/deliverables.mjs'
 import { createBot } from './lib/bot.mjs'
 import { createPolicy } from './lib/policy.mjs'
 import { createObserver } from './lib/observer.mjs'
-import { collectMessageImages, extractImageReferences } from './lib/images.mjs'
+import { collectMessageImages } from './lib/images.mjs'
+import { createForwarding } from './lib/forwarding.mjs'
 import { buildTableFiles } from './lib/tables.mjs'
 import {
   createSettingsApi,
@@ -53,7 +54,7 @@ import { classifyUploadType, formatBytes, resolveSendFile, runGitDiff } from './
 import { createIncoming } from './lib/incoming.mjs'
 import { resolveSessionDir } from './lib/create-session.mjs'
 import { archivedIdsOf, filterArchivedSessions } from './lib/sessions.mjs'
-import { createLimiter, PRIORITY } from './lib/limits.mjs'
+import { createLimiter } from './lib/limits.mjs'
 import { createOutbox, resolveOutboxFile } from './lib/outbox.mjs'
 import { createHealth } from './lib/health.mjs'
 import { createAudit, resolveAuditFile } from './lib/audit.mjs'
@@ -1479,92 +1480,14 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     health.update({ webhookSubscribed, webhookSubscriptionError })
   }
 
-  /** Paths already sent to MAX by the deliverables pipeline (per session). */
-  const imagesSent = new Map()
-
-  function noteSentImages(sessionId, paths) {
-    if (!Array.isArray(paths) || paths.length === 0) return
-    const key = String(sessionId ?? '')
-    const set = imagesSent.get(key) ?? new Set()
-    for (const path of paths) set.add(String(path))
-    imagesSent.set(key, set)
-  }
-
-  /**
-   * Images from the final answer: assistant image blocks plus images referenced
-   * in the visible markdown (local files relative to the session cwd, or URLs).
-   */
-  async function collectFinalImages(session, text, message, toolImageRefs = []) {
-    if (!config.forwardImages || config.maxImages <= 0) return []
-    const max = config.maxImages
-    const key = String(session?.id ?? '')
-    const seen = imagesSent.get(key) ?? new Set()
-    const attachments = []
-
-    const blockRefs = [...collectMessageImages(message), ...(Array.isArray(toolImageRefs) ? toolImageRefs : [])]
-    const seenIds = new Set()
-    for (const ref of blockRefs) {
-      const attachmentId = String(ref?.attachmentId ?? '')
-      if (attachmentId !== '' && seenIds.has(attachmentId)) continue
-      if (attachmentId !== '') seenIds.add(attachmentId)
-      if (attachments.length >= max) break
-      try {
-        const stored = await getService('attachments')?.readImage?.(ref)
-        if (!stored?.data) continue
-        const uploaded = await client.uploadMedia({
-          buffer: Buffer.from(stored.data),
-          filename: ref?.name ?? 'image.png',
-          type: 'image',
-        })
-        attachments.push({ type: 'image', payload: { token: uploaded.token } })
-      } catch (error) {
-        logger.warn('cannot forward an image from the final message: %s', error?.message || String(error))
-      }
-    }
-
-    const refs = extractImageReferences(text, session?.header?.cwd)
-    for (const file of refs.files) {
-      if (attachments.length >= max) break
-      if (seen.has(file)) continue
-      try {
-        const uploaded = await client.uploadMedia({ filePath: file, type: 'image' })
-        attachments.push({ type: 'image', payload: { token: uploaded.token } })
-        seen.add(file)
-      } catch (error) {
-        logger.warn('cannot forward image %s: %s', file, error?.message || String(error))
-      }
-    }
-    for (const url of refs.urls) {
-      if (attachments.length >= max) break
-      attachments.push({ type: 'image', payload: { url } })
-    }
-    imagesSent.set(key, seen)
-    return attachments
-  }
-
-  function finalKeyboard(session) {
-    if (!config.buttons) return undefined
-    const sessionId = String(session?.id ?? '')
-    if (!sessionId) return undefined
-    const rows = [
-      [
-        { type: 'callback', text: '▶️ Продолжить', payload: JSON.stringify({ t: 'qa', a: 'cont', s: sessionId }) },
-        { type: 'callback', text: '⏹ Стоп', payload: JSON.stringify({ t: 'qa', a: 'stop', s: sessionId }) },
-      ],
-    ]
-    const presets = Array.isArray(config.buttonsPresets) ? config.buttonsPresets.slice(0, 4) : []
-    for (let index = 0; index < presets.length; index += 2) {
-      rows.push(
-        presets.slice(index, index + 2).map((preset, offset) => ({
-          type: 'callback',
-          text: preset.label,
-          payload: JSON.stringify({ t: 'qa', a: 'preset', s: sessionId, i: index + offset }),
-        })),
-      )
-    }
-    if (config.webUrl) rows.push([{ type: 'link', text: '🖥 Открыть GUI', url: config.webUrl }])
-    return [{ type: 'inline_keyboard', payload: { buttons: rows } }]
-  }
+  // Final-message forwarding (image dedupe + inline keyboard) lives in its own module.
+  const { noteSentImages, collectFinalImages, finalKeyboard } = createForwarding({
+    client,
+    config,
+    logger,
+    state,
+    getService,
+  })
 
   async function deliver(session, text, reason, message, toolImageRefs = [], turn, seq) {
     if (!(await ensureTargetAllowed())) return

@@ -15,14 +15,23 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Node 24 is the release runtime; 20/22 are compatibility checks.
+    # The full suite is green on all three (the unref'd-timer test-runner
+    # cancellation was fixed with a test keepalive in interactions/voice).
     defaults:
       run:
         working-directory: dsh-max-notify
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22, 24]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      # Pinned to commit SHAs (tags are mutable). Both are v4.4.0, verified
+      # with `git ls-remote` / the GitHub commits API.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: '24'
+          node-version: ${{ matrix.node }}
       - name: Syntax check (all modules)
         run: npm run check
       - name: Unit tests

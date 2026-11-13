@@ -35,8 +35,9 @@
 
 ## Проверки
 
-- `npm test`: 358/358.
+- `npm test`: 400/400.
 - 1.6.1: `lib/config.mjs` вынесен из `index.js` (324 строки), поведение без изменений.
+- 1.7.0: `lib/forwarding.mjs`, dead settings removed, state/outbox durability, CI 20/22/24, transport 38; 400 тестов.
 - `npm run check`: OK; `npm pack --dry-run`: 45 файлов.
 - Live hot-reload: `transport=webhook`, `webhookActive=true`, `webhookSubscribed=true`,
   `/max/webhook` → 401 без секрета, `/max-notify/settings.json` → 401 без cookie.

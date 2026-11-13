@@ -1,6 +1,6 @@
 {
   "name": "dsh-max-notify",
-  "version": "1.6.1",
+  "version": "1.7.0",
   "description": "DSH → MAX messenger plugin: rc.2-safe webhook, hardened outbound/allowlist, compact UX, briefings, remote control, schedules, GUI settings, zero runtime deps.",
   "type": "module",
   "main": "index.js",
@@ -24,7 +24,7 @@
   ],
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "check": "node --check index.js && node --check lib/config.mjs && node --check lib/transport.mjs && node --check lib/extract.mjs && node --check lib/format.mjs && node --check lib/state.mjs && node --check lib/cards.mjs && node --check lib/interactions.mjs && node --check lib/progress.mjs && node --check lib/deliverables.mjs && node --check lib/bot.mjs && node --check lib/policy.mjs && node --check lib/observer.mjs && node --check lib/images.mjs && node --check lib/incoming.mjs && node --check lib/sessions.mjs && node --check lib/create-session.mjs && node --check lib/limits.mjs && node --check lib/outbox.mjs && node --check lib/health.mjs && node --check lib/audit.mjs && node --check lib/redact.mjs && node --check lib/cost-meter.mjs && node --check lib/webhook.mjs && node --check lib/tables.mjs && node --check lib/schedules.mjs && node --check lib/media.mjs && node --check lib/voice.mjs && node --check lib/settings.mjs && node --check lib/tts.mjs && node --check lib/workspace-tools.mjs && node --check lib/autonomy.mjs && node --check client/client.js"
+    "check": "node --check index.js && node --check lib/config.mjs && node --check lib/forwarding.mjs && node --check lib/transport.mjs && node --check lib/extract.mjs && node --check lib/format.mjs && node --check lib/state.mjs && node --check lib/cards.mjs && node --check lib/interactions.mjs && node --check lib/progress.mjs && node --check lib/deliverables.mjs && node --check lib/bot.mjs && node --check lib/policy.mjs && node --check lib/observer.mjs && node --check lib/images.mjs && node --check lib/incoming.mjs && node --check lib/sessions.mjs && node --check lib/create-session.mjs && node --check lib/limits.mjs && node --check lib/outbox.mjs && node --check lib/health.mjs && node --check lib/audit.mjs && node --check lib/redact.mjs && node --check lib/cost-meter.mjs && node --check lib/webhook.mjs && node --check lib/tables.mjs && node --check lib/schedules.mjs && node --check lib/media.mjs && node --check lib/voice.mjs && node --check lib/settings.mjs && node --check lib/tts.mjs && node --check lib/workspace-tools.mjs && node --check lib/autonomy.mjs && node --check client/client.js"
   },
   "engines": {
     "node": ">=20",

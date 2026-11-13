@@ -3,6 +3,11 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+// Keep the event loop alive on Node 20/22: the plugin uses unref'd approval
+// timers, and the test runner otherwise cancels pending tests.
+const keepAliveTimer = setInterval(() => {}, 1000)
+after(() => clearInterval(keepAliveTimer))
+
 
 import {
   DEFAULT_VOICE_MAX_BYTES,

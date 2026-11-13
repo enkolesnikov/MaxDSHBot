@@ -18,7 +18,7 @@
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/enkolesnikov/MaxDSHBot?style=flat-square"/></a>
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img alt="DSH" src="https://img.shields.io/badge/DSH-0.2.x-6C5CE7?style=flat-square"/></a>
   <a href="https://max.ru"><img alt="MAX" src="https://img.shields.io/badge/MAX-messenger-8B5CF6?style=flat-square"/></a>
-  <img alt="Tests" src="https://img.shields.io/badge/tests-358%20passed-2ecc71?style=flat-square"/>
+  <img alt="Tests" src="https://img.shields.io/badge/tests-400%20passed-2ecc71?style=flat-square"/>
   <a href="https://nodejs.org"><img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A524.9-339933?style=flat-square&logo=nodedotjs&logoColor=white"/></a>
   <img alt="Runtime dependencies" src="https://img.shields.io/badge/runtime%20deps-0-brightgreen?style=flat-square"/>
   <a href="https://github.com/enkolesnikov/MaxDSHBot/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/enkolesnikov/MaxDSHBot?style=flat-square"/></a>
@@ -182,6 +182,14 @@ MAX будет сам присылать обновления на публич�
 Если webServer/secret/public URL не сконфигурированы, плагин откатывается на
 long polling и пишет warning в лог. Официальная документация MAX:
 [webhooks](https://dev.max.ru/docs-api/methods/POST/subscriptions).
+
+## Техдолг 1.7
+
+- `index.js` 2051 → 1870 строк: config и forwarding вынесены в модули.
+- Удалена мёртвая HTML-страница настроек (~360 строк).
+- State/outbox: future-schema guard, fsync, corrupt-бэкапы, 0600/0700.
+- CI: Node 20/22/24, actions pinned by SHA; транспортные контрактные тесты
+  (38) на локальном HTTPS; всего 400 тестов.
 
 ## Аудит 1.6: rc.2, безопасность, надёжность
 
@@ -395,7 +403,7 @@ long polling и пишет warning в лог. Официальная докум�
 ## Проверка
 
 ```bash
-cd dsh-max-notify && npm test          # 358 unit tests
+cd dsh-max-notify && npm test          # 400 unit tests
 npm run check                          # синтаксис всех модулей
 node tools/smoke.mjs --env ../.env     # read-only: GET /me, state, outbox
 node tools/send-test.mjs "проверка"    # реальная отправка

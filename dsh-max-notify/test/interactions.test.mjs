@@ -1,7 +1,12 @@
-import test from 'node:test'
+import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import { normalizeConfig } from '../index.js'
 import { createInteractions } from '../lib/interactions.mjs'
+// Keep the event loop alive on Node 20/22: the plugin uses unref'd approval
+// timers, and the test runner otherwise cancels pending tests.
+const keepAliveTimer = setInterval(() => {}, 1000)
+after(() => clearInterval(keepAliveTimer))
+
 
 const tick = (ms = 10) => new Promise((resolve) => setTimeout(resolve, ms))
 

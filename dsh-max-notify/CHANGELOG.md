@@ -4,6 +4,30 @@ All notable changes to `dsh-max-notify` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] — 2026-11-13
+
+Закрытие техдолга после аудита 1.6.
+
+### Changed
+
+- `index.js` further decomposed: image/keyboard forwarding moved to
+  `lib/forwarding.mjs` (1947 → 1870 строк), config already in `lib/config.mjs`.
+- Removed the dead standalone HTML settings page/token handler from
+  `lib/settings.mjs` (779 → 416 строк); production JSON API unchanged.
+- `lib/state.mjs`/`lib/outbox.mjs`: future schema versions are preserved with
+  `.future-*` backups and writes are blocked, atomic writes are fsync'd,
+  corrupt files backed up, modes stay 0600/0700.
+- CI: Node 20/22/24 matrix, actions pinned to commit SHAs; green on all three
+  (test keepalive fixed Node 20/22 unref-timer cancellations).
+- Transport contract tests expanded to 38 (local HTTPS: retries, Retry-After,
+  uploads, downloads, host guard); total 400 tests.
+- `docs/audit-1.6.md` and `docs/ux.md` counts updated.
+
+### Deferred
+
+- Full `index.js` split (host facade/events/final-delivery), async shutdown,
+  provider-level state migration beyond schema guard, CDN-without-token test.
+
 ## [1.6.1] — 2026-11-13
 
 Tech-debt follow-up.

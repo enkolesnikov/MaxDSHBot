@@ -1,25 +1,20 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   SETTINGS_DEFAULTS,
-  SETTINGS_HTML_PATH,
   SETTINGS_JSON_PATH,
   SETTINGS_KEYS,
   createSettingsApi,
-  createSettingsHandler,
   loadSettings,
   mergeSettings,
   resolveSettingsFile,
-  safeEqual,
   sanitizeSettingsPatch,
   saveSettings,
 } from '../lib/settings.mjs'
-
-const silent = { info() {}, warn() {}, debug() {} }
 
 function tempDir(t) {
   const directory = mkdtempSync(join(tmpdir(), 'dsh-max-notify-settings-'))
@@ -54,35 +49,6 @@ function fakeResponse() {
       this.finished = true
     },
   }
-}
-
-function settingsUrl(path, token) {
-  return `${path}?token=${encodeURIComponent(token)}`
-}
-
-function makeHandler(file, { token = 'secret-token', getStatus = () => ({ transport: 'polling' }), getVersion = () => '1.2.3', maxBytes } = {}) {
-  return createSettingsHandler({ token, file, getStatus, getVersion, logger: silent, maxBytes })
-}
-
-async function get(handler, path, token, extra = {}) {
-  const res = fakeResponse()
-  await handler(fakeRequest({ method: 'GET', url: settingsUrl(path, token), ...extra }), res)
-  return res
-}
-
-async function post(handler, token, body, extra = {}) {
-  const res = fakeResponse()
-  await handler(
-    fakeRequest({
-      method: 'POST',
-      url: settingsUrl(SETTINGS_JSON_PATH, token),
-      body,
-      headers: { 'content-type': 'application/json' },
-      ...extra,
-    }),
-    res,
-  )
-  return res
 }
 
 test('SETTINGS_KEYS exposes exactly the safe allowlist with defaults', () => {
@@ -325,259 +291,6 @@ test('saveSettings rejects invalid values without touching the existing file', (
   assert.throws(() => saveSettings(file, { tableMaxFiles: 99 }), /invalid settings/)
   assert.throws(() => saveSettings(file, null), /invalid settings/)
   assert.deepEqual(loadSettings(file), { mode: 'all' })
-})
-
-test('safeEqual compares secrets with equal length semantics and fails closed', () => {
-  assert.equal(safeEqual('abc', 'abc'), true)
-  assert.equal(safeEqual('abc', 'abd'), false)
-  assert.equal(safeEqual('abc', 'abcd'), false)
-  assert.equal(safeEqual(undefined, 'abc'), false)
-  assert.equal(safeEqual('', ''), false)
-})
-
-test('the handler rejects a missing, wrong or unconfigured token with 401', async (t) => {
-  const file = join(tempDir(t), 'config.json')
-  const handler = makeHandler(file, { token: 'top-secret' })
-  for (const url of [SETTINGS_HTML_PATH, SETTINGS_JSON_PATH, settingsUrl(SETTINGS_JSON_PATH, 'wrong')]) {
-    const res = fakeResponse()
-    await handler(fakeRequest({ url }), res)
-    assert.equal(res.statusCode, 401)
-    assert.match(res.headers['content-type'], /application\/json/)
-    assert.deepEqual(JSON.parse(res.body), { ok: false, error: 'unauthorized' })
-    assert.doesNotMatch(res.body, /top-secret/)
-  }
-
-  const unconfigured = createSettingsHandler({ file, logger: silent })
-  const res = fakeResponse()
-  await unconfigured(fakeRequest({ url: settingsUrl(SETTINGS_JSON_PATH, 'anything') }), res)
-  assert.equal(res.statusCode, 401)
-  assert.doesNotMatch(res.body, /anything/)
-})
-
-test('a bad token is checked before the route so unknown paths do not leak either', async (t) => {
-  const file = join(tempDir(t), 'config.json')
-  const handler = makeHandler(file)
-  const unauthorized = fakeResponse()
-  await handler(fakeRequest({ url: '/max-notify/other' }), unauthorized)
-  assert.equal(unauthorized.statusCode, 401)
-
-  const notFound = await get(handler, '/max-notify/other', 'secret-token')
-  assert.equal(notFound.statusCode, 404)
-})
-
-test('GET /max-notify/settings returns a dark standalone HTML page', async (t) => {
-  const directory = tempDir(t)
-  const file = join(directory, 'config.json')
-  saveSettings(file, {
-    mode: 'errors',
-    tableMaxFiles: 2,
-    quietHours: { start: '23:00', end: '07:00' },
-    voiceModel: '<img src=x onerror=alert(1)>',
-  })
-  const handler = createSettingsHandler({
-    token: 'tok&en',
-    file,
-    getStatus: () => ({ transport: 'webhook', note: '<script>status</script>' }),
-    getVersion: () => '9.9.9',
-    logger: silent,
-  })
-  const res = await get(handler, SETTINGS_HTML_PATH, 'tok&en')
-  assert.equal(res.statusCode, 200)
-  assert.match(res.headers['content-type'], /text\/html/)
-  assert.match(res.headers['content-security-policy'], /default-src 'none'/)
-  assert.match(res.body, /<style>/)
-  assert.ok(res.body.includes('id="settings-form"'))
-  assert.ok(res.body.includes('data-endpoint="/max-notify/settings.json?token=tok%26en"'))
-  assert.match(res.body, /<option value="errors" selected>/)
-  assert.ok(res.body.includes('value="23:00"'))
-  assert.ok(res.body.includes('value="07:00"'))
-  assert.ok(res.body.includes('value="2"'))
-  assert.ok(res.body.includes('9.9.9'))
-  assert.ok(res.body.includes('Сохранить'))
-  assert.ok(res.body.includes('&lt;script&gt;status&lt;/script&gt;'))
-  assert.ok(!res.body.includes('<script>status'))
-  assert.ok(res.body.includes('voiceTranscribe'))
-  assert.ok(!res.body.includes('<img src=x'))
-  assert.doesNotMatch(res.body, /<link\b|<script[^>]+src=/)
-})
-
-test('GET HTML shows defaults when the overlay file does not exist', async (t) => {
-  const file = join(tempDir(t), 'missing.json')
-  const handler = makeHandler(file)
-  const res = await get(handler, SETTINGS_HTML_PATH, 'secret-token')
-  assert.equal(res.statusCode, 200)
-  assert.match(res.body, /<option value="all" selected>/)
-  assert.ok(res.body.includes('value="21:00"'))
-  assert.ok(res.body.includes('voiceTranscribe'))
-  assert.ok(res.body.includes('value="120000"'))
-})
-
-test('GET /max-notify/settings.json returns values, status and version', async (t) => {
-  const file = join(tempDir(t), 'config.json')
-  saveSettings(file, { mode: 'mute' })
-  const status = { transport: 'polling', users: 2 }
-  const handler = makeHandler(file, { getStatus: () => status, getVersion: async () => '2.0.0' })
-  const res = await get(handler, SETTINGS_JSON_PATH, 'secret-token')
-  assert.equal(res.statusCode, 200)
-  assert.match(res.headers['cache-control'], /no-store/)
-  const data = JSON.parse(res.body)
-  assert.equal(data.ok, true)
-  assert.deepEqual(data.status, status)
-  assert.equal(data.version, '2.0.0')
-  assert.equal(data.values.mode, 'mute')
-  assert.equal(data.values.digestTime, '21:00')
-  assert.equal(data.values.mode, 'mute')
-  assert.deepEqual(data.values.buttonsPresets, [])
-  assert.equal(data.values.quietHours, null)
-})
-
-test('status/version getters that throw do not break the JSON API', async (t) => {
-  const file = join(tempDir(t), 'config.json')
-  const handler = makeHandler(file, {
-    getStatus: () => {
-      throw new Error('status boom')
-    },
-    getVersion: async () => {
-      throw new Error('version boom')
-    },
-  })
-  const res = await get(handler, SETTINGS_JSON_PATH, 'secret-token')
-  assert.equal(res.statusCode, 200)
-  const data = JSON.parse(res.body)
-  assert.equal(data.ok, true)
-  assert.equal(data.status, null)
-  assert.equal(data.version, null)
-})
-
-test('POST settings.json validates, merges with the overlay and saves atomically', async (t) => {
-  const directory = tempDir(t)
-  const file = join(directory, 'config.json')
-  const handler = makeHandler(file, { getStatus: () => ({ transport: 'polling' }), getVersion: () => '1.0.0' })
-
-  const first = await post(handler, 'secret-token', {
-    mode: 'mute',
-    tableMaxFiles: '3',
-    digestTime: '06:30',
-    botToken: 'do-not-save',
-  })
-  assert.equal(first.statusCode, 200)
-  const firstData = JSON.parse(first.body)
-  assert.equal(firstData.ok, true)
-  assert.equal(firstData.restartRequired, true)
-  assert.equal(firstData.values.mode, 'mute')
-  assert.equal(firstData.values.tableMaxFiles, 3)
-  assert.equal(firstData.values.digestTime, '06:30')
-  assert.equal(firstData.values.notify, true)
-  assert.equal(firstData.ignored.length, 1)
-  assert.match(firstData.ignored[0], /botToken/)
-  assert.deepEqual(loadSettings(file), { mode: 'mute', tableMaxFiles: 3, digestTime: '06:30' })
-  assert.equal(statSync(file).mode & 0o777, 0o600)
-  assert.deepEqual(
-    readdirSync(directory).filter((name) => name.endsWith('.tmp')),
-    [],
-  )
-
-  const second = await post(handler, 'secret-token', { threads: false })
-  assert.equal(second.statusCode, 200)
-  const secondData = JSON.parse(second.body)
-  assert.equal(secondData.values.mode, 'mute')
-  assert.equal(secondData.values.threads, false)
-  assert.deepEqual(loadSettings(file), { mode: 'mute', tableMaxFiles: 3, digestTime: '06:30', threads: false })
-})
-
-test('POST with only unknown keys succeeds, reports them and keeps the file unchanged', async (t) => {
-  const file = join(tempDir(t), 'config.json')
-  saveSettings(file, { mode: 'errors' })
-  const handler = makeHandler(file)
-  const res = await post(handler, 'secret-token', { botToken: 'leak', chatId: '123' })
-  assert.equal(res.statusCode, 200)
-  const data = JSON.parse(res.body)
-  assert.equal(data.ok, true)
-  assert.equal(data.values.mode, 'errors')
-  assert.equal(data.ignored.length, 2)
-  assert.deepEqual(loadSettings(file), { mode: 'errors' })
-})
-
-test('POST rejects invalid JSON, non-object JSON and invalid values with 400', async (t) => {
-  const directory = tempDir(t)
-  const file = join(directory, 'config.json')
-  const handler = makeHandler(file)
-
-  const invalidJson = await post(handler, 'secret-token', '{oops')
-  assert.equal(invalidJson.statusCode, 400)
-  assert.equal(JSON.parse(invalidJson.body).error, 'invalid JSON')
-
-  const empty = await post(handler, 'secret-token', '')
-  assert.equal(empty.statusCode, 400)
-
-  const array = await post(handler, 'secret-token', [1, 2, 3])
-  assert.equal(array.statusCode, 400)
-  assert.match(JSON.parse(array.body).errors[0], /object/)
-
-  const invalidValue = await post(handler, 'secret-token', { mode: 'mute', tableMaxFiles: 99 })
-  assert.equal(invalidValue.statusCode, 400)
-  const data = JSON.parse(invalidValue.body)
-  assert.equal(data.ok, false)
-  assert.ok(data.errors.some((message) => message.startsWith('tableMaxFiles:')))
-  assert.equal(existsSync(file), false)
-})
-
-test('POST rejects a body over 64 KiB with 413', async (t) => {
-  const directory = tempDir(t)
-  const file = join(directory, 'config.json')
-  const handler = makeHandler(file)
-  const oversized = JSON.stringify({ voiceModel: 'x'.repeat(70 * 1024) })
-  const res = await post(handler, 'secret-token', oversized)
-  assert.equal(res.statusCode, 413)
-  assert.equal(JSON.parse(res.body).error, 'request body too large')
-  assert.equal(existsSync(file), false)
-})
-
-test('POST rejects a declared oversized content-length before reading', async (t) => {
-  const file = join(tempDir(t), 'config.json')
-  const handler = makeHandler(file)
-  const res = await post(handler, 'secret-token', '{}', { headers: { 'content-type': 'application/json', 'content-length': '999999' } })
-  assert.equal(res.statusCode, 413)
-})
-
-test('an aborted POST body is rejected instead of hanging the handler', async (t) => {
-  const file = join(tempDir(t), 'config.json')
-  const handler = makeHandler(file)
-  const req = new EventEmitter()
-  req.method = 'POST'
-  req.url = settingsUrl(SETTINGS_JSON_PATH, 'secret-token')
-  req.headers = {}
-  req.resume = () => {}
-  const res = fakeResponse()
-  queueMicrotask(() => req.emit('aborted'))
-  await handler(req, res)
-  assert.equal(res.statusCode, 400)
-  assert.equal(JSON.parse(res.body).error, 'cannot read request body')
-})
-
-test('POST answers 500 when the settings file cannot be written', async (t) => {
-  const directory = tempDir(t)
-  const blocker = join(directory, 'blocker')
-  writeFileSync(blocker, 'not a directory')
-  const handler = makeHandler(join(blocker, 'config.json'))
-  const res = await post(handler, 'secret-token', { mode: 'mute' })
-  assert.equal(res.statusCode, 500)
-  assert.deepEqual(JSON.parse(res.body), { ok: false, error: 'cannot save settings' })
-})
-
-test('unsupported methods and write access to the HTML route answer 405', async (t) => {
-  const file = join(tempDir(t), 'config.json')
-  const handler = makeHandler(file)
-
-  const put = fakeResponse()
-  await handler(fakeRequest({ method: 'PUT', url: settingsUrl(SETTINGS_JSON_PATH, 'secret-token') }), put)
-  assert.equal(put.statusCode, 405)
-  assert.equal(put.headers.allow, 'GET, POST')
-
-  const htmlPost = fakeResponse()
-  await handler(fakeRequest({ method: 'POST', url: settingsUrl(SETTINGS_HTML_PATH, 'secret-token'), body: {} }), htmlPost)
-  assert.equal(htmlPost.statusCode, 405)
-  assert.equal(htmlPost.headers.allow, 'GET')
 })
 
 test('legacy createSettingsApi stays compatible with the DSH client integration', async (t) => {

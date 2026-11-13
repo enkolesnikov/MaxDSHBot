@@ -77,6 +77,14 @@ Published on npm: https://www.npmjs.com/package/dsh-max-notify
   budget alerts (80/100 by default) fire once per period and survive reloads.
   `costMeterFile`, `budgetAlertEnabled`, `budgetAlertThresholds` configure it.
 
+## Tech-debt 1.7
+
+- `index.js` 2051 → 1870 lines: config/forwarding modules extracted.
+- Dead standalone HTML settings page removed (~360 lines).
+- State/outbox future-schema guard, fsync, corrupt backups, 0600/0700.
+- CI Node 20/22/24 with SHA-pinned actions; 38 transport contract tests, 400
+  total.
+
 ## Audit 1.6: rc.2 and hardening
 
 - DSH 0.2.2-rc.2: routes are registered after `webServer` activation through
@@ -154,7 +162,7 @@ for per-run `new` sessions, the title plus a recent delivery receipt.
 | `lib/autonomy.mjs` | schedule autonomy policies/matching |
 | `lib/settings.mjs` | GUI settings validation/overlay/API |
 | `client/client.js` | hand-written settings page bundle |
-| `test/*.test.mjs` | `node --test` (358 unit tests) |
+| `test/*.test.mjs` | `node --test` (400 unit tests) |
 
 ## Config
 

@@ -8,14 +8,106 @@
  *  - `pendingCards` — approval/question cards that must be marked stale after a reload;
  *  - `approvalRules`— explicitly remembered tool approvals (`/approve`-style scope);
  *  - `schemaVersion`— migration marker (v1 state loads unchanged).
+ *
+ * Durability contract:
+ *  - writes are atomic (unique 0600 tmp file in a 0700 directory → fsync →
+ *    rename → directory fsync), so a crash can never leave truncated JSON;
+ *  - a newer `schemaVersion` (written by a future release) is never interpreted
+ *    or overwritten: it is backed up to `<file>.future-<ts>`, a warning is
+ *    logged and persistence stays disabled until the operator upgrades.
  */
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  closeSync,
+  copyFileSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 
 export const STATE_SCHEMA_VERSION = 2
 const PROCESSED_LIMIT = 1000
 const PROCESSED_TTL_MS = 7 * 24 * 60 * 60 * 1000
+
+/** Parse a stored schema marker; `undefined` means a legacy file without one. */
+function storedSchemaVersionOf(value) {
+  if (value === undefined || value === null || value === '') return undefined
+  const version = Number(value)
+  return Number.isFinite(version) ? version : undefined
+}
+
+/**
+ * Best-effort fsync of a directory so the preceding rename is durable after a
+ * crash. Opening a directory read-only works on POSIX; platforms that refuse it
+ * are ignored — the data file itself has already been fsynced.
+ */
+function fsyncDirectory(directory) {
+  let fd
+  try {
+    fd = openSync(directory, 'r')
+    fsyncSync(fd)
+  } catch {
+    // directory fsync is not portable; the file fsync is the hard guarantee
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd)
+      } catch {
+        // already closed
+      }
+    }
+  }
+}
+
+/**
+ * Crash-safe atomic write with private permissions: unique tmp file next to the
+ * target, fsync of the file, rename over the target, fsync of the directory.
+ * Throws on failure so callers can log and keep running.
+ */
+function writeFileAtomic(path, contents) {
+  const directory = dirname(path)
+  // The state holds private chat ids: keep the directory 0700 even when an older
+  // release or a permissive umask created it with broader bits.
+  mkdirSync(directory, { recursive: true, mode: 0o700 })
+  try {
+    chmodSync(directory, 0o700)
+  } catch {
+    // best effort (some filesystems do not support chmod)
+  }
+  const tmp = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`
+  let fd
+  try {
+    fd = openSync(tmp, 'w', 0o600)
+    chmodSync(tmp, 0o600)
+    writeFileSync(fd, contents)
+    fsyncSync(fd)
+    closeSync(fd)
+    fd = undefined
+    renameSync(tmp, path)
+  } catch (error) {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd)
+      } catch {
+        // already closed
+      }
+    }
+    try {
+      unlinkSync(tmp)
+    } catch {
+      // the tmp file may not exist
+    }
+    throw error
+  }
+  fsyncDirectory(directory)
+}
 
 /** Resolve the state file: explicit config path, or `$DSH_HOME/max-notify/state.json`. */
 export function resolveStateFile(config = {}) {
@@ -55,9 +147,58 @@ export function createState({ file, logger, chatId } = {}) {
     messageSessions: {},
   }
 
+  let storedSchemaVersion
+  let persistenceBlocked = false
+  let blockedSaveWarned = false
+  let loaded
+
   try {
-    const parsed = JSON.parse(readFileSync(file, 'utf8'))
-    if (parsed && typeof parsed === 'object') {
+    loaded = JSON.parse(readFileSync(file, 'utf8'))
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      // Corrupt JSON only: keep the broken file for post-mortem, then start fresh.
+      logger?.warn?.('MAX state file %s is corrupt; starting fresh (%s)', file, error?.message || String(error))
+      try {
+        renameSync(file, `${file}.corrupt-${Date.now()}`)
+      } catch {
+        // keep the original if it cannot be moved
+      }
+    } else if (error?.code !== 'ENOENT') {
+      // A permission/IO error is not corruption: never rename a file that could
+      // not be read — it may still be valid.
+      logger?.warn?.('cannot read MAX state file %s: %s', file, error?.message || String(error))
+    }
+  }
+
+  if (loaded && typeof loaded === 'object' && !Array.isArray(loaded)) {
+    storedSchemaVersion = storedSchemaVersionOf(loaded.schemaVersion)
+    if (storedSchemaVersion !== undefined && storedSchemaVersion > STATE_SCHEMA_VERSION) {
+      // A future release owns this file: preserve it byte-for-byte and disable
+      // persistence instead of silently downgrading/overwriting unknown fields.
+      persistenceBlocked = true
+      logger?.warn?.(
+        'MAX state file %s uses schemaVersion %d but this plugin supports %d; preserving the file, starting empty and disabling persistence until the plugin is upgraded',
+        file,
+        storedSchemaVersion,
+        STATE_SCHEMA_VERSION,
+      )
+      try {
+        const backup = `${file}.future-${Date.now()}`
+        copyFileSync(file, backup)
+        try {
+          chmodSync(backup, 0o600)
+        } catch {
+          // best effort
+        }
+      } catch (error) {
+        logger?.warn?.('cannot back up newer MAX state file %s: %s', file, error?.message || String(error))
+      }
+    }
+  }
+
+  try {
+    if (!persistenceBlocked && loaded && typeof loaded === 'object' && !Array.isArray(loaded)) {
+      const parsed = loaded
       if (parsed.marker !== undefined) state.marker = parsed.marker
       if (parsed.mode === 'all' || parsed.mode === 'errors' || parsed.mode === 'mute') state.mode = parsed.mode
       if (typeof parsed.muteUntil === 'number') state.muteUntil = parsed.muteUntil
@@ -115,14 +256,7 @@ export function createState({ file, logger, chatId } = {}) {
       }
     }
   } catch (error) {
-    if (error?.code !== 'ENOENT') {
-      logger?.warn?.('MAX state file %s is corrupt; starting fresh (%s)', file, error?.message || String(error))
-      try {
-        renameSync(file, `${file}.corrupt-${Date.now()}`)
-      } catch {
-        // keep the original if it cannot be moved
-      }
-    }
+    logger?.warn?.('cannot load MAX state file %s; keeping defaults (%s)', file, error?.message || String(error))
   }
 
   // Drop expired dedupe keys and approval rules immediately on load.
@@ -142,12 +276,22 @@ export function createState({ file, logger, chatId } = {}) {
   }
 
   function save() {
+    if (persistenceBlocked) {
+      if (!blockedSaveWarned) {
+        blockedSaveWarned = true
+        logger?.warn?.(
+          'refusing to overwrite MAX state file %s written by a newer schema (stored %d, supported %d); persistence stays disabled',
+          file,
+          storedSchemaVersion,
+          STATE_SCHEMA_VERSION,
+        )
+      }
+      return false
+    }
     try {
       prune()
-      mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
-      const tmp = `${file}.${process.pid}.tmp`
-      writeFileSync(
-        tmp,
+      writeFileAtomic(
+        file,
         `${JSON.stringify(
           {
             schemaVersion: STATE_SCHEMA_VERSION,
@@ -169,11 +313,11 @@ export function createState({ file, logger, chatId } = {}) {
           null,
           2,
         )}\n`,
-        { mode: 0o600 },
       )
-      renameSync(tmp, file)
+      return true
     } catch (error) {
       logger?.warn?.('cannot persist MAX state to %s: %s', file, error?.message || String(error))
+      return false
     }
   }
 
@@ -188,6 +332,14 @@ export function createState({ file, logger, chatId } = {}) {
 
   return {
     schemaVersion: STATE_SCHEMA_VERSION,
+    /** Schema found on disk (`undefined` for legacy files without a marker). */
+    get storedSchemaVersion() {
+      return storedSchemaVersion
+    },
+    /** True when the file belongs to a newer release and must not be written. */
+    get persistenceBlocked() {
+      return persistenceBlocked
+    },
     get marker() {
       return state.marker
     },
