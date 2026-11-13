@@ -73,7 +73,7 @@
     </g>
 
     <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
-      <text x="72" y="404" fill="#6f6a91" font-size="13">v1.6.0 · 358 tests · runtime deps 0 · Node ≥24.9 · DSH 0.2.x</text>
+      <text x="72" y="404" fill="#6f6a91" font-size="13">v1.6.1 · 358 tests · runtime deps 0 · Node ≥24.9 · DSH 0.2.x</text>
       <text x="1208" y="404" fill="#6f6a91" font-size="13" text-anchor="end">github.com/enkolesnikov/MaxDSHBot</text>
     </g>
   </g>

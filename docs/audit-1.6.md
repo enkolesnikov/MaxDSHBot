@@ -36,6 +36,7 @@
 ## Проверки
 
 - `npm test`: 358/358.
+- 1.6.1: `lib/config.mjs` вынесен из `index.js` (324 строки), поведение без изменений.
 - `npm run check`: OK; `npm pack --dry-run`: 45 файлов.
 - Live hot-reload: `transport=webhook`, `webhookActive=true`, `webhookSubscribed=true`,
   `/max/webhook` → 401 без секрета, `/max-notify/settings.json` → 401 без cookie.

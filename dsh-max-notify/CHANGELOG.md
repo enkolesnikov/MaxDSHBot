@@ -4,6 +4,21 @@ All notable changes to `dsh-max-notify` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] — 2026-11-13
+
+Tech-debt follow-up.
+
+### Changed
+
+- Вынесены `DEFAULTS` и `normalizeConfig` из `index.js` в `lib/config.mjs`
+  (`index.js` 2051 → 1947 строк); поведение не менялось, старые импорты
+  `normalizeConfig` из `index.js` сохранены.
+- `check` включает новый модуль; CI остаётся зелёным.
+
+### Tests
+
+358 tests, без изменений поведения.
+
 ## [1.6.0] — 2026-11-13
 
 Аудит техдолга, безопасности и совместимости с DSH 0.2.2-rc.2.
