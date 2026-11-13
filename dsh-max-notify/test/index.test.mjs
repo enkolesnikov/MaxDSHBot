@@ -636,7 +636,7 @@ test('webhook transport registers a route and processes an update idempotently',
       chatId: '1',
       allowedUserIds: ['987654321'],
       transport: 'webhook',
-      webhookSecret: 's3cret',
+      webhookSecret: 's3cret-0123456789abcdef0123456789',
       webhookPublicUrl: 'https://example.test/max/webhook',
     },
     { createClient: () => client },
@@ -656,20 +656,20 @@ test('webhook transport registers a route and processes an update idempotently',
     },
   }
   const first = webhookResponse()
-  await webhookRoute.handler(webhookRequest({ secret: 's3cret', update }), first)
+  await webhookRoute.handler(webhookRequest({ secret: 's3cret-0123456789abcdef0123456789', update }), first)
   await tick(40)
   assert.equal(first.statusCode, 200)
   assert.equal(prompts.length, 1)
   assert.equal(prompts[0].content[0].text, 'привет из вебхука')
 
   const replay = webhookResponse()
-  await webhookRoute.handler(webhookRequest({ secret: 's3cret', update }), replay)
+  await webhookRoute.handler(webhookRequest({ secret: 's3cret-0123456789abcdef0123456789', update }), replay)
   await tick(40)
   assert.equal(replay.statusCode, 200)
   assert.equal(prompts.length, 1)
 
   const rejected = webhookResponse()
-  await webhookRoute.handler(webhookRequest({ secret: 'wrong', update }), rejected)
+  await webhookRoute.handler(webhookRequest({ secret: 'wrong-0123456789abcdef0123456789', update }), rejected)
   assert.equal(rejected.statusCode, 401)
   assert.equal(prompts.length, 1)
 })
@@ -814,4 +814,69 @@ test('a short final answer is also spoken when TTS is enabled', async () => {
   } finally {
     globalThis.fetch = originalFetch
   }
+})
+
+test('webhook and settings routes wait for the webServer service (rc.2 ordering)', async () => {
+  const routes = []
+  const deferred = []
+  const { ctx } = createFakeCtx()
+  ctx.inject = (names, callback) => {
+    deferred.push({ names, callback })
+    return { dispose() {} }
+  }
+  ctx.get = (name) => {
+    if (name === 'webServer') return { register: (route) => { routes.push(route); return () => {} } }
+    if (name === 'connection') return { requestRejection: () => undefined }
+    return undefined
+  }
+  const client = createFakeClient()
+  apply(ctx, {
+    botToken: 't',
+    chatId: '123456789',
+    allowedUserIds: ['987654321'],
+    transport: 'webhook',
+    webhookSecret: 's3cret-0123456789abcdef0123456789',
+    webhookAutoSubscribe: false,
+    webhookPublicUrl: 'https://example.test/max/webhook',
+  }, { createClient: () => client })
+
+  assert.equal(routes.length, 0)
+  const webhookInjection = deferred.find((item) => item.names.includes('webServer') && item.names.length === 1)
+  assert.ok(webhookInjection)
+  webhookInjection.callback({
+    webServer: { register: (route) => { routes.push(route); return () => {} } },
+    connection: { requestRejection: () => undefined },
+  })
+  const settingsInjection = deferred.find((item) => item.names.includes('connection'))
+  assert.ok(settingsInjection)
+  settingsInjection.callback({
+    webServer: { register: (route) => { routes.push(route); return () => {} } },
+    connection: { requestRejection: () => undefined },
+  })
+
+  assert.ok(routes.some((route) => route.path === '/max/webhook'))
+  assert.ok(routes.some((route) => route.path === '/max-notify/settings.json'))
+})
+
+test('all outbound paths obey the recipient allowlist (observer error too)', async () => {
+  const { ctx, emit } = createFakeCtx()
+  const client = createFakeClient({
+    getChat: async () => ({ type: 'dialog', dialog_with_user: { user_id: 999 } }),
+  })
+  apply(ctx, { botToken: 't', chatId: '123456789', allowedUserIds: ['987654321'] }, { createClient: () => client })
+  emit('agent/error', { agent: { session: { id: 's1', header: {} } }, turn: 1, step: 1, error: new Error('boom') })
+  await tick(30)
+  assert.equal(client.sent.length, 0)
+})
+
+test('webhook secrets shorter than 32 chars are rejected at normalization', () => {
+  const weak = normalizeConfig({ botToken: 't', chatId: '1', transport: 'webhook', webhookSecret: 'short' })
+  assert.equal(weak.webhookSecret, undefined)
+  assert.equal(weak.webhookSecretInvalid, true)
+  const strong = normalizeConfig({
+    botToken: 't', chatId: '1', transport: 'webhook',
+    webhookSecret: '0123456789abcdef0123456789abcdef',
+  })
+  assert.equal(strong.webhookSecret, '0123456789abcdef0123456789abcdef')
+  assert.equal(strong.webhookSecretInvalid, false)
 })

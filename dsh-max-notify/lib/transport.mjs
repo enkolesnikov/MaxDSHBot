@@ -19,15 +19,40 @@ import { fileURLToPath } from 'node:url'
 import https from 'node:https'
 import { rootCertificates } from 'node:tls'
 import { redact } from './redact.mjs'
+import { classifyUploadType } from './workspace-tools.mjs'
 
 export const MAX_API_BASE = 'https://platform-api2.max.ru'
 export const MAX_TEXT_LIMIT = 4000
 export const MAX_MESSAGES_PER_SECOND = 2
 
-const USER_AGENT = 'dsh-max-notify/0.1.0'
+const USER_AGENT = (() => {
+  try {
+    const version = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
+    return `dsh-max-notify/${version || '0.0.0'}`
+  } catch {
+    return 'dsh-max-notify/0.0.0'
+  }
+})()
 const BUNDLED_CA_URL = new URL('../certs/ca-chain.pem', import.meta.url)
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/** Only MAX-owned HTTPS hosts may receive the bot token. */
+export function isTrustedMaxUrl(value, { baseUrl = MAX_API_BASE } = {}) {
+  let url
+  let base
+  try {
+    url = new URL(String(value))
+    base = new URL(String(baseUrl))
+  } catch {
+    return false
+  }
+  if (url.protocol !== 'https:') return false
+  const host = url.hostname.toLowerCase()
+  const baseHost = base.hostname.toLowerCase()
+  return host === baseHost || host === 'max.ru' || host.endsWith('.max.ru')
+}
+
 
 /** Load the bundled Russian Trusted CA chain; returns undefined when absent. */
 export function loadBundledCa() {
@@ -303,7 +328,7 @@ export function createMaxClient(options = {}) {
     // MAX expects disable_link_preview as a QUERY parameter, not a body field.
     if (disableLinkPreview !== undefined) query.disable_link_preview = disableLinkPreview
 
-    return withRetry(() => request({ method: 'POST', path: 'messages', query, body }))
+    return withRetry(() => request({ method: 'POST', path: 'messages', query, body, chatKey, priority }))
   }
 
   /** Send arbitrarily long text, chunked to the 4000-char API limit. */
@@ -378,6 +403,10 @@ export function createMaxClient(options = {}) {
         reject(error)
         return
       }
+      if (!isTrustedMaxUrl(url.toString(), { baseUrl })) {
+        reject(new Error(`refusing to send the MAX token to untrusted upload host: ${url.hostname}`))
+        return
+      }
       const headers = {
         Authorization: token,
         'User-Agent': USER_AGENT,
@@ -423,8 +452,6 @@ export function createMaxClient(options = {}) {
     })
   }
 
-  const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.tif', '.tiff', '.bmp', '.heic', '.webp'])
-
   /** MAX upload responses vary by media type: {photos:{"0":{token}}}, {files:{...}}, {token}. */
   function firstToken(value) {
     if (typeof value === 'string' && value !== '') return value
@@ -439,10 +466,7 @@ export function createMaxClient(options = {}) {
 
   /** Guess a MAX upload type from a file name. */
   function uploadTypeFor(filePath) {
-    const extension = extname(String(filePath)).toLowerCase()
-    if (IMAGE_EXTENSIONS.has(extension)) return 'image'
-    if (AUDIO_EXTENSIONS.has(extension)) return 'audio'
-    return 'file'
+    return classifyUploadType(filePath)
   }
 
   /**
@@ -504,10 +528,14 @@ export function createMaxClient(options = {}) {
           reject(error)
           return
         }
-        if (url.protocol !== 'https:') {
-          reject(new Error(`refusing non-https attachment URL: ${url.protocol}`))
+        if (!isTrustedMaxUrl(url.toString(), { baseUrl })) {
+          reject(new Error(`refusing untrusted attachment URL: ${url.hostname}`))
           return
         }
+        const trustedApiHost = url.hostname.toLowerCase() === new URL(baseUrl).hostname.toLowerCase()
+        const headers = { 'User-Agent': USER_AGENT }
+        // Pre-signed MAX CDN URLs do not need the long-lived bot token.
+        if (trustedApiHost) headers.Authorization = token
         const req = https.request(
           {
             method: 'GET',
@@ -515,7 +543,7 @@ export function createMaxClient(options = {}) {
             hostname: url.hostname,
             port: url.port || undefined,
             path: `${url.pathname}${url.search}`,
-            headers: { Authorization: token, 'User-Agent': USER_AGENT },
+            headers,
             ca: trustedCa,
             rejectUnauthorized: !insecureTls,
             timeout: callTimeoutMs ?? timeoutMs,
@@ -542,13 +570,13 @@ export function createMaxClient(options = {}) {
               return
             }
             try {
-              mkdirSync(dirname(destPath), { recursive: true })
+              mkdirSync(dirname(destPath), { recursive: true, mode: 0o700 })
             } catch (error) {
               reject(error)
               return
             }
             const tmpPath = `${destPath}.${process.pid}.tmp`
-            const stream = createWriteStream(tmpPath)
+            const stream = createWriteStream(tmpPath, { mode: 0o600 })
             let bytes = 0
             let failed = false
             const fail = (error) => {

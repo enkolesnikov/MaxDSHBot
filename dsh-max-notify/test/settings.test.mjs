@@ -107,8 +107,6 @@ test('SETTINGS_KEYS exposes exactly the safe allowlist with defaults', () => {
     'threads',
     'todoProgress',
     'typing',
-    'voiceEndpoint',
-    'voiceModel',
     'voiceTranscribe',
     'voiceTts',
     'voiceTtsMaxChars',
@@ -126,7 +124,6 @@ test('SETTINGS_KEYS exposes exactly the safe allowlist with defaults', () => {
   assert.equal(SETTINGS_DEFAULTS.tableMaxFiles, 4)
   assert.equal(SETTINGS_DEFAULTS.approvalTimeoutMs, 120000)
   assert.equal(SETTINGS_DEFAULTS.nativeIncomingImages, true)
-  assert.equal(SETTINGS_DEFAULTS.voiceModel, 'whisper-1')
   assert.equal(SETTINGS_DEFAULTS.voiceTts, false)
   assert.equal(SETTINGS_DEFAULTS.voiceTtsMode, 'short')
   assert.deepEqual(SETTINGS_DEFAULTS.buttonsPresets, [])
@@ -152,8 +149,6 @@ test('sanitizeSettingsPatch validates and coerces the full allowlist', () => {
       { label: 'B', prompt: 'C' },
     ],
     voiceTranscribe: 'true',
-    voiceEndpoint: ' https://stt.example.test/v1/audio ',
-    voiceModel: ' whisper-1 ',
   })
   assert.equal(result.ok, true)
   assert.deepEqual(result.errors, [])
@@ -177,8 +172,6 @@ test('sanitizeSettingsPatch validates and coerces the full allowlist', () => {
       { label: 'B', prompt: 'C' },
     ],
     voiceTranscribe: true,
-    voiceEndpoint: 'https://stt.example.test/v1/audio',
-    voiceModel: 'whisper-1',
   })
 })
 
@@ -191,12 +184,10 @@ test('sanitizeSettingsPatch reports every invalid allowlisted value', () => {
     tableMaxFiles: 9,
     approvalTimeoutMs: -1,
     buttonsPresets: Array.from({ length: 7 }, () => ({ label: 'a', prompt: 'b' })),
-    voiceEndpoint: 'http://insecure.test/api',
-    voiceModel: 'x'.repeat(81),
   })
   assert.equal(result.ok, false)
   assert.deepEqual(result.values, {})
-  assert.equal(result.errors.length, 9)
+  assert.equal(result.errors.length, 7)
   for (const key of [
     'mode',
     'digestEnabled',
@@ -205,8 +196,6 @@ test('sanitizeSettingsPatch reports every invalid allowlisted value', () => {
     'tableMaxFiles',
     'approvalTimeoutMs',
     'buttonsPresets',
-    'voiceEndpoint',
-    'voiceModel',
   ]) {
     assert.ok(
       result.errors.some((message) => message.startsWith(`${key}:`)),
@@ -242,10 +231,6 @@ test('sanitizeSettingsPatch validates preset shape, sizes and count', () => {
 
 test('sanitizeSettingsPatch accepts null/empty optional values and exact limits', () => {
   assert.deepEqual(sanitizeSettingsPatch({ quietHours: null }).values, { quietHours: null })
-  assert.deepEqual(sanitizeSettingsPatch({ voiceEndpoint: null }).values, { voiceEndpoint: null })
-  assert.deepEqual(sanitizeSettingsPatch({ voiceEndpoint: '' }).values, { voiceEndpoint: null })
-  assert.equal(sanitizeSettingsPatch({ voiceModel: '' }).ok, true)
-  assert.equal(sanitizeSettingsPatch({ voiceModel: 'x'.repeat(80) }).ok, true)
   assert.equal(sanitizeSettingsPatch({ digestTime: '23:59' }).ok, true)
   assert.equal(sanitizeSettingsPatch({ approvalTimeoutMs: '0' }).ok, true)
 })
@@ -411,7 +396,7 @@ test('GET /max-notify/settings returns a dark standalone HTML page', async (t) =
   assert.ok(res.body.includes('Сохранить'))
   assert.ok(res.body.includes('&lt;script&gt;status&lt;/script&gt;'))
   assert.ok(!res.body.includes('<script>status'))
-  assert.ok(res.body.includes('value="&lt;img src=x onerror=alert(1)&gt;"'))
+  assert.ok(res.body.includes('voiceTranscribe'))
   assert.ok(!res.body.includes('<img src=x'))
   assert.doesNotMatch(res.body, /<link\b|<script[^>]+src=/)
 })
@@ -423,7 +408,7 @@ test('GET HTML shows defaults when the overlay file does not exist', async (t) =
   assert.equal(res.statusCode, 200)
   assert.match(res.body, /<option value="all" selected>/)
   assert.ok(res.body.includes('value="21:00"'))
-  assert.ok(res.body.includes('value="whisper-1"'))
+  assert.ok(res.body.includes('voiceTranscribe'))
   assert.ok(res.body.includes('value="120000"'))
 })
 
@@ -441,7 +426,7 @@ test('GET /max-notify/settings.json returns values, status and version', async (
   assert.equal(data.version, '2.0.0')
   assert.equal(data.values.mode, 'mute')
   assert.equal(data.values.digestTime, '21:00')
-  assert.equal(data.values.voiceModel, 'whisper-1')
+  assert.equal(data.values.mode, 'mute')
   assert.deepEqual(data.values.buttonsPresets, [])
   assert.equal(data.values.quietHours, null)
 })

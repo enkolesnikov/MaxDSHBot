@@ -137,10 +137,7 @@ window.__ModuleLoader__.load({
         h('section', { style: styles.section },
           h('h4', { style: styles.title }, 'Голос'),
           h(Toggle, { label: 'Расшифровывать голосовые (STT)', value: draft.voiceTranscribe === true, onChange: (v) => update('voiceTranscribe', v) }),
-          h(Field, { label: 'OpenAI-совместимый endpoint' },
-            h('input', { type: 'url', placeholder: 'https://api.openai.com/v1', style: styles.input, value: draft.voiceEndpoint || '', onChange: (e) => update('voiceEndpoint', e.target.value || null) })),
-          h(Field, { label: 'Модель' },
-            h('input', { type: 'text', placeholder: 'whisper-1', style: styles.input, value: draft.voiceModel || '', onChange: (e) => update('voiceModel', e.target.value) }))),
+          h('p', { style: styles.hint }, 'Endpoint и ключ задаются только в приватном cordis.patch.yml / .env.')),
 
         h('section', { style: styles.section },
           h('h4', { style: styles.title }, 'Интерактив'),

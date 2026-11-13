@@ -53,7 +53,9 @@ export function createInteractions({ client, config, logger, target, resolveTitl
   const enabled = config?.interactive !== false
   const approvalChannel = config?.approvalChannel ?? 'both'
   const questionChannel = config?.questionChannel ?? 'both'
-  const approvalTimeoutMs = Math.max(0, Number(config?.approvalTimeoutMs) || 0)
+  function approvalTimeoutMs() {
+    return Math.max(0, Number(config?.approvalTimeoutMs) || 0)
+  }
   const rememberTools = new Set(Array.isArray(config?.approvalRememberTools) ? config.approvalRememberTools : [])
   const rememberMs = Math.max(1000, Number(config?.approvalRememberMs) || 60 * 60 * 1000)
 
@@ -211,10 +213,11 @@ export function createInteractions({ client, config, logger, target, resolveTitl
     state?.addPendingCard?.({ token, kind: 'approval', messageId, chatId: target?.chatId })
 
     let timer
+    const timeoutMs = approvalTimeoutMs()
     const timeoutPromise =
-      approvalTimeoutMs > 0
+      timeoutMs > 0
         ? new Promise((resolve) => {
-            timer = setTimeout(() => resolve({ from: 'timeout' }), approvalTimeoutMs)
+            timer = setTimeout(() => resolve({ from: 'timeout' }), timeoutMs)
             timer.unref?.()
           })
         : undefined
@@ -244,7 +247,7 @@ export function createInteractions({ client, config, logger, target, resolveTitl
         void guiPromise.catch(() => {})
         await editCard(messageId, formatApprovalResult({ outcome: 'rejected', toolName, by: 'timeout' }))
         audit?.approve?.({ tool: toolName, outcome: 'rejected', source: 'timeout' })
-        logger?.warn?.('MAX approval timed out after %d ms for %s (rejected)', approvalTimeoutMs, toolName)
+        logger?.warn?.('MAX approval timed out after %d ms for %s (rejected)', timeoutMs, toolName)
         return 'rejected'
       }
       if (winner.from === 'chat') {

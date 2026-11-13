@@ -118,7 +118,7 @@ export function createIncoming({ client, config, logger, resolveCwd } = {}) {
     }
     const dir = inboxDirFor(cwd)
     try {
-      mkdirSync(dir, { recursive: true })
+      mkdirSync(dir, { recursive: true, mode: 0o700 })
     } catch (error) {
       logger?.warn?.('cannot create MAX inbox %s: %s', dir, error?.message || String(error))
       return { saved: [], errors: [`не удалось создать папку ${dir}`], promptText: '' }

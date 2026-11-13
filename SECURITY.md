@@ -44,7 +44,7 @@
 
 ## Webhook
 
-- Включайте `transport: webhook` только с `webhookSecret` (5–256 символов
+- Включайте `transport: webhook` только с `webhookSecret` (32–256 символов `[A-Za-z0-9_-]`
   `[A-Za-z0-9_-]`); заголовок `X-Max-Bot-Api-Secret` сравнивается в
   constant-time, при несовпадении — `401`.
 - Маршрут `/max/webhook` отвечает `200` только после durable-записи обновления
@@ -65,3 +65,15 @@
 
 Используйте GitHub Security Advisories («Report a vulnerability» в разделе
 Security этого репозитория) вместо публичного issue.
+
+## Дополнительно с 1.6
+
+- `allowedChatIds` без `allowedUserIds` — явное доверие всему чату; если заданы
+  оба списка, отправитель должен быть и в `allowedUserIds`.
+- Бот-токен отправляется только на `platform-api2.max.ru` и `*.max.ru`; на
+  pre-signed CDN URL — без `Authorization`; cross-host redirect отклоняется.
+- `state.json`, `outbox.json`, `health.json`, `max-inbox/` — 0600/0700.
+- STT/TTS endpoint и модель не редактируются через GUI-overlay (только
+  приватный профиль), чтобы нельзя было перенаправить API-ключ.
+- Deliverable cap — 50 МиБ (защита от OOM); webhook poison update уходит в
+  dead-letter после 3 попыток.

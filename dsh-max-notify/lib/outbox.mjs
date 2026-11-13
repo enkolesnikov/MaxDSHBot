@@ -68,15 +68,22 @@ export function createOutbox({
         if (entry && typeof entry.key === 'string') delivered.push(entry)
       }
     }
-  } catch {
-    // absent/corrupt outbox is fine: start empty
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      logger?.warn?.('MAX outbox file %s is corrupt; starting empty (%s)', path, error?.message || String(error))
+      try {
+        renameSync(path, `${path}.corrupt-${Date.now()}`)
+      } catch {
+        // keep the original if it cannot be moved
+      }
+    }
   }
 
   function save() {
     try {
-      mkdirSync(dirname(path), { recursive: true })
+      mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
       const tmp = `${path}.${process.pid}.tmp`
-      writeFileSync(tmp, `${JSON.stringify({ version: 1, pending, delivered }, null, 2)}\n`)
+      writeFileSync(tmp, `${JSON.stringify({ version: 1, pending, delivered }, null, 2)}\n`, { mode: 0o600 })
       renameSync(tmp, path)
     } catch (error) {
       logger?.warn?.('cannot persist MAX outbox to %s: %s', path, error?.message || String(error))
@@ -144,6 +151,11 @@ export function createOutbox({
   }
 
   async function runItem(item) {
+    if (item.dedupeKey && isDelivered(item.dedupeKey)) {
+      const index = pending.indexOf(item)
+      if (index >= 0) pending.splice(index, 1)
+      return true
+    }
     try {
       await send(item.call, item.params)
       stats.sent += 1
@@ -190,7 +202,7 @@ export function createOutbox({
 
   /** Deliver a message now; persist it only when the direct attempt fails. */
   async function deliverNow(params, { dedupeKey, call = 'sendMessage', priority = 0, kind = 'message' } = {}) {
-    if (dedupeKey && isDelivered(dedupeKey)) return { skipped: true }
+    if (dedupeKey && (isDelivered(dedupeKey) || isPending(dedupeKey))) return { skipped: true }
     try {
       const response = await send(call, params)
       stats.sent += 1
@@ -202,8 +214,8 @@ export function createOutbox({
       }
       return { sent: true, response, mid: response?.message?.body?.mid }
     } catch (error) {
-      enqueue({ dedupeKey, call, params, priority, kind })
-      return { queued: true, error: error?.message || String(error) }
+      const queued = enqueue({ dedupeKey, call, params, priority, kind })
+      return { queued, error: error?.message || String(error) }
     }
   }
 

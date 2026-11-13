@@ -75,6 +75,8 @@ export function createBot({
   /** chatKey -> { policy, at } pending `/approve <policy> confirm` */
   const approvalConfirms = new Map()
   /** chatKey -> normalized schedule list for `/schedules <action> N` */
+  /** update keys currently being handled (poll/webhook overlap). */
+  const inFlight = new Set()
   const scheduleChoices = new Map()
   /** chatKey -> { id, at } pending `/schedules cancel N confirm` */
   const scheduleCancels = new Map()
@@ -137,19 +139,18 @@ export function createBot({
       `🩺 *dsh-max-notify* v${version ?? '?'}`,
       `⏱ uptime: ${formatDuration(snapshot.uptimeMs)}`,
       `📡 transport: ${snapshot.transport === 'webhook' || snapshot.webhookActive ? 'webhook' : 'long polling'}`,
-      `📡 polling: ${snapshot.pollStopped ? `остановлен (${snapshot.pollStoppedReason ?? 'ошибка'})` : 'работает'}`,
+      snapshot.webhookActive
+        ? `🔗 webhook: ${snapshot.webhookSubscribed ? 'подписан' : 'подписка не подтверждена'} · очередь ${snapshot.webhookQueueDepth ?? 0}`
+        : `📡 polling: ${snapshot.pollStopped ? `остановлен (${snapshot.pollStoppedReason ?? 'ошибка'})` : 'работает'}`,
       `🕒 последний poll: ${formatRelative(snapshot.lastPollAt)}`,
       `📥 последнее обновление: ${formatRelative(snapshot.lastUpdateAt)}`,
       `📤 outbox: ${outboxStats.pending ?? 0} в очереди, доставлено ${outboxStats.sent ?? 0}, ошибок ${outboxStats.failed ?? 0}`,
-      `🚦 limiter: очередь ${limiterStats.queueDepth ?? 0}, ожиданий ${limiterStats.waits ?? 0}, 429-паузы…`,
+      `🚦 limiter: очередь ${limiterStats.queueDepth ?? 0}, ожиданий ${limiterStats.waits ?? 0}, отказов ${limiterStats.rejected ?? 0}`,
       `🛡 allowlist: ${(config.allowedUserIds ?? []).length} users / ${(config.allowedChatIds ?? []).length} chats`,
       `🧩 режим: ${policy?.describe?.() ?? '—'}`,
     ]
-    if (snapshot.webhookActive) {
-      lines.push(
-        `🔗 webhook: ${snapshot.webhookSubscribed ? 'подписан' : 'подписка не подтверждена'} · очередь ${snapshot.webhookQueueDepth ?? 0}`,
-      )
-      if (snapshot.webhookSubscriptionError) lines.push(`⚠️ webhook: ${truncate(snapshot.webhookSubscriptionError, 300)}`)
+    if (snapshot.webhookActive && snapshot.webhookSubscriptionError) {
+      lines.push(`⚠️ webhook: ${truncate(snapshot.webhookSubscriptionError, 300)}`)
     }
     if (snapshot.lastError) lines.push(`⚠️ последняя ошибка: ${truncate(snapshot.lastError, 300)}`)
     return lines.join('\n')
@@ -169,9 +170,13 @@ export function createBot({
     const users = new Set(config.allowedUserIds ?? [])
     const chats = new Set(config.allowedChatIds ?? [])
     if (users.size === 0 && chats.size === 0) return true
-    if (userId !== undefined && userId !== null && users.has(String(userId))) return true
-    if (chatId !== undefined && chatId !== null && chats.has(String(chatId))) return true
-    return false
+    const userOk = userId !== undefined && userId !== null && users.has(String(userId))
+    const chatOk = chatId !== undefined && chatId !== null && chats.has(String(chatId))
+    // A chat allowlist alone is an explicit trust decision for that chat
+    // (e.g. a private group). If a user allowlist is also configured, the
+    // sender must be on it too — group membership alone must not drive the agent.
+    if (chatOk) return users.size === 0 ? true : userOk
+    return userOk
   }
 
   async function reply(chatId, text, extra = {}) {
@@ -361,7 +366,7 @@ export function createBot({
       case 'version': {
         await reply(
           chatId,
-          `🛠 dsh-max-notify v${version ?? '?'}\nNode ${process.version}\nDSH: host plugin (long polling)`,
+          `🛠 dsh-max-notify v${version ?? '?'}\nNode ${process.version}\nDSH: host plugin (${config.transport === 'webhook' ? 'webhook' : 'long polling'})`,
         )
         return true
       }
@@ -1041,13 +1046,19 @@ export function createBot({
     }
   }
 
-  /** Apply one update with persisted dedupe (used by polling and webhook). */
+  /** Apply one update with persisted dedupe and an in-process in-flight guard. */
   async function applyUpdate(update) {
     const key = updateKey(update)
     if (key && state?.hasProcessed?.(key)) return false
-    await handleUpdate(update)
-    if (key) state?.markProcessed?.(key)
-    return true
+    if (key && inFlight.has(key)) return false
+    if (key) inFlight.add(key)
+    try {
+      await handleUpdate(update)
+      if (key) state?.markProcessed?.(key)
+      return true
+    } finally {
+      if (key) inFlight.delete(key)
+    }
   }
 
   /** One long-poll iteration; returns `{primed, count, handled}` (exposed for tests). */
@@ -1128,6 +1139,11 @@ export function createBot({
     logger?.info?.('MAX polling started (long poll)')
   }
 
+  function stopPolling() {
+    running = false
+    logger?.info?.('MAX polling stopped')
+  }
+
   function stop() {
     running = false
     disposed = true
@@ -1142,6 +1158,7 @@ export function createBot({
   return {
     start,
     stop,
+    stopPolling,
     pollOnce,
     handleUpdate,
     applyUpdate,

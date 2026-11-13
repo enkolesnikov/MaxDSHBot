@@ -114,8 +114,15 @@ export function createState({ file, logger, chatId } = {}) {
         }
       }
     }
-  } catch {
-    // absent/corrupt state is fine: start fresh
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      logger?.warn?.('MAX state file %s is corrupt; starting fresh (%s)', file, error?.message || String(error))
+      try {
+        renameSync(file, `${file}.corrupt-${Date.now()}`)
+      } catch {
+        // keep the original if it cannot be moved
+      }
+    }
   }
 
   // Drop expired dedupe keys and approval rules immediately on load.
@@ -137,7 +144,7 @@ export function createState({ file, logger, chatId } = {}) {
   function save() {
     try {
       prune()
-      mkdirSync(dirname(file), { recursive: true })
+      mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
       const tmp = `${file}.${process.pid}.tmp`
       writeFileSync(
         tmp,
@@ -162,6 +169,7 @@ export function createState({ file, logger, chatId } = {}) {
           null,
           2,
         )}\n`,
+        { mode: 0o600 },
       )
       renameSync(tmp, file)
     } catch (error) {
@@ -335,6 +343,26 @@ export function createState({ file, logger, chatId } = {}) {
       const list = Array.isArray(queue) ? queue.filter((entry) => entry && entry.update) : []
       state.webhookQueue = list.slice(-200)
       saveSoon()
+    },
+    pushWebhookQueue(entry, max = 200) {
+      if (!entry || typeof entry.update !== 'object') return state.webhookQueue.length
+      state.webhookQueue.push(entry)
+      const limit = Math.max(1, Number(max) || 200)
+      if (state.webhookQueue.length > limit) state.webhookQueue.splice(0, state.webhookQueue.length - limit)
+      saveSoon()
+      return state.webhookQueue.length
+    },
+    shiftWebhookQueue() {
+      if (state.webhookQueue.length > 0) state.webhookQueue.shift()
+      saveSoon()
+      return state.webhookQueue.length
+    },
+    bumpWebhookHeadAttempts() {
+      const head = state.webhookQueue[0]
+      if (!head) return 0
+      head.attempts = (Number(head.attempts) || 0) + 1
+      saveSoon()
+      return head.attempts
     },
     getBudgetAlerts() {
       return { ...state.budgetAlerts }

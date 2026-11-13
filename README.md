@@ -18,7 +18,7 @@
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/enkolesnikov/MaxDSHBot?style=flat-square"/></a>
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img alt="DSH" src="https://img.shields.io/badge/DSH-0.2.x-6C5CE7?style=flat-square"/></a>
   <a href="https://max.ru"><img alt="MAX" src="https://img.shields.io/badge/MAX-messenger-8B5CF6?style=flat-square"/></a>
-  <img alt="Tests" src="https://img.shields.io/badge/tests-353%20passed-2ecc71?style=flat-square"/>
+  <img alt="Tests" src="https://img.shields.io/badge/tests-358%20passed-2ecc71?style=flat-square"/>
   <a href="https://nodejs.org"><img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A524.9-339933?style=flat-square&logo=nodedotjs&logoColor=white"/></a>
   <img alt="Runtime dependencies" src="https://img.shields.io/badge/runtime%20deps-0-brightgreen?style=flat-square"/>
   <a href="https://github.com/enkolesnikov/MaxDSHBot/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/enkolesnikov/MaxDSHBot?style=flat-square"/></a>
@@ -48,7 +48,7 @@
 | | Возможность | Что даёт |
 |---|---|---|
 | 💬 | **Ответы агента** | Один MAX-месседж на ход (`turn/end`), чанкинг 4000 символов, картинки и файлы `present` вложениями, входящие файлы из MAX → `max-inbox/` |
-| 🕹 | **Пульт** | Двусторонний чат, 25+ команд (`/status`, `/model`, `/plan`, `/sessions`, `/budget`…), инлайн-кнопки, live-прогресс |
+| 🕹 | **Пульт** | Двусторонний чат, 13 команд в меню + скрытые (`/status`, `/model`, `/plan`, `/sessions`, `/budget`…), инлайн-кнопки, live-прогресс |
 | 🔐 | **Approvals** | Подтверждения и вопросы из MAX с гонкой MAX↔GUI, таймаутом, «запомнить для инструмента», audit-логом |
 | 👀 | **Наблюдатель** | Subagent/job/goal/error, TODO-прогресс, режимы молчания, тихие часы, ежедневный дайджест |
 | 🛡 | **Надёжность** | Durable outbox, at-least-once polling с дедупом, глобальный лимитер, health/heartbeat, redaction секретов |
@@ -182,6 +182,17 @@ MAX будет сам присылать обновления на публич�
 Если webServer/secret/public URL не сконфигурированы, плагин откатывается на
 long polling и пишет warning в лог. Официальная документация MAX:
 [webhooks](https://dev.max.ru/docs-api/methods/POST/subscriptions).
+
+## Аудит 1.6: rc.2, безопасность, надёжность
+
+- **DSH 0.2.2-rc.2:** webhook/settings поднимаются через `ctx.inject` после
+  активации `webServer`; fallback polling и health-диагностика вместо тихого
+  404/405.
+- **Безопасность:** allowlist на всех исходящих путях; токен не уходит на
+  не-MAX хосты/редиректы; webhook secret ≥32 символов; GUI не меняет
+  STT/TTS endpoint; файлы 0600/0700.
+- **Надёжность:** durable save webhook-очереди до 200, dead-letter для poison
+  updates, in-flight dedupe, отдельный `stopPolling`, outbox без дублей.
 
 ## Брифинг и статус (v1.5)
 
@@ -384,7 +395,7 @@ long polling и пишет warning в лог. Официальная докум�
 ## Проверка
 
 ```bash
-cd dsh-max-notify && npm test          # 353 unit tests
+cd dsh-max-notify && npm test          # 358 unit tests
 npm run check                          # синтаксис всех модулей
 node tools/smoke.mjs --env ../.env     # read-only: GET /me, state, outbox
 node tools/send-test.mjs "проверка"    # реальная отправка

@@ -6,7 +6,7 @@ import { statSync } from 'node:fs'
 import { formatDeliverablesCard } from './cards.mjs'
 
 const IMAGE_LIMIT_BYTES = 50 * 1024 * 1024
-const FILE_LIMIT_BYTES = 4 * 1024 * 1024 * 1024
+const FILE_LIMIT_BYTES = 50 * 1024 * 1024
 const MAX_ATTACHMENTS = 12
 
 export function createDeliverables({ client, config, logger, target, policy } = {}) {

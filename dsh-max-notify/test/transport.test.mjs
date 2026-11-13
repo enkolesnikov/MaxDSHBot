@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { splitText, MAX_TEXT_LIMIT } from '../lib/transport.mjs'
+import { createMaxClient, isTrustedMaxUrl, splitText, MAX_TEXT_LIMIT } from '../lib/transport.mjs'
 
 test('splitText keeps short text as one chunk', () => {
   assert.deepEqual(splitText('hello', 4000), ['hello'])
@@ -44,4 +44,20 @@ test('splitText enforces the MAX 4000-char limit by default', () => {
 test('splitText validates input', () => {
   assert.throws(() => splitText(42), TypeError)
   assert.throws(() => splitText('x', 4), RangeError)
+})
+
+test('uploadTypeFor classifies images, audio and documents without ReferenceError', () => {
+  const client = createMaxClient({ token: 'test-token' })
+  assert.equal(client.uploadTypeFor('/tmp/shot.PNG'), 'image')
+  assert.equal(client.uploadTypeFor('/tmp/voice.ogg'), 'audio')
+  assert.equal(client.uploadTypeFor('/tmp/report.docx'), 'file')
+  assert.equal(client.uploadTypeFor('/tmp/archive.zip'), 'file')
+})
+
+test('only MAX-owned HTTPS hosts are trusted for token-bearing requests', () => {
+  assert.equal(isTrustedMaxUrl('https://platform-api2.max.ru/uploads/1'), true)
+  assert.equal(isTrustedMaxUrl('https://cdn.max.ru/file.jpg'), true)
+  assert.equal(isTrustedMaxUrl('https://evil.example/file.jpg'), false)
+  assert.equal(isTrustedMaxUrl('http://platform-api2.max.ru/uploads/1'), false)
+  assert.equal(isTrustedMaxUrl('not a url'), false)
 })

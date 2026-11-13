@@ -64,8 +64,6 @@ export const SETTINGS_KEYS = Object.freeze({
     default: Object.freeze([]),
   }),
   voiceTranscribe: Object.freeze({ type: 'boolean', default: false }),
-  voiceEndpoint: Object.freeze({ type: 'httpsUrl', default: null }),
-  voiceModel: Object.freeze({ type: 'string', maxLength: 80, default: 'whisper-1' }),
   voiceTts: Object.freeze({ type: 'boolean', default: false }),
   voiceTtsMode: Object.freeze({ type: 'enum', values: Object.freeze(['off', 'short', 'always']), default: 'short' }),
   voiceTtsVoice: Object.freeze({ type: 'string', maxLength: 80, default: 'alloy' }),

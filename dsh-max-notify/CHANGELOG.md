@@ -4,6 +4,43 @@ All notable changes to `dsh-max-notify` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] — 2026-11-13
+
+Аудит техдолга, безопасности и совместимости с DSH 0.2.2-rc.2.
+
+### Fixed
+
+- **DSH rc.2:** webhook и settings-маршруты больше не теряются из-за порядка
+  активации `webServer`; используются `ctx.inject(['webServer'])` и
+  `['connection','webServer']`, с fallback на polling и health-диагностикой.
+  Маршруты переживают HMR и заменяют stale-регистрации.
+- **Вложения `present`:** исправлен `uploadTypeFor` (`AUDIO_EXTENSIONS` был
+  undefined); документы/аудио снова доходят, а не теряются с warning.
+- **Транспорт:** `sendMessage` передаёт `chatKey`/`priority` в лимитер; per-chat
+  лимит и critical-полоса работают. UA берёт реальную версию.
+- **Allowlist:** проверяется для всех исходящих путей (observer/progress/
+  approvals/files/TTS), а не только финала; транзиентный `getChat` больше не
+  кэшируется навсегда. В чате с `allowedChatIds` при заданном `allowedUserIds`
+  отправитель тоже должен быть в allowlist.
+- **Webhook durability:** `save()` до ответа 200; poison-update уходит в
+  dead-letter после 3 попыток; in-flight dedupe для poll/webhook.
+- **Секреты:** webhook secret требует 32–256 `[A-Za-z0-9_-]`; endpoint STT/TTS
+  больше не редактируется через GUI-overlay; токен не отправляется на
+  не-MAX хосты и не уходит по cross-host redirect; deliverable cap 50 МиБ.
+- **Файлы:** state/outbox/heartbeat/inbox — 0600/0700; corrupt state/outbox
+  сохраняются как `.corrupt-*`; outbox не дублирует pending/delivered.
+- **Lifecycle:** `stopPolling()` отделён от `dispose()`; heartbeat пишется после
+  webhook setup; route-latch сбрасывается.
+- CI: `permissions: contents: read`, concurrency, timeout; `.gitignore`
+  закрывает личные каталоги; удалены старые `refs/original`.
+- **Тесты:** 358 (было 353): транспорт/типы, allowlist всех путей, deferred
+  routes, secret strength, in-flight/очереди.
+
+### Deferred
+
+- Распил `index.js` на модули, удаление мёртвой HTML-страницы настроек,
+  унификация target/format-хелперов, полный state schema migration.
+
 ## [1.5.0] — 2026-11-09
 
 Брифинг и статус.

@@ -20,6 +20,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname } from 'node:path'
 
 import { createMaxClient, splitText, MAX_TEXT_LIMIT } from './lib/transport.mjs'
 import { extractAssistantText } from './lib/extract.mjs'
@@ -145,7 +146,6 @@ const DEFAULTS = {
   notifyGoals: false,
   notifyErrors: true,
   todoProgress: false,
-  guiNotices: false,
   quietHours: undefined,
   mode: 'all',
   digestEnabled: false,
@@ -256,6 +256,8 @@ function normalizeQuietHours(value) {
 export function normalizeConfig(raw = {}) {
   const merged = { ...DEFAULTS, ...(raw && typeof raw === 'object' ? raw : {}) }
   const env = typeof process === 'undefined' ? {} : process.env
+  const rawWebhookSecret = String(merged.webhookSecret || env.MAX_NOTIFY_WEBHOOK_SECRET || '').trim()
+  const validWebhookSecret = /^[A-Za-z0-9_-]{32,256}$/.test(rawWebhookSecret)
 
   const config = {
     ...merged,
@@ -319,7 +321,6 @@ export function normalizeConfig(raw = {}) {
     stateFile: String(merged.stateFile || env.MAX_NOTIFY_STATE_FILE || '').trim() || undefined,
     webUrl: String(merged.webUrl || env.DSH_WEB_URL || '').trim() || undefined,
     notifySubagents: asBoolean(merged.notifySubagents, DEFAULTS.notifySubagents),
-  guiNotices: asBoolean(merged.guiNotices, DEFAULTS.guiNotices),
     notifyJobs: asBoolean(merged.notifyJobs, DEFAULTS.notifyJobs),
     notifyAwaitedJobs: asBoolean(merged.notifyAwaitedJobs, DEFAULTS.notifyAwaitedJobs),
     notifyGoals: asBoolean(merged.notifyGoals, DEFAULTS.notifyGoals),
@@ -357,7 +358,8 @@ export function normalizeConfig(raw = {}) {
     budgetAlertEnabled: asBoolean(merged.budgetAlertEnabled, DEFAULTS.budgetAlertEnabled),
     budgetAlertThresholds: asIntArray(merged.budgetAlertThresholds, DEFAULTS.budgetAlertThresholds),
     transport: merged.transport === 'webhook' ? 'webhook' : 'polling',
-    webhookSecret: String(merged.webhookSecret || env.MAX_NOTIFY_WEBHOOK_SECRET || '').trim() || undefined,
+    webhookSecret: validWebhookSecret ? rawWebhookSecret : undefined,
+    webhookSecretInvalid: rawWebhookSecret !== '' && !validWebhookSecret,
     webhookPublicUrl: String(merged.webhookPublicUrl || env.MAX_NOTIFY_WEBHOOK_URL || '').trim() || undefined,
     webhookUpdateTypes:
       typeof merged.webhookUpdateTypes === 'string' && merged.webhookUpdateTypes.trim() !== ''
@@ -499,6 +501,37 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     return
   }
 
+  // Guard every outbound path (finals, approvals, errors, progress, files,
+  // TTS, /send, /diff) with the same recipient allowlist. The raw client is
+  // kept for host-only reads such as getChat/getSubscriptions.
+  const rawClient = client
+  const guardedClientMethods = new Set([
+    'sendMessage',
+    'sendText',
+    'sendWithAttachments',
+    'editMessage',
+    'deleteMessage',
+    'answerCallback',
+    'sendAction',
+    'uploadMedia',
+  ])
+  client = new Proxy(rawClient, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver)
+      if (typeof value !== 'function' || !guardedClientMethods.has(property)) return value
+      return async (...args) => {
+        if (!(await ensureTargetAllowed())) {
+          throw new Error('MAX recipient is not allowlisted; outbound request blocked')
+        }
+        const result = await value.apply(target, args)
+        if (property === 'sendMessage' || property === 'sendText' || property === 'sendWithAttachments') {
+          health.update({ lastSendAt: Date.now() })
+        }
+        return result
+      }
+    },
+  })
+
   const enqueue = createSendQueue({ minIntervalMs: config.minIntervalMs, logger })
 
   // Fail-closed remote control: without an allowlist anyone could drive the
@@ -520,6 +553,8 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
    * allowed user; anything unresolvable fails closed.
    */
   let targetCheckPromise
+  let targetCheckResult
+  let targetCheckAt = 0
   async function resolveTargetPolicy() {
     const allowedUsers = new Set(config.allowedUserIds)
     const allowedChats = new Set(config.allowedChatIds)
@@ -534,7 +569,11 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
         if (typeof client.getChat !== 'function') throw new Error('transport has no getChat')
         chat = await client.getChat(targetChat)
       } catch (error) {
-        return { allowed: false, reason: `cannot verify chat ${targetChat}: ${error?.message || String(error)}` }
+        return {
+          allowed: false,
+          transient: true,
+          reason: `cannot verify chat ${targetChat}: ${error?.message || String(error)}`,
+        }
       }
       const type = chat?.type
       if (type !== 'dialog') {
@@ -559,13 +598,31 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
   }
 
   function ensureTargetAllowed() {
-    if (targetCheckPromise === undefined) {
-      targetCheckPromise = resolveTargetPolicy().then((result) => {
-        if (result.allowed) logger.info('recipient check passed: %s', result.reason)
-        else logger.warn('sending blocked by allowlist: %s', result.reason)
+    // Successful verification and deterministic policy denials are cached.
+    // A transient getChat failure is retried after a short cooldown instead of
+    // disabling outbound messages until the next plugin restart.
+    if (targetCheckResult?.allowed === true) return Promise.resolve(true)
+    if (targetCheckResult && targetCheckResult.transient !== true) return Promise.resolve(false)
+    if (targetCheckResult?.transient === true && Date.now() - targetCheckAt < 10_000) return Promise.resolve(false)
+    if (targetCheckPromise) return targetCheckPromise
+    targetCheckPromise = resolveTargetPolicy()
+      .then((result) => {
+        targetCheckAt = Date.now()
+        if (result.allowed) {
+          targetCheckResult = result
+          logger.info('recipient check passed: %s', result.reason)
+        } else if (result.transient !== true) {
+          targetCheckResult = result
+          logger.warn('sending blocked by allowlist: %s', result.reason)
+        } else {
+          targetCheckResult = result
+          logger.warn('cannot verify recipient yet; will retry: %s', result.reason)
+        }
         return result.allowed
       })
-    }
+      .finally(() => {
+        targetCheckPromise = undefined
+      })
     return targetCheckPromise
   }
   /** sessionId -> { turn, text } — latest assistant text of the open turn. */
@@ -1462,13 +1519,18 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
         } catch (error) {
           logger.warn('cannot process a webhook update: %s', error?.message || String(error))
           health.fail(error)
+          const attempts = state.bumpWebhookHeadAttempts()
+          if (attempts >= 3) {
+            state.shiftWebhookQueue()
+            state.save()
+            audit.write({ kind: 'webhook', action: 'dead-letter', attempts, error: error?.message || String(error) })
+            logger.error?.('dropping poison webhook update after %d attempts: %s', attempts, error?.message || String(error))
+            continue
+          }
           break
         }
-        const next = state.getWebhookQueue()
-        next.shift()
-        state.setWebhookQueue(next)
-        state.save()
-        health.update({ webhookQueueDepth: next.length, webhookLastProcessedAt: Date.now() })
+        const nextLength = state.shiftWebhookQueue()
+        health.update({ webhookQueueDepth: nextLength, webhookLastProcessedAt: Date.now() })
       }
     } finally {
       webhookDraining = false
@@ -1483,24 +1545,67 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     const queue = state.getWebhookQueue()
     if (key && queue.some((entry) => entry.key === key)) return
     if (queue.length >= config.webhookQueueMax) throw new Error('webhook queue is full')
-    queue.push({ key, update, at: Date.now() })
-    state.setWebhookQueue(queue)
+    const depth = state.pushWebhookQueue({ key, update, at: Date.now() }, config.webhookQueueMax)
+    // Durability contract: the 200 must not be sent until the update is on disk.
     state.save()
-    health.update({ webhookLastAt: Date.now(), webhookQueueDepth: queue.length })
+    health.update({ webhookLastAt: Date.now(), webhookQueueDepth: depth })
     void drainWebhookQueue()
   }
 
-  function setupWebhook() {
+  function ownRoute(webCtx, dispose) {
+    if (typeof webCtx?.effect === 'function' && typeof dispose === 'function') {
+      try {
+        webCtx.effect(() => () => {
+          try {
+            dispose()
+          } catch {
+            // already disposed
+          }
+        })
+      } catch {
+        // effect support is optional in minimal contexts
+      }
+    }
+    return dispose
+  }
+
+  /** Register a named route; replace a stale route left by an HMR generation. */
+  function registerRoute(webServer, route) {
+    const table = route.kind === 'exact' ? webServer.exact : webServer.prefixes
+    if (table instanceof Map && table.has(route.path)) {
+      logger.warn('replacing stale webServer route %s', route.path)
+      table.delete(route.path)
+    }
+    const dispose = webServer.register(route)
+    return () => {
+      try {
+        if (table instanceof Map && table.get(route.path) !== route) return
+      } catch {
+        // fall through to the stock disposer
+      }
+      try {
+        dispose()
+      } catch {
+        // already disposed
+      }
+    }
+  }
+
+  function registerWebhook(webServer, ownerCtx) {
+    if (webhookActive) return true
     if (config.transport !== 'webhook') return false
     if (!config.interactive) {
       logger.info('webhook transport skipped: interactive remote control is off')
       return false
     }
     if (!config.webhookSecret) {
-      logger.warn('webhook transport requested without webhookSecret; falling back to long polling')
+      logger.warn(
+        config.webhookSecretInvalid
+          ? 'webhook secret must be 32-256 chars [A-Za-z0-9_-]; falling back to long polling'
+          : 'webhook transport requested without webhookSecret; falling back to long polling',
+      )
       return false
     }
-    const webServer = getService('webServer')
     if (!webServer?.register) {
       logger.warn('webhook transport requested but the DSH webServer service is unavailable; falling back to long polling')
       return false
@@ -1511,11 +1616,38 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
         accept: acceptWebhookUpdate,
         logger,
       })
-      webhookRouteDispose = webServer.register({ kind: 'exact', path: config.webhookPath, handler })
+      const disposeRoute = registerRoute(webServer, { kind: 'exact', path: config.webhookPath, handler })
+      webhookRouteDispose = () => {
+        try {
+          disposeRoute()
+        } finally {
+          webhookActive = false
+          webhookRuntimeStarted = false
+          webhookRouteDispose = undefined
+          if (webhookRetryTimer) {
+            clearInterval(webhookRetryTimer)
+            webhookRetryTimer = undefined
+          }
+        }
+      }
+      ownRoute(ownerCtx, webhookRouteDispose)
       webhookActive = true
       config.polling = false
-      health.update({ transport: 'webhook', webhookPath: config.webhookPath, webhookActive: true })
+      // A polling fallback may already have started before the webServer service
+      // became available; stop it so both transports never consume updates.
+      try {
+        bot.stopPolling?.()
+      } catch {
+        // best effort during early startup
+      }
+      health.update({ transport: 'webhook', webhookPath: config.webhookPath, webhookActive: true, webhookSetupError: undefined })
+      if (webhookFallbackTimer) {
+        clearTimeout(webhookFallbackTimer)
+        webhookFallbackTimer = undefined
+      }
       logger.info('MAX webhook route registered: %s', config.webhookPath)
+      writeHeartbeat()
+      startWebhookRuntime()
       return true
     } catch (error) {
       logger.warn('cannot register the MAX webhook route %s: %s; falling back to long polling', config.webhookPath, error?.message || String(error))
@@ -1524,17 +1656,33 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     }
   }
 
-  webhookActive = setupWebhook()
+  /** Legacy synchronous path for minimal test contexts without ctx.inject. */
+  function setupWebhook() {
+    webhookActive = registerWebhook(getService('webServer'), ctx)
+    if (!webhookActive) config.polling = true
+    return webhookActive
+  }
+
+  let webhookRuntimeStarted = false
+  function startWebhookRuntime() {
+    if (!webhookActive || webhookRuntimeStarted) return
+    webhookRuntimeStarted = true
+    void drainWebhookQueue()
+    void startWebhookSubscription()
+    webhookRetryTimer = setInterval(() => {
+      void drainWebhookQueue()
+    }, 30_000)
+    webhookRetryTimer.unref?.()
+  }
 
   let settingsRouteDispose
-  function setupSettingsPage() {
-    if (!config.settingsPage || !config.interactive) return
-    const webServer = getService('webServer')
+  function registerSettingsPage(webServer, connection, ownerCtx) {
+    if (settingsRouteDispose) return
+    if (!config.settingsPage) return
     if (!webServer?.register) {
       logger.debug('settings page disabled: webServer is unavailable')
       return
     }
-    const connection = getService('connection')
     const api = createSettingsApi({
       file: settingsFilePath,
       getValues: settingsValues,
@@ -1544,7 +1692,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       logger,
     })
     try {
-      settingsRouteDispose = webServer.register({
+      const disposeRoute = registerRoute(webServer, {
         kind: 'exact',
         path: '/max-notify/settings.json',
         handler: async (req, res) => {
@@ -1562,12 +1710,74 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
           await api(req, res)
         },
       })
+      settingsRouteDispose = () => {
+        try {
+          disposeRoute()
+        } finally {
+          settingsRouteDispose = undefined
+        }
+      }
+      ownRoute(ownerCtx, settingsRouteDispose)
       logger.info('settings page API ready: /max-notify/settings.json')
     } catch (error) {
       logger.warn('cannot register the settings page route: %s', error?.message || String(error))
     }
   }
-  setupSettingsPage()
+
+  /** Legacy synchronous path for minimal test contexts without ctx.inject. */
+  function setupSettingsPage() {
+    registerSettingsPage(getService('webServer'), getService('connection'), ctx)
+  }
+
+  let webhookFallbackTimer
+  function startPollingFallback() {
+    if (webhookActive) return
+    config.polling = true
+    health.update({ transport: 'polling', webhookActive: false, webhookFallbackAt: Date.now() })
+    logger.warn('MAX webhook did not activate; using long polling')
+    writeHeartbeat()
+    try {
+      void bot.start()
+    } catch (error) {
+      logger.warn('cannot start MAX polling fallback: %s', error?.message || String(error))
+    }
+  }
+
+  if (typeof ctx.inject === 'function') {
+    if (config.transport === 'webhook') {
+      // Do not start a poller while waiting for the webServer service; rc.2
+      // activates the server after the plugin row is constructed.
+      config.polling = false
+      health.update({ transport: 'webhook', webhookActive: false, webhookDesired: true })
+      ctx.inject(['webServer'], (webCtx) => {
+        health.update({
+          webhookInjectedAt: Date.now(),
+          webhookServiceAvailable: Boolean(webCtx?.webServer),
+          webhookRegisterAvailable: Boolean(webCtx?.webServer?.register),
+        })
+        try {
+          if (!registerWebhook(webCtx.webServer, webCtx)) {
+            health.update({ webhookSetupError: 'registerWebhook returned false' })
+            startPollingFallback()
+          }
+        } catch (error) {
+          logger.warn('deferred MAX webhook setup failed: %s', error?.message || String(error))
+          health.update({ webhookSetupError: error?.message || String(error) })
+          startPollingFallback()
+        }
+      })
+      webhookFallbackTimer = setTimeout(startPollingFallback, 15_000)
+      webhookFallbackTimer.unref?.()
+    }
+    if (config.settingsPage && config.interactive) {
+      ctx.inject(['connection', 'webServer'], (webCtx) => {
+        registerSettingsPage(webCtx.webServer, webCtx.connection, webCtx)
+      })
+    }
+  } else {
+    setupWebhook()
+    setupSettingsPage()
+  }
 
   async function startWebhookSubscription() {
     if (!webhookActive || !config.webhookAutoSubscribe) return
@@ -1708,7 +1918,8 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       includeSessionId: config.includeSessionId,
       messageStyle: config.messageStyle,
     })
-    const chunks = splitText(payload, MAX_TEXT_LIMIT).slice(0, 8)
+    const chunkLimit = Math.min(MAX_TEXT_LIMIT, Math.max(200, Number(config.maxChars) || MAX_TEXT_LIMIT))
+    const chunks = splitText(payload, chunkLimit).slice(0, 8)
     if (config.dryRun) {
       logger.info('[dry-run] would send %d chunk(s) to MAX: %s', chunks.length, chunks[0]?.slice(0, 120))
       return
@@ -1955,7 +2166,8 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     try {
       const snapshot = health.snapshot({ outbox: outbox?.snapshot?.(), limiter: limiter?.snapshot?.() })
       state.setHealth(snapshot)
-      writeFileSync(config.heartbeatFile, `${JSON.stringify(snapshot, null, 2)}\n`)
+      mkdirSync(dirname(config.heartbeatFile), { recursive: true, mode: 0o700 })
+      writeFileSync(config.heartbeatFile, `${JSON.stringify(snapshot, null, 2)}\n`, { mode: 0o600 })
     } catch (error) {
       logger.debug('cannot write heartbeat file: %s', error?.message || String(error))
     }
@@ -1965,20 +2177,17 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     ctx.effect(() => {
       outbox?.start()
       void bot.start()
-      if (webhookActive) {
-        void drainWebhookQueue()
-        void startWebhookSubscription()
-        webhookRetryTimer = setInterval(() => {
-          void drainWebhookQueue()
-        }, 30_000)
-        webhookRetryTimer.unref?.()
-      }
+      if (webhookActive) startWebhookRuntime()
       observer.start()
       writeHeartbeat()
       const healthTimer = setInterval(writeHeartbeat, 60_000)
       healthTimer.unref?.()
       return () => {
         clearInterval(healthTimer)
+        if (webhookFallbackTimer) {
+          clearTimeout(webhookFallbackTimer)
+          webhookFallbackTimer = undefined
+        }
         if (webhookRetryTimer) {
           clearInterval(webhookRetryTimer)
           webhookRetryTimer = undefined
@@ -2048,4 +2257,5 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     })
   }
 }
+
 
