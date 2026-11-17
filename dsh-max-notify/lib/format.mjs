@@ -3,20 +3,48 @@
  */
 import { describeReason } from './extract.mjs'
 
-/** Last path segment of a working directory, used in the notification header. */
-function shortCwd(cwd) {
+/**
+ * Last path segment of a working directory: notification headers, status card,
+ * session list and workspace picker all show the folder, not the full path.
+ * Only `/` and `\` are treated as separators; trailing ones are ignored.
+ */
+export function folderOf(cwd) {
   if (typeof cwd !== 'string' || cwd === '') return ''
   const normalized = cwd.replace(/[/\\]+$/, '')
-  const base = normalized.split(/[/\\]/).pop()
-  return base || normalized
+  return normalized.split(/[/\\]/).pop() || normalized
 }
 
 function pad2(value) {
   return String(value).padStart(2, '0')
 }
 
-function formatClock(date) {
-  return `${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}`
+/**
+ * Clock label for notifications and cards: `HH:MM` by default, `HH:MM:SS`
+ * when `seconds` is set. Accepts a Date or anything `new Date()` understands;
+ * an unparseable value renders as an em dash instead of `NaN:NaN`.
+ */
+export function formatClock(date, { seconds = false } = {}) {
+  const value = date instanceof Date ? date : new Date(date)
+  if (Number.isNaN(value.getTime())) return '—'
+  const clock = `${pad2(value.getHours())}:${pad2(value.getMinutes())}`
+  return seconds ? `${clock}:${pad2(value.getSeconds())}` : clock
+}
+
+/**
+ * Human-readable file size. One implementation for incoming attachments, the
+ * `/send` resolver and `/diff` cards.
+ *
+ * Units are powers of 1024, not 1000: "KB"/"MB"/"GB" are conventional labels
+ * for KiB/MiB/GiB (so 1 GB means 1024³ bytes). B/KB/MB keep one decimal; GB
+ * keeps two, so files just over a gibibyte do not collapse into "1.0 GB".
+ */
+export function formatBytes(bytes) {
+  const value = Number(bytes)
+  if (!Number.isFinite(value) || value <= 0) return '0 B'
+  if (value < 1024) return `${value} B`
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
+  if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`
+  return `${(value / (1024 * 1024 * 1024)).toFixed(2)} GB`
 }
 
 /**
@@ -50,12 +78,12 @@ export function formatNotification({
   const body = String(text ?? '').trim()
   if (!includeHeader) return body
 
-  const label = typeof title === 'string' && title.trim() !== '' ? title.trim() : shortCwd(cwd)
+  const label = typeof title === 'string' && title.trim() !== '' ? title.trim() : folderOf(cwd)
   const reasonNote = describeReason(reason)
 
   if (messageStyle === 'detailed') {
     const brand = format === 'html' ? '<b>DSH</b>' : format === 'markdown' ? '**DSH**' : 'DSH'
-    const parts = [brand, formatClock(now)]
+    const parts = [brand, formatClock(now, { seconds: true })]
     if (label) parts.push(label.length > 60 ? `${label.slice(0, 57)}…` : label)
     if (includeSessionId && typeof sessionId === 'string' && sessionId.length > 0) {
       parts.push(sessionId.length > 12 ? sessionId.slice(-8) : sessionId)
@@ -65,7 +93,7 @@ export function formatNotification({
     return body ? `${header}\n\n${body}` : header
   }
 
-  const clock = `${pad2(now.getHours())}:${pad2(now.getMinutes())}`
+  const clock = formatClock(now)
   const parts = [`🕒 ${clock}`]
   if (label) parts.push(label.length > 40 ? `${label.slice(0, 37)}…` : label)
   if (includeSessionId && typeof sessionId === 'string' && sessionId.length > 0) {

@@ -10,6 +10,7 @@ import {
   runGitDiff,
   WORKSPACE_LIMITS,
 } from '../lib/workspace-tools.mjs'
+import { formatBytes as sharedFormatBytes } from '../lib/format.mjs'
 
 const root = mkdtempSync(join(tmpdir(), 'dsh-max-workspace-'))
 const cwd = join(root, 'session')
@@ -80,7 +81,11 @@ test('resolveSendFile enforces the size limit', () => {
 })
 
 test('formatBytes and limits are stable', () => {
+  assert.equal(formatBytes, sharedFormatBytes, 'workspace-tools re-exports the shared helper')
   assert.equal(formatBytes(0), '0 B')
   assert.equal(formatBytes(2048), '2.0 KB')
+  // Consolidated with incoming.mjs: sizes past 1 GiB now render as GB
+  // (workspace-tools used to keep printing MB with one decimal).
+  assert.equal(formatBytes(1.5 * 1024 ** 3), '1.50 GB')
   assert.equal(WORKSPACE_LIMITS.maxDiffBytes, 1024 * 1024)
 })

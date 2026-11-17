@@ -42,6 +42,7 @@ import { collectMessageImages } from './lib/images.mjs'
 import { createForwarding } from './lib/forwarding.mjs'
 import { buildTableFiles } from './lib/tables.mjs'
 import {
+  SETTINGS_KEYS,
   createSettingsApi,
   loadSettings,
   mergeSettings,
@@ -91,6 +92,18 @@ export function isTopLevelSession(session) {
   if (header.origin === 'subagent') return false
   const depth = Number(header.delegationDepth ?? 0)
   return !(Number.isFinite(depth) && depth > 0)
+}
+
+/** Synthetic success for outbound client methods while `dryRun` is enabled. */
+function dryRunResult(method, params) {
+  const mid = `dry-run-${Date.now()}`
+  if (method === 'uploadMedia') return { token: `dry-run-upload-${Date.now()}`, dryRun: true }
+  if (method === 'getMe') return { user_id: 0, name: 'dry-run', dryRun: true }
+  if (method === 'setCommands') return { ok: true, dryRun: true }
+  if (method === 'sendMessage' || method === 'sendText' || method === 'sendWithAttachments') {
+    return { ok: true, dryRun: true, message: { body: { mid }, params } }
+  }
+  return { ok: true, dryRun: true, mid }
 }
 
 /** Bounded, redacted copy of a webhook update for the dead-letter audit trail. */
@@ -231,14 +244,27 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     'answerCallback',
     'sendAction',
     'uploadMedia',
+    'subscribeWebhook',
+    'unsubscribeWebhook',
+    'setCommands',
+    'getMe',
   ])
   client = new Proxy(rawClient, {
     get(target, property, receiver) {
       const value = Reflect.get(target, property, receiver)
       if (typeof value !== 'function' || !guardedClientMethods.has(property)) return value
       return async (...args) => {
-        if (!(await ensureTargetAllowed())) {
+        // Subscription calls are bot-level, not messages to the recipient, so
+        // the recipient allowlist must not gate them.
+        const isSubscription = property === 'subscribeWebhook' || property === 'unsubscribeWebhook'
+        if (!isSubscription && !(await ensureTargetAllowed())) {
           throw new Error('MAX recipient is not allowlisted; outbound request blocked')
+        }
+        // dryRun means "never mutate MAX": every outbound write is faked so
+        // approvals, progress cards, files and voice cannot hit the network.
+        if (config.dryRun) {
+          logger.info('[dry-run] skip %s', property)
+          return dryRunResult(property, args[0])
         }
         const result = await value.apply(target, args)
         if (property === 'sendMessage' || property === 'sendText' || property === 'sendWithAttachments') {
@@ -248,6 +274,13 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       }
     },
   })
+
+  if (config.dryRun) {
+    // Never receive updates or subscribe in dry-run mode; local durable files
+    // still work so teardown/diagnostics can be exercised.
+    config.polling = false
+    config.webhookAutoSubscribe = false
+  }
 
   const enqueue = createSendQueue({ minIntervalMs: config.minIntervalMs, logger, isStopped: () => disposed })
 
@@ -273,6 +306,8 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
   let targetCheckResult
   let targetCheckAt = 0
   async function resolveTargetPolicy() {
+    // dryRun must not touch the network just to verify the recipient.
+    if (config.dryRun) return { allowed: true, reason: 'dry-run (recipient check skipped)' }
     const allowedUsers = new Set(config.allowedUserIds)
     const allowedChats = new Set(config.allowedChatIds)
     if (allowedUsers.size === 0 && allowedChats.size === 0) {
@@ -709,8 +744,10 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     }
   }
 
+  const SETTINGS_KEYS_ALLOWED = new Set(Object.keys(SETTINGS_KEYS))
+
   function settingsValues() {
-    return {
+    const values = {
       mode: config.mode,
       digestEnabled: config.digestEnabled,
       digestTime: config.digestTime,
@@ -741,6 +778,13 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       autonomyEnabled: config.autonomyEnabled,
       buttonsPresets: config.buttonsPresets,
     }
+    // The GUI contract is SETTINGS_KEYS. Diagnostics-only fields above (voice
+    // endpoint/model, autonomyEnabled) must not leak into the editable draft.
+    const filtered = {}
+    for (const key of SETTINGS_KEYS_ALLOWED) {
+      if (key in values) filtered[key] = values[key]
+    }
+    return filtered
   }
 
   function settingsStatus() {
@@ -795,6 +839,10 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
   async function say(text) {
     const value = String(text ?? '').trim()
     if (value === '') return { ok: false, error: 'пустой текст' }
+    if (config.dryRun) {
+      logger.info('[dry-run] would synthesize speech (%d chars)', value.length)
+      return { ok: true, dryRun: true }
+    }
     const check = ttsConfigured(config)
     if (!check.ok) return { ok: false, error: `TTS не настроен: ${check.reason}` }
     const result = await synthesizeSpeech({
@@ -989,13 +1037,16 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
         const audio = files.find(
           (file) => file && typeof file.path === 'string' && (String(file.type) === 'audio' || AUDIO_EXTENSIONS.test(file.path)),
         )
-        if (audio) {
+        if (audio && config.dryRun) {
+          logger.info('[dry-run] would transcribe %s', audio.path)
+        } else if (audio) {
           const result = await transcribeAudio({
             filePath: audio.path,
             endpoint: config.voiceEndpoint,
             apiKey: config.voiceApiKey,
             model: config.voiceModel,
             language: config.voiceLanguage,
+            insecureVoiceEndpoint: config.insecureVoiceEndpoint === true,
           })
           if (result.ok) {
             transcript = result.text
@@ -1278,7 +1329,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
 
   /** Persist one MAX update durably, then answer 200; processing follows. */
   async function acceptWebhookUpdate(update) {
-    if (disposed) return
+    if (disposed || config.dryRun) return
     const key = bot.updateKey?.(update)
     if (key && state.hasProcessed(key)) return
     const queue = state.getWebhookQueue()
@@ -1554,13 +1605,14 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
   }
 
   // Final-message forwarding (image dedupe + inline keyboard) lives in its own module.
-  const { noteSentImages, collectFinalImages, finalKeyboard } = createForwarding({
+  const forwarding = createForwarding({
     client,
     config,
     logger,
     state,
     getService,
   })
+  const { noteSentImages, collectFinalImages, finalKeyboard } = forwarding
 
   async function deliver(session, text, reason, message, toolImageRefs = [], turn, seq) {
     if (!(await ensureTargetAllowed())) return
@@ -1650,7 +1702,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       }
       logger.debug('MAX message sent%s', mid ? ` (mid ${mid})` : '')
     }
-    if (config.voiceTts && !queuedAny) {
+    if (config.voiceTts && !queuedAny && !config.dryRun) {
       const speak = shouldSpeak(text, config)
       if (speak.ok) {
         try {
@@ -1767,6 +1819,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       pending.delete(session.id)
       pendingToolImages.delete(session.id)
       progress.onTurnEnd(session)
+      observer.clearSession?.(session.id)
     }
   })
 
@@ -1846,8 +1899,11 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
   function writeHeartbeat() {
     if (!config.heartbeatFile) return
     try {
-      const snapshot = health.snapshot({ outbox: outbox?.snapshot?.(), limiter: limiter?.snapshot?.() })
-      state.setHealth(snapshot)
+      const outboxStats = outbox?.snapshot?.() ?? {}
+      // Transient counters belong to the heartbeat, not to the durable state.
+      const { sent, failed, dropped, enqueued, ...outboxDurable } = outboxStats
+      const snapshot = health.snapshot({ outbox: outboxStats, limiter: limiter?.snapshot?.() })
+      state.setHealth({ ...snapshot, outbox: outboxDurable })
       mkdirSync(dirname(config.heartbeatFile), { recursive: true, mode: 0o700 })
       writeFileSync(config.heartbeatFile, `${JSON.stringify(snapshot, null, 2)}\n`, { mode: 0o600 })
     } catch (error) {
@@ -1895,6 +1951,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
         observer.dispose()
         progress.dispose()
         interactions.dispose()
+        forwarding?.dispose?.()
         // Let already queued sends finish before tearing down their dependencies.
         try {
           await enqueue.idle()

@@ -15,41 +15,40 @@ import {
 } from './cards.mjs'
 import { extractAssistantText } from './extract.mjs'
 import { PRIORITY } from './limits.mjs'
+import { createLruMap } from './lru.mjs'
+import { isTopLevelSession } from './session-kind.mjs'
+import { targetQuery } from './target.mjs'
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/** Upper bound for the per-session goal/TODO caches below. */
+const CACHE_MAX = 500
 
 function localDayKey(date = new Date()) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
 }
 
-function isTopLevel(session) {
-  const header = session?.header
-  if (!header) return true
-  if (header.origin === 'subagent') return false
-  return !(Number(header.delegationDepth ?? 0) > 0)
-}
-
-export function createObserver({ client, config, logger, target, policy, runtime, state, outbox } = {}) {
+export function createObserver({ client, config, logger, target, policy, runtime, state, outbox, now } = {}) {
   let disposed = false
   let queue = Promise.resolve()
   let lastSentAt = 0
   let digestTimer
   let budgetTimer
   let budgetInitialTimer
+  // Injectable wall clock: digest window tests must not depend on the real time.
+  const clock = typeof now === 'function' ? now : () => Date.now()
+  const dayKey = () => localDayKey(new Date(clock()))
 
-  const usage = { dayKey: localDayKey(), input: 0, output: 0, total: 0 }
-  /** sessionId -> goal view */
-  const goals = new Map()
-  /** sessionId -> { title, todos } */
-  const todos = new Map()
-  /** sessionId -> { completed, signature } */
-  const todoProgress = new Map()
-
-  const targetQuery = () =>
-    target?.chatId !== undefined ? { chatId: target.chatId } : { userId: target?.userId }
+  const usage = { dayKey: dayKey(), input: 0, output: 0, total: 0 }
+  /** sessionId -> goal view (LRU-bounded) */
+  const goals = createLruMap({ max: CACHE_MAX })
+  /** sessionId -> { title, todos } (LRU-bounded) */
+  const todos = createLruMap({ max: CACHE_MAX })
+  /** sessionId -> { completed, signature } (LRU-bounded) */
+  const todoProgress = createLruMap({ max: CACHE_MAX })
 
   function rollUsageDay() {
-    const key = localDayKey()
+    const key = dayKey()
     if (usage.dayKey === key) return
     usage.dayKey = key
     usage.input = 0
@@ -74,7 +73,7 @@ export function createObserver({ client, config, logger, target, policy, runtime
         kind,
         priority: priority ?? (kind === 'error' ? PRIORITY.critical : PRIORITY.normal),
         params: {
-          ...targetQuery(),
+          ...targetQuery(target),
           text,
           format: config.format,
           notify: decision.notify,
@@ -91,7 +90,7 @@ export function createObserver({ client, config, logger, target, policy, runtime
         if (wait > 0) await sleep(wait)
         lastSentAt = Date.now()
         await client.sendMessage({
-          ...targetQuery(),
+          ...targetQuery(target),
           text,
           format: config.format,
           notify: decision.notify,
@@ -123,7 +122,7 @@ export function createObserver({ client, config, logger, target, policy, runtime
     }
     if (event.type !== 'todo/write') return
     if (!config.todoProgress) return
-    if (!isTopLevel(session)) return
+    if (!isTopLevelSession(session)) return
     const items = Array.isArray(data.todos) ? data.todos : []
     const sessionId = String(session?.id ?? '')
     const title = runtime?.titleFor?.(session)
@@ -153,7 +152,7 @@ export function createObserver({ client, config, logger, target, policy, runtime
 
   function onAgentError(payload) {
     if (!config.notifyErrors || disposed) return
-    if (!isTopLevel(payload?.agent?.session)) return
+    if (!isTopLevelSession(payload?.agent?.session)) return
     const errorSession = String(payload?.agent?.session?.id ?? '')
     send(
       'error',
@@ -170,7 +169,7 @@ export function createObserver({ client, config, logger, target, policy, runtime
   function onGoalChanged(payload) {
     if (!config.notifyGoals || disposed) return
     const session = payload?.agent?.session
-    if (!isTopLevel(session)) return
+    if (!isTopLevelSession(session)) return
     const change = payload?.change ?? {}
     const operation = change.operation
     if (operation === 'edit' || operation === 'clear') return
@@ -213,7 +212,7 @@ export function createObserver({ client, config, logger, target, policy, runtime
       questions: pendingCards.filter((card) => card?.kind === 'question').length,
     }
     const text = formatDigestCard({
-      date: new Date().toLocaleDateString('ru-RU'),
+      date: new Date(clock()).toLocaleDateString('ru-RU'),
       sessions: recent,
       usage: { ...usage },
       goals: [...goals.values()],
@@ -221,19 +220,39 @@ export function createObserver({ client, config, logger, target, policy, runtime
       cost,
       pending,
     })
-    send('digest', text, { dedupeKey: `digest:${localDayKey()}` })
-    state?.setDigestDate?.(localDayKey())
+    send('digest', text, { dedupeKey: `digest:${dayKey()}` })
+    state?.setDigestDate?.(dayKey())
   }
 
+  /** Epoch ms of today's configured digest time, or `undefined` for bad input. */
+  function scheduledDigestAt(atMs) {
+    const match = /^(\d{2}):(\d{2})$/.exec(String(config.digestTime ?? ''))
+    if (!match) return undefined
+    const hours = Number(match[1])
+    const minutes = Number(match[2])
+    if (hours > 23 || minutes > 59) return undefined
+    const scheduled = new Date(atMs)
+    scheduled.setHours(hours, minutes, 0, 0)
+    return scheduled.getTime()
+  }
+
+  /**
+   * Send the daily digest once it is due.
+   *
+   * "Due" means `now >= configured time` and the digest was not sent yet today,
+   * not an exact HH:MM match: a blocked event loop, a restart at 09:01 or a
+   * missed 30 s timer tick must not silently skip the whole day. Repeats are
+   * prevented by the persisted `digestDate` (restart-safe) and by the
+   * `digest:<day>` outbox dedupe key.
+   */
   async function maybeSendDigest() {
-    if (!config.digestEnabled || disposed) return
-    const time = String(config.digestTime ?? '')
-    if (!/^\d{2}:\d{2}$/.test(time)) return
-    const now = new Date()
-    const current = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
-    if (current !== time) return
-    if (state?.getDigestDate?.() === localDayKey(now)) return
+    if (!config.digestEnabled || disposed) return false
+    const at = clock()
+    if (state?.getDigestDate?.() === dayKey()) return false
+    const scheduled = scheduledDigestAt(at)
+    if (scheduled === undefined || at < scheduled) return false
     await sendDigest()
+    return true
   }
 
   /** Send one alert per threshold per budget period (persisted across reloads). */
@@ -293,6 +312,20 @@ export function createObserver({ client, config, logger, target, policy, runtime
     void maybeSendDigest().catch(() => {})
   }
 
+  /**
+   * Drop every cached view of one finished session (goal, TODO title/items and
+   * the last reported TODO progress). Called by index.js on `session/disposed`
+   * so long-running hosts do not keep disposed sessions in memory.
+   */
+  function clearSession(sessionId) {
+    const id = String(sessionId ?? '')
+    if (id === '') return false
+    goals.delete(id)
+    todos.delete(id)
+    todoProgress.delete(id)
+    return true
+  }
+
   function dispose() {
     disposed = true
     if (digestTimer) {
@@ -316,7 +349,9 @@ export function createObserver({ client, config, logger, target, policy, runtime
     onGoalChanged,
     onJobEvent,
     sendDigest,
+    maybeSendDigest,
     checkBudget,
+    clearSession,
     start,
     dispose,
     get usage() {
@@ -324,6 +359,10 @@ export function createObserver({ client, config, logger, target, policy, runtime
     },
     get goals() {
       return [...goals.values()]
+    },
+    /** Sizes of the bounded per-session caches (observability/tests). */
+    get cacheSizes() {
+      return { goals: goals.size, todos: todos.size, todoProgress: todoProgress.size }
     },
   }
 }

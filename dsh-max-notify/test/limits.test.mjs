@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { PRIORITY, createLimiter } from '../lib/limits.mjs'
 
 const silent = { warn() {}, debug() {}, info() {} }
@@ -108,4 +109,103 @@ test('a null chat key only uses the global bucket', async () => {
   const limiter = createLimiter({ perChatPerSecond: 2, globalPerSecond: 100, now: () => time, logger: silent })
   for (let index = 0; index < 10; index += 1) await limiter.acquire(null)
   assert.equal(limiter.snapshot().queueDepth, 0)
+})
+
+// ---------------------------------------------------------------------------
+// P2: queue timer must keep the process alive while waiters are pending
+// ---------------------------------------------------------------------------
+
+test('the refill timer stays referenced so a queued acquire resolves instead of the process exiting', () => {
+  // The child uses a frozen clock, so only the limiter's own refill timer can
+  // keep the event loop alive: a 20ms unref'd timer advances the clock and
+  // pumps. With an unref'd refill timer Node would exit first (unsettled
+  // top-level await, code 13) and never print "resolved".
+  const limitsUrl = new URL('../lib/limits.mjs', import.meta.url).href
+  const script = `
+    const { createLimiter } = await import(${JSON.stringify(limitsUrl)})
+    let time = 1_000_000
+    const limiter = createLimiter({ perChatPerSecond: 2, globalPerSecond: 100, now: () => time })
+    await limiter.acquire('chat')
+    await limiter.acquire('chat')
+    const pending = limiter.acquire('chat')
+    setTimeout(() => {
+      time += 1000
+      limiter.pump()
+    }, 20).unref()
+    await pending
+    limiter.stop()
+    console.log('resolved')
+  `
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    encoding: 'utf8',
+    timeout: 10_000,
+  })
+  assert.equal(result.status, 0, `limiter child exited with ${result.status}: ${result.stderr}`)
+  assert.match(result.stdout, /resolved/)
+})
+
+// ---------------------------------------------------------------------------
+// P2: LRU eviction of chat buckets
+// ---------------------------------------------------------------------------
+
+test('chat buckets are evicted least-recently-used, not first-in-first-out', async () => {
+  let time = 1_000_000
+  const limiter = createLimiter({ perChatPerSecond: 1, globalPerSecond: 100_000, maxChatBuckets: 2, now: () => time, logger: silent })
+
+  await limiter.acquire('a') // a: empty bucket
+  await limiter.acquire('b') // b: empty bucket
+  assert.equal(limiter.snapshot().chatBuckets, 2)
+  assert.equal(limiter.snapshot().maxChatBuckets, 2)
+
+  time += 1000
+  await limiter.acquire('a') // refills a and makes it the most recently used
+  await limiter.acquire('c') // a new bucket must evict b (LRU), not a (FIFO would evict a)
+  assert.equal(limiter.snapshot().chatBuckets, 2)
+
+  let resolved = false
+  const pending = limiter.acquire('a').then(() => {
+    resolved = true
+  })
+  await tick()
+  assert.equal(resolved, false, 'a recently used chat keeps its depleted bucket')
+  assert.equal(limiter.snapshot().queueDepth, 1)
+
+  time += 1000
+  limiter.pump()
+  await pending
+  limiter.stop()
+})
+
+test('the default chat bucket bound keeps memory at 500 buckets', async () => {
+  const limiter = createLimiter({ perChatPerSecond: 10, globalPerSecond: 100_000, logger: silent })
+  for (let index = 0; index < 600; index += 1) await limiter.acquire(`chat-${index}`)
+  assert.equal(limiter.snapshot().maxChatBuckets, 500)
+  assert.equal(limiter.snapshot().chatBuckets, 500)
+  limiter.stop()
+})
+
+// ---------------------------------------------------------------------------
+// P2: waitFor() is a read-only estimate
+// ---------------------------------------------------------------------------
+
+test('waitFor() estimates the refill delay without creating, refilling or evicting buckets', async () => {
+  let time = 1_000_000
+  const limiter = createLimiter({ perChatPerSecond: 1, globalPerSecond: 100, maxChatBuckets: 2, now: () => time, logger: silent })
+
+  assert.equal(limiter.snapshot().chatBuckets, 0)
+  assert.equal(limiter.waitFor('never-seen'), 0, 'a missing bucket would be created full of tokens')
+  assert.equal(limiter.snapshot().chatBuckets, 0, 'waitFor must not create buckets')
+
+  await limiter.acquire('a')
+  assert.equal(limiter.waitFor('a'), 1000, 'a depleted chat needs the full refill')
+  time += 500
+  assert.equal(limiter.waitFor('a'), 500)
+  assert.equal(limiter.snapshot().chatBuckets, 1, 'waitFor must not change the bucket map')
+
+  await limiter.acquire('b') // map is now {a, b} at the limit
+  assert.equal(limiter.waitFor('a'), 500, 'a still holds its partially refilled bucket')
+  assert.equal(limiter.waitFor('unknown'), 0)
+  assert.equal(limiter.waitFor('a'), 500, 'probing an unknown chat must not evict the LRU bucket')
+  assert.equal(limiter.snapshot().chatBuckets, 2)
+  limiter.stop()
 })

@@ -62,6 +62,8 @@
         # settingsFile: $DSH_HOME/max-notify/config.json
         # voiceTranscribe: false
         # voiceEndpoint: https://api.openai.com/v1
+        # insecureVoiceEndpoint: false   # allow http STT endpoint (debug only)
+        # readOnlyNetwork: false         # allow web tools in read-only schedules
         # voiceApiKeyFile: /path/to/voice.key
         # voiceModel: whisper-1
         # voiceLanguage: ru

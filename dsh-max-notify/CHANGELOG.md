@@ -4,6 +4,48 @@ All notable changes to `dsh-max-notify` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] — 2026-11-17
+
+Закрытие P2-техдолга из аудита 17.11.
+
+### Changed
+
+- **Дедупликация:** общие `lib/target.mjs` (targetQuery), `lib/session-kind.mjs`
+  (isTopLevelSession), `lib/format.mjs` (formatBytes/folderOf/formatClock);
+  убраны копии в progress/deliverables/bot/observer/interactions/incoming/workspace-tools.
+- **Кэши:** `lib/lru.mjs`; ограничены 500 записями `titleCache`, choices,
+  approval/schedule confirmations, incoming buckets, `questionsByChat`,
+  `imagesSent`, `goals/todos/todoProgress`; `observer.clearSession()` и
+  `forwarding.dispose()` вызываются из lifecycle.
+- **Наблюдаемость:** `pollStopped` сбрасывается на старте и успешном poll,
+  `pollFailuresTotal` отделён от текущей серии, `lastErrorAgeMs` в snapshot,
+  `/health` не врёт после восстановления; дайджест срабатывает по «не раньше»
+  и догоняет пропущенную минуту; transient-счётчики outbox не пишутся в state.
+- **Лимитер:** ref-таймер пока очередь непуста (не зависают `acquire`), LRU
+  вытеснение бакетов чатов (500), `waitFor()` без мутации состояния.
+- **Cost-meter:** инвалидация по `mtimeMs+size`, предупреждение о неизвестной
+  версии леджера.
+- **Транспорт:** кап ответа 8 МиБ, обязательный https и MAX-allowlist для
+  `baseUrl` (loopback только с `allowInsecureBaseUrl` для тестов).
+- **Конфиг/GUI:** общие валидаторы `lib/settings-validate.mjs`; строгие
+  `quietHours`/`digestTime`, enum `messageStyle`, лимиты пресетов; единый
+  парсер boolean; удалён мёртвый `coerceHttpsUrl`; GET настроек фильтруется по
+  `SETTINGS_KEYS`; `insecureVoiceEndpoint` и `readOnlyNetwork` — явные флаги.
+- **Безопасность:** read-only больше не разрешает `web_search`/`web_fetch`
+  (opt-in `readOnlyNetwork: true`); STT endpoint требует https, если задан ключ.
+- **dryRun:** не ходит в сеть за `getChat`/`getMe`/`setCommands`, не подписывает
+  webhook, не запускает polling и TTS/STT, не принимает webhook-апдейты;
+  локальные durable-файлы продолжают работать.
+- **Тесты/CI:** `test/helpers/fakes.mjs`, `test/teardown.test.mjs` (dispose/HMR/
+  ошибки durable-записи), `REQUIRE_TLS_TESTS=1` в CI (тихие skip больше
+  невозможны), `check` через glob `lib/*.mjs`; 490 тестов на Node 20/22/24.
+
+### Deferred
+
+- Полный распил `index.js` (webhook-runtime/deliver), `preferredWorkspacePath`
+  в одном хранилище, рекурсивные mkdir с промежуточными 0700, миграция старых
+  тестов на общие фейки, удаление keepalive-хаков, тест CDN-без-Authorization.
+
 ## [1.8.0] — 2026-11-17
 
 Закрытие P1-техдолга из аудита 17.11. Поведение местами строже — см. ниже.

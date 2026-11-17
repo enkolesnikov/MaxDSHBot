@@ -34,7 +34,7 @@ function createFakeClient() {
   }
 }
 
-function makeProgress(overrides = {}) {
+function makeProgress(overrides = {}, target = { chatId: '123456789' }) {
   const client = createFakeClient()
   const progress = createProgress({
     client,
@@ -48,7 +48,7 @@ function makeProgress(overrides = {}) {
       ...overrides,
     }),
     logger: { info() {}, warn() {}, debug() {} },
-    target: { chatId: '123456789' },
+    target,
   })
   return { client, progress }
 }
@@ -97,6 +97,26 @@ test('subagent sessions get no progress card', async () => {
   progress.onTurnStart(session('session-child', { origin: 'subagent', delegationDepth: 1 }))
   await tick(30)
   assert.equal(client.sent.length, 0)
+})
+
+test('a malformed delegationDepth keeps the session top-level', async () => {
+  const { client, progress } = makeProgress()
+  progress.onTurnStart(session('session-bad-depth', { cwd: '/work/app', delegationDepth: 'n/a' }))
+  await tick(30)
+  assert.equal(client.sent.length, 1)
+  progress.onTurnEnd(session('session-bad-depth'))
+})
+
+test('progress cards target a user dialog when only userId is configured', async () => {
+  const { client, progress } = makeProgress({}, { userId: '777' })
+  progress.onTurnStart(session('session-user'))
+  await tick(30)
+  assert.equal(client.sent.length, 1)
+  assert.equal(client.sent[0].userId, '777')
+  assert.equal(client.sent[0].chatId, undefined)
+  // Typing actions need a chat id, so the user dialog gets none.
+  assert.equal(client.actions.length, 0)
+  progress.onTurnEnd(session('session-user'))
 })
 
 test('typing action is sent while a turn is active', async () => {

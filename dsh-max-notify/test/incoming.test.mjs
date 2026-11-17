@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createIncoming, formatBytes, safeFileName } from '../lib/incoming.mjs'
+import { formatBytes as sharedFormatBytes } from '../lib/format.mjs'
 
 const workspace = mkdtempSync(join(tmpdir(), 'dsh-max-incoming-'))
 const silent = { info() {}, warn() {}, debug() {} }
@@ -115,6 +116,7 @@ test('inboxDir supports %cwd% and relative paths', async () => {
 })
 
 test('formatBytes formats sizes', () => {
+  assert.equal(formatBytes, sharedFormatBytes, 'incoming re-exports the shared helper')
   assert.equal(formatBytes(0), '0 B')
   assert.equal(formatBytes(900), '900 B')
   assert.equal(formatBytes(2048), '2.0 KB')

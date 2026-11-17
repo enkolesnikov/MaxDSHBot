@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { formatNotification } from '../lib/format.mjs'
+import { folderOf, formatBytes, formatClock, formatNotification } from '../lib/format.mjs'
 
 const date = new Date(2026, 9, 27, 22, 15, 3)
 
@@ -67,4 +67,30 @@ test('messageStyle detailed keeps the legacy DSH header', () => {
     now: date,
   })
   assert.equal(text, '**DSH** · 22:15:03 · MaxBot\n\nx')
+})
+
+test('folderOf is the single short-cwd helper for headers and cards', () => {
+  assert.equal(folderOf('/path/to/MaxBot'), 'MaxBot')
+  assert.equal(folderOf('/srv/work/'), 'work')
+  assert.equal(folderOf('C:\\Users\\dev\\proj\\'), 'proj')
+  assert.equal(folderOf(''), '')
+  assert.equal(folderOf(undefined), '')
+})
+
+test('formatClock renders HH:MM, optional seconds and an em dash for bad dates', () => {
+  assert.equal(formatClock(date), '22:15')
+  assert.equal(formatClock(date, { seconds: true }), '22:15:03')
+  assert.equal(formatClock('not a date'), '—')
+  assert.equal(formatClock(new Date(Number.NaN)), '—')
+})
+
+test('formatBytes uses binary units and two decimals past a gibibyte', () => {
+  assert.equal(formatBytes(0), '0 B')
+  assert.equal(formatBytes(900), '900 B')
+  assert.equal(formatBytes(2048), '2.0 KB')
+  assert.equal(formatBytes(5 * 1024 * 1024), '5.0 MB')
+  // 1024³ bytes is labelled "GB" but means GiB; sub-GiB values stay in MB.
+  assert.equal(formatBytes(1024 ** 3), '1.00 GB')
+  assert.equal(formatBytes(1.5 * 1024 ** 3), '1.50 GB')
+  assert.equal(formatBytes(Number.NaN), '0 B')
 })

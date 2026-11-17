@@ -371,6 +371,27 @@ test('autonomy read-only rejects side effects without a MAX card', async () => {
   assert.equal(read.client.sent.length, 0)
 })
 
+test('read-only network tools follow readOnlyNetwork: denied by default, allowed when opted in', async () => {
+  const readOnlyPolicy = async () => ({ mode: 'read-only', scheduleId: 'sched-net', title: 'Net' })
+  const webRequest = (toolName) => ({
+    ...approvalRequest({ session: { id: 'sched-net-session', header: {} } }),
+    toolName,
+  })
+
+  const denied = makeInteractions({ resolveAutonomy: readOnlyPolicy })
+  assert.equal(await denied.interactions.handleApproval(webRequest('web_search'), () => new Promise(() => {})), 'rejected')
+  assert.equal(denied.client.sent.length, 0)
+
+  const allowed = makeInteractions({ readOnlyNetwork: true, resolveAutonomy: readOnlyPolicy })
+  assert.equal(await allowed.interactions.handleApproval(webRequest('web_fetch'), () => new Promise(() => {})), 'allowed-once')
+  assert.equal(allowed.client.sent.length, 0)
+
+  // File tools keep the same allow/deny with and without the network opt-in.
+  const file = makeInteractions({ readOnlyNetwork: true, resolveAutonomy: readOnlyPolicy })
+  assert.equal(await file.interactions.handleApproval(webRequest('read'), () => new Promise(() => {})), 'allowed-once')
+  assert.equal(file.client.sent.length, 0)
+})
+
 test('autonomy auto allows approvals silently when session identity is verified', async () => {
   const { client, interactions } = makeInteractions({
     resolveAutonomy: async () => ({
@@ -484,6 +505,91 @@ test('a title-only auto policy is demoted to inherit and still prompts on the ca
   )
   await tick()
   assert.equal(client.sent.length, 1)
+  const deny = cardButtons(client)[1][0].payload
+  await interactions.handleCallback({ callbackId: 'cb-deny', payload: deny })
+  assert.equal(await outcomePromise, 'rejected')
+})
+
+// ── P2: bounded per-chat question index, dispose cleanup, shared helpers ─────
+
+test('the per-chat question index is bounded to 500 chats and evicts the oldest', async () => {
+  const client = createFakeClient()
+  const target = { chatId: 'chat-0' }
+  const interactions = createInteractions({
+    client,
+    config: normalizeConfig({ botToken: 't', chatId: 'chat-0', allowedUserIds: ['1'] }),
+    logger: silentLogger,
+    target,
+    resolveTitle: () => 'Тестовая сессия',
+  })
+
+  // Rotate the shared target so each card lands in a different chat (the cache
+  // key is the chat that received the question card).
+  const pending = []
+  for (let index = 0; index < 501; index += 1) {
+    target.chatId = `chat-${index}`
+    pending.push(
+      interactions.handleQuestions(
+        {
+          agent: { session: { id: `session-${index}`, header: {} } },
+          questions: [{ id: 'q1', question: 'Что делаем?' }],
+          signal: new AbortController().signal,
+        },
+        () => new Promise(() => {}),
+      ),
+    )
+    await tick(0)
+  }
+
+  // The first chat fell out of the LRU index: free text cannot reach its card.
+  assert.equal(await interactions.tryAnswerText({ chatId: 'chat-0', text: 'поздно' }), false)
+  // The most recent chat is still indexed and answers normally.
+  assert.equal(await interactions.tryAnswerText({ chatId: 'chat-500', text: 'ответ' }), true)
+
+  interactions.dispose()
+  await tick()
+  await Promise.all(pending)
+})
+
+test('dispose clears pending questions and the per-chat index', async () => {
+  const { interactions } = makeInteractions()
+  const request = {
+    agent: { session: { id: 'session-dispose', header: {} } },
+    questions: [
+      { id: 'q1', question: 'Первый?' },
+      { id: 'q2', question: 'Второй?' },
+    ],
+    signal: new AbortController().signal,
+  }
+  const answerPromise = interactions.handleQuestions(request, () => new Promise(() => {}))
+  await tick()
+  // Partial answer keeps the question pending and indexed.
+  assert.equal(await interactions.tryAnswerText({ chatId: '123456789', text: 'ответ на первый' }), true)
+
+  interactions.dispose()
+  const answer = await answerPromise
+  assert.deepEqual(answer.answers, [
+    { id: 'q1', selected: [], custom: 'ответ на первый' },
+    { id: 'q2', selected: [] },
+  ])
+  assert.equal(await interactions.tryAnswerText({ chatId: '123456789', text: 'ещё' }), false)
+})
+
+test('a null chatId target falls back to userId through the shared targetQuery', async () => {
+  const client = createFakeClient()
+  const interactions = createInteractions({
+    client,
+    config: normalizeConfig({ botToken: 't', userId: '987654321', allowedUserIds: ['987654321'] }),
+    logger: silentLogger,
+    target: { chatId: null, userId: '987654321' },
+    resolveTitle: () => 'Тестовая сессия',
+  })
+  const outcomePromise = interactions.handleApproval(approvalRequest(), () => new Promise(() => {}))
+  await tick()
+  assert.equal(client.sent.length, 1)
+  assert.equal(client.sent[0].userId, '987654321')
+  assert.equal('chatId' in client.sent[0], false)
+
   const deny = cardButtons(client)[1][0].payload
   await interactions.handleCallback({ callbackId: 'cb-deny', payload: deny })
   assert.equal(await outcomePromise, 'rejected')

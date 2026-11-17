@@ -9,6 +9,7 @@
  */
 import { readFile, stat } from 'node:fs/promises'
 import { basename } from 'node:path'
+import { asBoolean } from './settings-validate.mjs'
 
 export const VOICE_PROMPT_LIMIT = 4000
 export const DEFAULT_VOICE_MODEL = 'whisper-1'
@@ -53,12 +54,16 @@ function scrub(message, apiKey) {
  *
  * Accepts `https://api.openai.com/v1`, `https://host/v1/` or an already
  * complete `.../audio/transcriptions` URL. Only http(s) endpoints are allowed;
- * anything else throws a `TypeError`.
+ * anything else throws a `TypeError`. Whenever an API key will be sent
+ * (`hasApiKey`), the endpoint must be `https:`; plain `http:` is accepted only
+ * with the explicit `insecureVoiceEndpoint: true` config opt-in (self-hosted or
+ * private-network setups). The flag defaults to false.
  *
  * @param {string} baseUrl
+ * @param {{hasApiKey?: boolean, insecureVoiceEndpoint?: boolean}} [options]
  * @returns {string}
  */
-export function resolveVoiceEndpoint(baseUrl) {
+export function resolveVoiceEndpoint(baseUrl, { hasApiKey = false, insecureVoiceEndpoint = false } = {}) {
   const raw = typeof baseUrl === 'string' ? baseUrl.trim() : ''
   if (raw === '') throw new TypeError('voice endpoint не задан')
 
@@ -70,6 +75,11 @@ export function resolveVoiceEndpoint(baseUrl) {
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     throw new TypeError(`voice endpoint должен быть http(s), получено: ${url.protocol}`)
+  }
+  if (url.protocol === 'http:' && asBoolean(hasApiKey, false) && !asBoolean(insecureVoiceEndpoint, false)) {
+    throw new TypeError(
+      'voice endpoint должен быть https:// при заданном API-ключе (http разрешён только с insecureVoiceEndpoint: true)',
+    )
   }
   if (url.username !== '' || url.password !== '') {
     throw new TypeError('voice endpoint не должен содержать логин/пароль')
@@ -101,6 +111,8 @@ function describeHttpFailure({ status, statusText, payload, raw }) {
  * @param {string} options.apiKey - bearer token; never logged.
  * @param {string} [options.model]
  * @param {string} [options.language]
+ * @param {boolean} [options.insecureVoiceEndpoint] - allow a plain-http endpoint
+ *   while an API key is sent; defaults to false (https is required).
  * @param {Function} [options.fetchImpl]
  * @param {number} [options.timeoutMs]
  * @param {number} [options.maxBytes]
@@ -112,6 +124,7 @@ export async function transcribeAudio({
   apiKey,
   model = DEFAULT_VOICE_MODEL,
   language,
+  insecureVoiceEndpoint = false,
   fetchImpl = globalThis.fetch,
   timeoutMs = DEFAULT_VOICE_TIMEOUT_MS,
   maxBytes = DEFAULT_VOICE_MAX_BYTES,
@@ -124,7 +137,7 @@ export async function transcribeAudio({
 
   let url
   try {
-    url = resolveVoiceEndpoint(endpoint)
+    url = resolveVoiceEndpoint(endpoint, { hasApiKey: true, insecureVoiceEndpoint })
   } catch (error) {
     return { ok: false, error: scrub(error?.message, key) }
   }
@@ -265,39 +278,40 @@ export function voicePromptText(transcript, { prefix = '🎤 Голосовое 
   return composed.length <= VOICE_PROMPT_LIMIT ? composed : composed.slice(0, VOICE_PROMPT_LIMIT)
 }
 
-function enabledFlag(value) {
-  if (typeof value === 'string') {
-    return !['', '0', 'false', 'no', 'off'].includes(value.trim().toLowerCase())
-  }
-  return Boolean(value)
-}
-
 /**
  * Whether voice transcription can be used with this config.
  * `voiceApiKeyFile` is only checked for presence — it is never read here.
  *
  * Expected fields: `voiceTranscribe`, `voiceEndpoint`, `voiceApiKey` or
- * `voiceApiKeyFile`.
+ * `voiceApiKeyFile`, optionally `insecureVoiceEndpoint`.
+ *
+ * The endpoint must be `https:` because an API key is always sent with the
+ * request; plain `http:` is accepted only when the config explicitly sets
+ * `insecureVoiceEndpoint: true`.
  *
  * @param {object} config
  * @returns {{ok: true} | {ok: false, reason: string}}
  */
 export function voiceConfigured(config) {
   if (!config || typeof config !== 'object') return { ok: false, reason: 'нет настроек плагина' }
-  if (!enabledFlag(config.voiceTranscribe)) return { ok: false, reason: 'voiceTranscribe выключен' }
+  if (!asBoolean(config.voiceTranscribe, false)) return { ok: false, reason: 'voiceTranscribe выключен' }
 
   const endpoint = typeof config.voiceEndpoint === 'string' ? config.voiceEndpoint.trim() : ''
   if (endpoint === '') return { ok: false, reason: 'voiceEndpoint не задан' }
-  try {
-    resolveVoiceEndpoint(endpoint)
-  } catch (error) {
-    return { ok: false, reason: `voiceEndpoint невалиден: ${error?.message || String(error)}` }
-  }
 
   const apiKey = typeof config.voiceApiKey === 'string' ? config.voiceApiKey.trim() : ''
   const apiKeyFile = typeof config.voiceApiKeyFile === 'string' ? config.voiceApiKeyFile.trim() : ''
   if (apiKey === '' && apiKeyFile === '') {
     return { ok: false, reason: 'voiceApiKey и voiceApiKeyFile не заданы' }
+  }
+
+  try {
+    resolveVoiceEndpoint(endpoint, {
+      hasApiKey: true,
+      insecureVoiceEndpoint: config.insecureVoiceEndpoint,
+    })
+  } catch (error) {
+    return { ok: false, reason: `voiceEndpoint невалиден: ${error?.message || String(error)}` }
   }
 
   return { ok: true }

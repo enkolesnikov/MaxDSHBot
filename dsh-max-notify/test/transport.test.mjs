@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createMaxClient, isTrustedMaxUrl, splitText, MAX_TEXT_LIMIT } from '../lib/transport.mjs'
+import { createMaxClient, isTrustedMaxUrl, normalizeMaxApiBaseUrl, splitText, MAX_RESPONSE_BYTES, MAX_TEXT_LIMIT } from '../lib/transport.mjs'
 import { loadTlsCredentials, readBody, sendJson, startHttpsServer } from './helpers/tls-server.mjs'
 
 const TOKEN = 'bot-secret-token'
@@ -23,7 +23,15 @@ async function startServer(t, handler) {
 }
 
 function testClient(server, overrides = {}) {
-  return createMaxClient({ token: TOKEN, baseUrl: server.url, ca: tls.cert, minIntervalMs: 0, ...overrides })
+  return createMaxClient({
+    token: TOKEN,
+    baseUrl: server.url,
+    // Loopback HTTPS test server: explicitly opt out of the MAX host allowlist.
+    allowInsecureBaseUrl: true,
+    ca: tls.cert,
+    minIntervalMs: 0,
+    ...overrides,
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -183,6 +191,59 @@ test('isTrustedMaxUrl compares against an explicit baseUrl (local test server ca
   // MAX-owned hosts stay trusted even when a custom base is configured.
   assert.equal(isTrustedMaxUrl('https://cdn.max.ru/file', { baseUrl: 'https://evil.example' }), true)
   assert.equal(isTrustedMaxUrl('https://127.0.0.1:9443/upload', { baseUrl: 'not a url' }), false)
+})
+
+// ---------------------------------------------------------------------------
+// baseUrl validation (no network)
+// ---------------------------------------------------------------------------
+
+test('normalizeMaxApiBaseUrl enforces HTTPS and the MAX host allowlist', () => {
+  assert.equal(normalizeMaxApiBaseUrl('https://platform-api2.max.ru'), 'https://platform-api2.max.ru/')
+  assert.equal(normalizeMaxApiBaseUrl('https://cdn.max.ru/api'), 'https://cdn.max.ru/api')
+  // Ports are intentionally not part of the trust decision (MAX may use non-443).
+  assert.equal(normalizeMaxApiBaseUrl('https://platform-api2.max.ru:8443'), 'https://platform-api2.max.ru:8443/')
+
+  assert.throws(() => normalizeMaxApiBaseUrl('http://platform-api2.max.ru'), /must use https/)
+  assert.throws(() => normalizeMaxApiBaseUrl('ftp://max.ru'), /must use https/)
+  assert.throws(() => normalizeMaxApiBaseUrl('https://evil.example'), /refusing untrusted MAX API baseUrl/)
+  assert.throws(
+    () => normalizeMaxApiBaseUrl('https://user:secret@platform-api2.max.ru'),
+    /embedded credentials are not allowed/,
+  )
+  assert.throws(() => normalizeMaxApiBaseUrl('not a url'), /invalid MAX API baseUrl/)
+  assert.throws(() => normalizeMaxApiBaseUrl(undefined), /invalid MAX API baseUrl/)
+
+  // The explicit test override only relaxes the host allowlist, and only for
+  // loopback hosts; it never enables plain HTTP and never trusts arbitrary hosts.
+  assert.equal(normalizeMaxApiBaseUrl('https://127.0.0.1:9443', { allowInsecureBaseUrl: true }), 'https://127.0.0.1:9443/')
+  assert.equal(normalizeMaxApiBaseUrl('https://localhost:9443', { allowInsecureBaseUrl: true }), 'https://localhost:9443/')
+  assert.equal(normalizeMaxApiBaseUrl('https://[::1]:9443', { allowInsecureBaseUrl: true }), 'https://[::1]:9443/')
+  assert.throws(
+    () => normalizeMaxApiBaseUrl('https://evil.example', { allowInsecureBaseUrl: true }),
+    /refusing untrusted MAX API baseUrl/,
+  )
+  assert.throws(
+    () => normalizeMaxApiBaseUrl('https://127.0.0.1.evil.example', { allowInsecureBaseUrl: true }),
+    /refusing untrusted MAX API baseUrl/,
+  )
+  assert.throws(
+    () => normalizeMaxApiBaseUrl('http://localhost:9443', { allowInsecureBaseUrl: true }),
+    /must use https/,
+  )
+})
+
+test('createMaxClient validates baseUrl before any request', () => {
+  assert.throws(() => createMaxClient({ token: TOKEN, baseUrl: 'https://evil.example' }), /refusing untrusted MAX API baseUrl/)
+  assert.throws(() => createMaxClient({ token: TOKEN, baseUrl: 'http://platform-api2.max.ru' }), /must use https/)
+  assert.throws(() => createMaxClient({ token: TOKEN, baseUrl: 'not a url' }), /invalid MAX API baseUrl/)
+  assert.throws(() => createMaxClient({ token: TOKEN, baseUrl: 'https://localhost:9443' }), /refusing untrusted MAX API baseUrl/)
+
+  assert.equal(createMaxClient({ token: TOKEN }).baseUrl, 'https://platform-api2.max.ru/')
+  assert.equal(createMaxClient({ token: TOKEN, baseUrl: 'https://platform-api2.max.ru' }).baseUrl, 'https://platform-api2.max.ru/')
+  assert.equal(
+    createMaxClient({ token: TOKEN, baseUrl: 'https://localhost:9443', allowInsecureBaseUrl: true }).baseUrl,
+    'https://localhost:9443/',
+  )
 })
 
 // ---------------------------------------------------------------------------
@@ -413,6 +474,86 @@ test('sendWithAttachments retries attachment.not.ready and gives up after the co
     return true
   })
   assert.equal(attempts, 2)
+})
+
+// ---------------------------------------------------------------------------
+// Response body cap
+// ---------------------------------------------------------------------------
+
+test('the default MAX response cap is 8 MiB', () => {
+  assert.equal(MAX_RESPONSE_BYTES, 8 * 1024 * 1024)
+})
+
+test('a response above maxResponseBytes is rejected, destroyed and not retried', { skip: skipNoTls }, async (t) => {
+  let hits = 0
+  const server = await startServer(t, async (req, res) => {
+    hits += 1
+    await readBody(req)
+    res.writeHead(200, { 'content-type': 'application/json', 'content-length': '1024' })
+    res.end('x'.repeat(1024))
+  })
+  const client = testClient(server, { maxResponseBytes: 256 })
+  await assert.rejects(
+    () => client.getMe(),
+    (error) => {
+      assert.equal(error.code, 'max.response.too.large')
+      assert.equal(error.limitBytes, 256)
+      assert.match(error.message, /exceeds 256 bytes/)
+      return true
+    },
+  )
+  assert.equal(hits, 1, 'an oversized response is not retried with multiplicative buffering')
+})
+
+test('an oversized chunked response is rejected without a Content-Length header', { skip: skipNoTls }, async (t) => {
+  const server = await startServer(t, async (req, res) => {
+    await readBody(req)
+    res.writeHead(200, { 'content-type': 'application/json' })
+    for (let index = 0; index < 8; index += 1) res.write('y'.repeat(100))
+    res.end()
+  })
+  const client = testClient(server, { maxResponseBytes: 256, maxRetries: 0 })
+  await assert.rejects(() => client.getMe(), (error) => {
+    assert.equal(error.code, 'max.response.too.large')
+    assert.match(error.message, /exceeds 256 bytes/)
+    return true
+  })
+})
+
+test('a response exactly at maxResponseBytes is accepted', { skip: skipNoTls }, async (t) => {
+  const body = JSON.stringify({ ok: true }).padEnd(256, ' ')
+  const server = await startServer(t, async (req, res) => {
+    await readBody(req)
+    res.writeHead(200, { 'content-type': 'application/json', 'content-length': String(body.length) })
+    res.end(body)
+  })
+  const client = testClient(server, { maxResponseBytes: 256 })
+  assert.deepEqual(await client.getMe(), { ok: true })
+})
+
+test('upload responses are capped by maxResponseBytes as well', { skip: skipNoTls }, async (t) => {
+  const server = await startServer(t, async (req, res) => {
+    await readBody(req)
+    if (req.url === '/uploads?type=image') {
+      sendJson(res, 200, { url: `${server.url}/upload-target` })
+      return
+    }
+    if (req.url === '/upload-target') {
+      res.writeHead(200, { 'content-type': 'application/json', 'content-length': '1024' })
+      res.end('z'.repeat(1024))
+      return
+    }
+    res.statusCode = 404
+    res.end('unexpected path')
+  })
+  const client = testClient(server, { maxResponseBytes: 256 })
+  await assert.rejects(
+    () => client.uploadMedia({ buffer: Buffer.from('x'), filename: 'a.png' }),
+    (error) => {
+      assert.equal(error.code, 'max.response.too.large')
+      return true
+    },
+  )
 })
 
 // ---------------------------------------------------------------------------

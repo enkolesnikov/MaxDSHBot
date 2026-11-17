@@ -11,6 +11,12 @@
  * When `openssl` is unavailable the helper returns `null` from
  * `loadTlsCredentials()` and the network tests skip themselves (pure-function
  * tests still run).
+ *
+ * Set `REQUIRE_TLS_TESTS=1` (CI) to turn that silent skip into a hard failure:
+ * a green CI run must prove the transport contract, so a missing toolchain is
+ * an error instead of an invisible coverage hole. The transport test file only
+ * needs `loadTlsCredentials()`; the top-level await rejects loudly on its own,
+ * so no per-test skip logic has to read this flag.
  */
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
@@ -18,18 +24,32 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import https from 'node:https'
 
+/** True when the environment demands real TLS tests (CI sets REQUIRE_TLS_TESTS=1). */
+export const TLS_REQUIRED = process.env.REQUIRE_TLS_TESTS === '1'
+
+/** `null` locally (tests skip) or a loud error in a required-TLS environment. */
+function tlsUnavailable(reason) {
+  if (!TLS_REQUIRED) return null
+  throw new Error(
+    `REQUIRE_TLS_TESTS=1 but the local HTTPS test certificate cannot be generated: ${reason}. ` +
+      'Install openssl or unset REQUIRE_TLS_TESTS to let the transport tests skip.',
+  )
+}
+
 let credentialsPromise
 
 /**
  * Generate (once) a self-signed certificate valid for localhost/127.0.0.1.
- * @returns {Promise<{key: string, cert: string}|null>}
+ * @returns {Promise<{key: string, cert: string}|null>} `null` only when TLS
+ *   tests are optional and `openssl` cannot run.
+ * @throws when REQUIRE_TLS_TESTS=1 and the certificate cannot be generated.
  */
 export function loadTlsCredentials() {
   credentialsPromise ??= (async () => {
     try {
       execFileSync('openssl', ['version'], { stdio: 'ignore' })
-    } catch {
-      return null
+    } catch (error) {
+      return tlsUnavailable(`openssl is not installed (${error?.code ?? error?.message ?? String(error)})`)
     }
     const dir = mkdtempSync(join(tmpdir(), 'dsh-max-tls-'))
     const keyPath = join(dir, 'key.pem')
@@ -54,8 +74,8 @@ export function loadTlsCredentials() {
         { stdio: 'ignore' },
       )
       return { key: readFileSync(keyPath, 'utf8'), cert: readFileSync(certPath, 'utf8') }
-    } catch {
-      return null
+    } catch (error) {
+      return tlsUnavailable(`openssl req failed (${error?.message || String(error)})`)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

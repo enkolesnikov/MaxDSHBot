@@ -337,3 +337,38 @@ test('finalKeyboard appends a GUI link row when webUrl is set and ignores non-ar
   assert.deepEqual(rows[0].map((button) => button.text), [CONT, STOP])
   assert.deepEqual(rows[1], [{ type: 'link', text: '🖥 Открыть GUI', url: 'https://example.com/d/' }])
 })
+
+// ── P2: bounded dedupe cache and dispose ────────────────────────────────────
+
+test('the image dedupe cache keeps the 500 most recent sessions and evicts the oldest', async () => {
+  const client = makeClient()
+  const dir = makeImages({ 'a.png': 'png' })
+  const file = join(dir, 'a.png')
+  const text = '![a](a.png)'
+  const { noteSentImages, collectFinalImages } = makeForwarding({ client })
+
+  for (let index = 0; index < 501; index += 1) noteSentImages(`s${index}`, [file])
+
+  // The oldest session fell out of the cache: its dedupe memory is gone, so the
+  // same file is uploaded again for it...
+  assert.equal((await collectFinalImages(makeSession(dir, 's0'), text, undefined)).length, 1)
+  // ...while the newest session is still deduped (500-entry cap, not evicted).
+  assert.deepEqual(await collectFinalImages(makeSession(dir, 's500'), text, undefined), [])
+  assert.equal(client.uploads.length, 1)
+})
+
+test('dispose clears the image dedupe cache and is idempotent', async () => {
+  const client = makeClient()
+  const dir = makeImages({ 'a.png': 'png' })
+  const text = '![a](a.png)'
+  const forwarding = makeForwarding({ client })
+  assert.equal(typeof forwarding.dispose, 'function')
+
+  forwarding.noteSentImages('s1', [join(dir, 'a.png')])
+  assert.deepEqual(await forwarding.collectFinalImages(makeSession(dir, 's1'), text, undefined), [])
+
+  forwarding.dispose()
+  forwarding.dispose()
+  assert.equal((await forwarding.collectFinalImages(makeSession(dir, 's1'), text, undefined)).length, 1)
+  assert.equal(client.uploads.length, 1)
+})

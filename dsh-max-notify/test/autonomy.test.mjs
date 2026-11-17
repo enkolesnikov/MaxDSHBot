@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  READ_ONLY_NETWORK_TOOLS,
   READ_ONLY_TOOLS,
   classifyAutonomyDecision,
   formatAutonomyMode,
@@ -71,6 +72,48 @@ test('resolveAutonomyPolicy picks the least-privilege matching policy', () => {
   assert.equal(result.mode, 'read-only')
   assert.equal(result.identityVerified, true)
   assert.equal(resolveAutonomyPolicy({ sessionId: 's1', schedules, policies: {} }).ok, false)
+})
+
+// ── P2: read-only network egress is opt-in ──────────────────────────────────
+
+test('read-only denies network tools by default and allows them only with the opt-in', () => {
+  for (const tool of ['web_search', 'web_fetch']) {
+    assert.equal(READ_ONLY_TOOLS.has(tool), false, `${tool} must not be a plain read-only tool`)
+    assert.equal(READ_ONLY_NETWORK_TOOLS.has(tool), true)
+    assert.deepEqual(classifyAutonomyDecision('read-only', tool), {
+      action: 'deny',
+      reason: `network tool ${tool} is denied in read-only mode`,
+    })
+    assert.deepEqual(classifyAutonomyDecision('read-only', tool, { allowNetwork: true }), {
+      action: 'allow',
+      reason: 'read-only network tool (opt-in)',
+    })
+  }
+  // The opt-in is read-only specific; auto and inherit do not change.
+  assert.equal(classifyAutonomyDecision('auto', 'web_search').action, 'allow')
+  assert.equal(classifyAutonomyDecision('inherit', 'web_fetch', { allowNetwork: true }).action, 'prompt')
+  // A missing or non-boolean flag must keep the safe default.
+  assert.equal(classifyAutonomyDecision('read-only', 'web_search', null).action, 'deny')
+  assert.equal(classifyAutonomyDecision('read-only', 'web_search', { allowNetwork: 'yes' }).action, 'deny')
+  assert.equal(classifyAutonomyDecision('read-only', 'web_fetch', { allowNetwork: 1 }).action, 'deny')
+})
+
+test('file tools have identical allow/deny with and without the network opt-in', () => {
+  const fileTools = ['read', 'read_image', 'glob', 'grep', 'list', 'find', 'search']
+  for (const tool of fileTools) {
+    const strict = classifyAutonomyDecision('read-only', tool)
+    const optedIn = classifyAutonomyDecision('read-only', tool, { allowNetwork: true })
+    assert.deepEqual(strict, optedIn, `${tool} must not depend on readOnlyNetwork`)
+    assert.deepEqual(strict, { action: 'allow', reason: 'read-only tool' })
+  }
+  for (const tool of ['write', 'edit', 'bash', 'uploadMedia']) {
+    assert.deepEqual(
+      classifyAutonomyDecision('read-only', tool),
+      classifyAutonomyDecision('read-only', tool, { allowNetwork: true }),
+      `${tool} must stay denied regardless of readOnlyNetwork`,
+    )
+    assert.equal(classifyAutonomyDecision('read-only', tool).action, 'deny')
+  }
 })
 
 // ── P1: title matching and session identity ─────────────────────────────────

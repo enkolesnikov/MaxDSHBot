@@ -40,7 +40,7 @@ function baseConfig(overrides = {}) {
   }
 }
 
-function makeObserver({ config = {}, policy, runtime, state, outbox } = {}) {
+function makeObserver({ config = {}, policy, runtime, state, outbox, now } = {}) {
   const client = createFakeClient()
   const observer = createObserver({
     client,
@@ -57,8 +57,23 @@ function makeObserver({ config = {}, policy, runtime, state, outbox } = {}) {
     },
     state: state ?? { getDigestDate: () => undefined, setDigestDate: () => {} },
     outbox,
+    now,
   })
   return { client, observer }
+}
+
+/** State stub that remembers the single persisted digest date. */
+function digestState() {
+  let digestDate
+  return {
+    getDigestDate: () => digestDate,
+    setDigestDate: (value) => {
+      digestDate = value
+    },
+    get date() {
+      return digestDate
+    },
+  }
 }
 
 const session = (id = 'session-1', header = { cwd: '/work' }) => ({ id, header })
@@ -185,6 +200,81 @@ test('digest respects the notification policy', async () => {
   assert.equal(client.sent.length, 0)
 })
 
+
+test('digest is due after the scheduled minute, catches up a missed tick and never double-sends', async () => {
+  let nowMs = new Date(2026, 10, 17, 8, 59, 30).getTime()
+  const state = digestState()
+  const { client, observer } = makeObserver({
+    config: { digestEnabled: true, digestTime: '09:00' },
+    state,
+    now: () => nowMs,
+  })
+
+  // Before the configured time nothing is sent.
+  assert.equal(await observer.maybeSendDigest(), false)
+  await tick(20)
+  assert.equal(client.sent.length, 0)
+
+  // The exact 09:00 minute was missed (blocked event loop / restart at 09:01):
+  // the first later tick must still send instead of skipping the whole day.
+  nowMs = new Date(2026, 10, 17, 9, 1, 0).getTime()
+  assert.equal(await observer.maybeSendDigest(), true)
+  assert.ok(await waitFor(() => client.sent.length === 1))
+  assert.match(client.sent[0].text, /Брифинг/)
+  assert.equal(state.date, '2026-11-17')
+
+  // Later ticks on the same day stay silent, and a restart cannot double-send:
+  // the date was persisted before the observer was recreated.
+  nowMs = new Date(2026, 10, 17, 14, 37, 0).getTime()
+  assert.equal(await observer.maybeSendDigest(), false)
+  const restarted = makeObserver({ config: { digestEnabled: true, digestTime: '09:00' }, state, now: () => nowMs })
+  assert.equal(await restarted.observer.maybeSendDigest(), false)
+  await tick(20)
+  assert.equal(restarted.client.sent.length, 0)
+  assert.equal(client.sent.length, 1)
+
+  // Next day: still waiting before 09:00, due again at/after it.
+  nowMs = new Date(2026, 10, 18, 8, 30, 0).getTime()
+  assert.equal(await observer.maybeSendDigest(), false)
+  nowMs = new Date(2026, 10, 18, 9, 0, 7).getTime()
+  assert.equal(await observer.maybeSendDigest(), true)
+  assert.ok(await waitFor(() => client.sent.length === 2, { timeoutMs: 2500 }))
+})
+
+test('session caches are LRU-bounded and released when a session is disposed', async () => {
+  const enqueued = []
+  const outbox = {
+    enqueue(item) {
+      enqueued.push(item)
+      return true
+    },
+    async flush() {},
+  }
+  const { observer } = makeObserver({ outbox })
+  for (let index = 0; index < 501; index += 1) {
+    const sessionId = `session-${index}`
+    observer.onGoalChanged({
+      agent: { session: { id: sessionId, header: {} } },
+      change: { operation: 'start', goal: { id: `goal-${index}`, objective: `цель ${index}` } },
+    })
+    observer.onSessionEvent({ id: sessionId, header: {} }, {
+      type: 'todo/write',
+      data: { todos: [{ content: 'шаг', status: 'pending' }] },
+    })
+  }
+  // 501 distinct sessions against a 500-entry cap: the oldest key is evicted.
+  assert.deepEqual(observer.cacheSizes, { goals: 500, todos: 500, todoProgress: 500 })
+  assert.equal(observer.goals.some((goal) => goal.id === 'goal-0'), false)
+  assert.equal(observer.goals.some((goal) => goal.id === 'goal-500'), true)
+
+  // `session/disposed` wiring clears every cached view of that session.
+  assert.equal(observer.clearSession('session-500'), true)
+  assert.deepEqual(observer.cacheSizes, { goals: 499, todos: 499, todoProgress: 499 })
+  assert.equal(observer.clearSession('session-500'), true)
+  assert.deepEqual(observer.cacheSizes, { goals: 499, todos: 499, todoProgress: 499 })
+  assert.equal(observer.clearSession(''), false)
+  assert.equal(enqueued.length, 1002)
+})
 
 test('notifications are enqueued into the durable outbox when it is available', async () => {
   const enqueued = []

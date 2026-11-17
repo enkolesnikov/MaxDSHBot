@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { normalizeConfig } from '../index.js'
 import { createBot } from '../lib/bot.mjs'
+import { createHealth } from '../lib/health.mjs'
 
 const tick = (ms = 10) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -476,6 +477,81 @@ test('/health, /version and /ping answer with runtime data', async () => {
   assert.match(client.sent[1].text, /v0\.6\.0/)
   await bot.handleUpdate(messageUpdate({ text: '/ping' }))
   assert.match(client.sent[2].text, /pong/)
+})
+
+test('a successful poll clears a stale pollStopped marker and keeps lifetime failures', async () => {
+  const health = createHealth({ version: 'test' })
+  const client = createFakeClient()
+  const state = createMemoryState()
+  const { runtime } = runtimeStub()
+  client.getUpdates = async (params) =>
+    params.marker === undefined ? { updates: [], marker: 5 } : { updates: [], marker: 6 }
+  const bot = createBot({
+    client,
+    config: config(),
+    logger: { info() {}, warn() {}, debug() {} },
+    state,
+    health,
+    runtime: {
+      ...runtime,
+      healthUpdate: (patch) => health.update(patch),
+      healthFail: (error, options) => health.fail(error, options),
+    },
+  })
+
+  // A terminal-looking failure (e.g. an expired token) marks polling stopped.
+  health.fail(new Error('unauthorized'), { stopped: true, reason: 'unauthorized (401)' })
+  assert.equal(health.snapshot().pollStopped, true)
+
+  // Priming the marker already proves MAX answers: stopped state must clear.
+  assert.deepEqual(await bot.pollOnce(), { primed: true, count: 0, handled: 0 })
+  let snapshot = health.snapshot()
+  assert.equal(snapshot.pollStopped, false)
+  assert.equal(snapshot.pollStoppedReason, undefined)
+  assert.equal(snapshot.pollFailures, 0)
+  assert.equal(snapshot.pollFailuresTotal, 1)
+  assert.ok(snapshot.lastPollAt > 0)
+
+  // A transient failure during a working poller is cleared by the next poll.
+  health.fail(new Error('timeout'))
+  assert.equal(health.snapshot().pollFailures, 1)
+  assert.equal(health.snapshot().pollStopped, false)
+  await bot.pollOnce()
+  snapshot = health.snapshot()
+  assert.equal(snapshot.pollFailures, 0)
+  assert.equal(snapshot.pollFailuresTotal, 2)
+
+  // The /health card must not claim "stopped" while polling works.
+  await bot.handleUpdate(messageUpdate({ text: '/health' }))
+  const card = client.sent.at(-1).text
+  assert.match(card, /polling: работает/)
+  assert.doesNotMatch(card, /остановлен/)
+  assert.match(card, /последняя ошибка/)
+})
+
+test('per-chat caches are LRU-bounded', async () => {
+  const { bot, client } = makeBot()
+  assert.deepEqual(bot.cacheSizes, {
+    sessions: 0,
+    models: 0,
+    workspaces: 0,
+    approvals: 0,
+    schedules: 0,
+    scheduleCancels: 0,
+    scheduleModes: 0,
+    incomingBuckets: 0,
+    incomingWarnedAt: 0,
+  })
+
+  // 501 distinct chats: the session-choice and flood-bucket caches both hit the
+  // 500-entry cap instead of growing without a bound.
+  for (let index = 0; index < 501; index += 1) {
+    await bot.handleUpdate(messageUpdate({ text: '/use 1', chatId: 10_000 + index }))
+  }
+  assert.equal(client.sent.length, 501)
+  const sizes = bot.cacheSizes
+  assert.equal(sizes.sessions, 500)
+  assert.equal(sizes.incomingBuckets, 500)
 })
 
 test('incoming flood protection answers once per warning window', async () => {

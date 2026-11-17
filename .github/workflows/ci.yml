@@ -56,6 +56,11 @@ jobs:
       - name: Syntax check (all modules)
         run: npm run check
       - name: Unit tests
+        # openssl exists on ubuntu-latest; requiring it makes a lost TLS
+        # toolchain a red run instead of silently skipping the transport
+        # contract tests (test/helpers/tls-server.mjs).
+        env:
+          REQUIRE_TLS_TESTS: '1'
         run: npm test
       - name: Package dry-run
         run: npm pack --dry-run

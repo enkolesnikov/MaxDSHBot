@@ -7,7 +7,8 @@
  * a MAX card:
  *
  *   inherit    — normal behaviour (ask in MAX/GUI, honour timeout);
- *   read-only  — allow known read-only tools, reject everything else;
+ *   read-only  — allow known read-only tools, deny side effects and, by
+ *                default, network egress (see below);
  *   auto       — allow every tool (dangerous, requires explicit confirmation).
  *
  * Matching is deliberately conservative: direct target-session hits require an
@@ -17,11 +18,18 @@
  * session identity is matched by identity only: a fresh delivery plus a title
  * can never grant access to a different session, nor grant `auto` on its own.
  * Pure helpers, no DSH imports.
+ *
+ * Read-only mode is about "no side effects", so network egress is not implied:
+ * `web_search` and `web_fetch` are NOT read-only tools. A deployment may opt in
+ * with the raw plugin config flag `readOnlyNetwork: true` (default false, read
+ * by interactions.mjs and passed here as `{ allowNetwork: true }`). Behaviour
+ * change: schedules that used to search/fetch under `read-only` are now denied
+ * unless that opt-in is set.
  */
 
 export const AUTONOMY_MODES = Object.freeze(['inherit', 'read-only', 'auto'])
 
-/** Tools that cannot mutate the workspace or run arbitrary commands. */
+/** Tools that cannot mutate the workspace, run commands or reach the network. */
 export const READ_ONLY_TOOLS = Object.freeze(new Set([
   'read',
   'read_image',
@@ -30,9 +38,13 @@ export const READ_ONLY_TOOLS = Object.freeze(new Set([
   'list',
   'find',
   'search',
-  'web_search',
-  'web_fetch',
 ]))
+
+/**
+ * Network egress tools. They are not read-only by default: the read-only policy
+ * grants them only with the explicit `readOnlyNetwork` / `allowNetwork` opt-in.
+ */
+export const READ_ONLY_NETWORK_TOOLS = Object.freeze(new Set(['web_search', 'web_fetch']))
 
 const MODE_LABELS = Object.freeze({
   inherit: 'обычный (спрашивать)',
@@ -64,14 +76,23 @@ export function normalizePolicy(value) {
 
 /**
  * Decide one approval under a policy.
+ * @param {string} mode - `inherit` | `read-only` | `auto` (normalized here).
+ * @param {string} toolName
+ * @param {{allowNetwork?: boolean}} [options] - read-only only: allow
+ *   `READ_ONLY_NETWORK_TOOLS` (the `readOnlyNetwork` plugin config flag).
+ *   Anything except literal `true` keeps the safe default (network denied).
  * @returns {{action:'prompt'|'allow'|'deny', reason:string}}
  */
-export function classifyAutonomyDecision(mode, toolName) {
+export function classifyAutonomyDecision(mode, toolName, options = {}) {
   const normalized = normalizeAutonomyMode(mode)
   if (normalized === 'auto') return { action: 'allow', reason: 'auto policy' }
   if (normalized !== 'read-only') return { action: 'prompt', reason: 'inherit policy' }
   const tool = typeof toolName === 'string' ? toolName : ''
   if (READ_ONLY_TOOLS.has(tool)) return { action: 'allow', reason: 'read-only tool' }
+  if (READ_ONLY_NETWORK_TOOLS.has(tool)) {
+    if (options?.allowNetwork === true) return { action: 'allow', reason: 'read-only network tool (opt-in)' }
+    return { action: 'deny', reason: `network tool ${tool} is denied in read-only mode` }
+  }
   return { action: 'deny', reason: `tool ${tool || '(unknown)'} is not read-only` }
 }
 

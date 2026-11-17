@@ -69,6 +69,14 @@ test('documents are sent one message per file', async () => {
   assert.match(client.sends[0].text, /архив отчёта/)
 })
 
+test('deliverables target a user dialog when only userId is configured', async () => {
+  const { client, deliverables } = makeDeliverables({ target: { userId: '777' } })
+  await deliverables.send([{ path: png }])
+  assert.equal(client.sends.length, 1)
+  assert.equal(client.sends[0].userId, '777')
+  assert.equal(client.sends[0].chatId, undefined)
+})
+
 test('missing files are skipped without throwing', async () => {
   const { client, deliverables } = makeDeliverables()
   await deliverables.send([{ path: join(workspace, 'nope.txt') }])

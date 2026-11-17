@@ -1,8 +1,10 @@
 /**
  * Plugin configuration: defaults, environment fallbacks and validation.
- * Kept dependency-free besides the MAX text limit constant.
+ * Kept dependency-free besides the shared settings validators and the MAX text
+ * limit constant.
  */
 import { MAX_TEXT_LIMIT } from './transport.mjs'
+import { SETTINGS_KEYS, asBoolean, coerceValue } from './settings-validate.mjs'
 
 export const DEFAULTS = {
   enabled: true,
@@ -48,6 +50,9 @@ export const DEFAULTS = {
   voiceEndpoint: undefined,
   voiceApiKey: undefined,
   voiceApiKeyFile: undefined,
+  // Explicit opt-in for a plain-http STT endpoint. With an API key set, the
+  // voice endpoint must be https:// unless this flag is true (dev/private nets).
+  insecureVoiceEndpoint: false,
   voiceModel: 'whisper-1',
   voiceLanguage: undefined,
   voiceTts: false,
@@ -111,6 +116,8 @@ export const DEFAULTS = {
   costMeterFile: undefined,
   budgetAlertEnabled: true,
   budgetAlertThresholds: [80, 100],
+  // autonomy: allow web tools while a schedule runs in read-only mode
+  readOnlyNetwork: false,
   // transport (v0.9)
   transport: 'polling',
   webhookPath: '/max/webhook',
@@ -123,28 +130,6 @@ export const DEFAULTS = {
   // webhook durability/DoS caps (P1): a single update body and the whole queue.
   webhookEntryBytesMax: 64 * 1024,
   webhookQueueBytesMax: 8 * 1024 * 1024,
-}
-
-function asBoolean(value, fallback) {
-  if (value === undefined || value === null) return fallback
-  if (typeof value === 'boolean') return value
-  const normalized = String(value).trim().toLowerCase()
-  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true
-  if (['0', 'false', 'no', 'off'].includes(normalized)) return false
-  return fallback
-}
-
-function normalizePresets(value) {
-  if (!Array.isArray(value)) return []
-  return value
-    .map((item) => {
-      if (typeof item === 'string') return { label: item.trim().slice(0, 40), prompt: item.trim() }
-      const label = String(item?.label ?? '').trim().slice(0, 40)
-      const prompt = String(item?.prompt ?? '').trim()
-      return label && prompt ? { label, prompt } : undefined
-    })
-    .filter(Boolean)
-    .slice(0, 6)
 }
 
 function asIntArray(value, fallback) {
@@ -176,13 +161,18 @@ function asInteger(value, fallback, min, max) {
   return Math.min(max, Math.max(min, rounded))
 }
 
-function normalizeQuietHours(value) {
-  if (!value || typeof value !== 'object') return undefined
-  const start = String(value.start ?? '').trim()
-  const end = String(value.end ?? '').trim()
-  const pattern = /^\d{1,2}:\d{2}$/
-  if (!pattern.test(start) || !pattern.test(end)) return undefined
-  return { start, end }
+/**
+ * Apply a strict GUI-overlay validator from `lib/settings-validate.mjs` and use
+ * `fallback` instead of throwing. A private-profile config must never crash the
+ * plugin on a typo, but it accepts exactly the same values as the overlay, so
+ * YAML and GUI cannot drift apart (see the P2 normalization-drift finding).
+ */
+function settingsValue(key, value, fallback) {
+  try {
+    return coerceValue(SETTINGS_KEYS[key], value)
+  } catch {
+    return fallback
+  }
 }
 
 /** Normalize user config + environment fallbacks into a complete runtime config. */
@@ -205,6 +195,8 @@ export function normalizeConfig(raw = {}) {
     disableLinkPreview: asBoolean(merged.disableLinkPreview, DEFAULTS.disableLinkPreview),
     includeHeader: asBoolean(merged.includeHeader, DEFAULTS.includeHeader),
     includeSessionId: asBoolean(merged.includeSessionId, DEFAULTS.includeSessionId),
+    // Validated with the GUI-overlay rules: invalid values fall back to compact.
+    messageStyle: settingsValue('messageStyle', merged.messageStyle, DEFAULTS.messageStyle),
     includeSubagents: asBoolean(merged.includeSubagents, DEFAULTS.includeSubagents),
     includeTitle: asBoolean(merged.includeTitle, DEFAULTS.includeTitle),
     skipReasons: asStringArray(merged.skipReasons, DEFAULTS.skipReasons),
@@ -218,7 +210,7 @@ export function normalizeConfig(raw = {}) {
     pollTimeoutSec: asInteger(merged.pollTimeoutSec, DEFAULTS.pollTimeoutSec, 0, 90),
     interactive: asBoolean(merged.interactive, DEFAULTS.interactive),
     buttons: asBoolean(merged.buttons, DEFAULTS.buttons),
-    buttonsPresets: normalizePresets(merged.buttonsPresets),
+    buttonsPresets: settingsValue('buttonsPresets', merged.buttonsPresets, DEFAULTS.buttonsPresets),
     threads: asBoolean(merged.threads, DEFAULTS.threads),
     tableFiles: asBoolean(merged.tableFiles, DEFAULTS.tableFiles),
     tableMaxFiles: asInteger(merged.tableMaxFiles, DEFAULTS.tableMaxFiles, 0, 8),
@@ -229,6 +221,7 @@ export function normalizeConfig(raw = {}) {
     voiceEndpoint: String(merged.voiceEndpoint || env.MAX_NOTIFY_VOICE_ENDPOINT || '').trim() || undefined,
     voiceApiKey: String(merged.voiceApiKey || env.MAX_NOTIFY_VOICE_API_KEY || '').trim() || undefined,
     voiceApiKeyFile: String(merged.voiceApiKeyFile || env.MAX_NOTIFY_VOICE_API_KEY_FILE || '').trim() || undefined,
+    insecureVoiceEndpoint: asBoolean(merged.insecureVoiceEndpoint, DEFAULTS.insecureVoiceEndpoint),
     voiceModel: String(merged.voiceModel || DEFAULTS.voiceModel).trim() || DEFAULTS.voiceModel,
     voiceLanguage: String(merged.voiceLanguage || env.MAX_NOTIFY_VOICE_LANGUAGE || '').trim() || undefined,
     voiceTts: asBoolean(merged.voiceTts, DEFAULTS.voiceTts),
@@ -268,9 +261,11 @@ export function normalizeConfig(raw = {}) {
     maxIncomingFiles: asInteger(merged.maxIncomingFiles, DEFAULTS.maxIncomingFiles, 1, 12),
     maxIncomingBytes: asInteger(merged.maxIncomingBytes, DEFAULTS.maxIncomingBytes, 1024, 1024 * 1024 * 1024),
     newSessionDir: String(merged.newSessionDir || env.MAX_NOTIFY_NEW_SESSION_DIR || '').trim() || undefined,
-    digestTime: /^\d{2}:\d{2}$/.test(String(merged.digestTime ?? '')) ? String(merged.digestTime) : DEFAULTS.digestTime,
-    quietHours: normalizeQuietHours(merged.quietHours),
-    mode: ['all', 'errors', 'mute'].includes(merged.mode) ? merged.mode : DEFAULTS.mode,
+    // Overlay rules: strict HH:MM (00:00–23:59), invalid values fall back.
+    digestTime: settingsValue('digestTime', merged.digestTime, DEFAULTS.digestTime),
+    // Overlay rules: valid { start, end } or undefined (null also means "off").
+    quietHours: settingsValue('quietHours', merged.quietHours, DEFAULTS.quietHours) ?? undefined,
+    mode: settingsValue('mode', merged.mode, DEFAULTS.mode),
     outboxEnabled: asBoolean(merged.outboxEnabled, DEFAULTS.outboxEnabled),
     outboxMaxItems: asInteger(merged.outboxMaxItems, DEFAULTS.outboxMaxItems, 1, 5000),
     outboxTtlHours: asInteger(merged.outboxTtlHours, DEFAULTS.outboxTtlHours, 1, 720),
@@ -290,6 +285,7 @@ export function normalizeConfig(raw = {}) {
     costMeterFile: String(merged.costMeterFile || env.MAX_NOTIFY_COST_FILE || '').trim() || undefined,
     budgetAlertEnabled: asBoolean(merged.budgetAlertEnabled, DEFAULTS.budgetAlertEnabled),
     budgetAlertThresholds: asIntArray(merged.budgetAlertThresholds, DEFAULTS.budgetAlertThresholds),
+    readOnlyNetwork: asBoolean(merged.readOnlyNetwork, DEFAULTS.readOnlyNetwork),
     transport: merged.transport === 'webhook' ? 'webhook' : 'polling',
     webhookSecret: validWebhookSecret ? rawWebhookSecret : undefined,
     webhookSecretInvalid: rawWebhookSecret !== '' && !validWebhookSecret,

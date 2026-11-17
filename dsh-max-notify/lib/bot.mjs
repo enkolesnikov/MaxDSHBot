@@ -27,7 +27,12 @@ import {
   truncate,
 } from './cards.mjs'
 import { formatBytes } from './incoming.mjs'
+import { createLruMap } from './lru.mjs'
 import { deleteSchedule, formatSchedulesCard, listSchedules, setScheduleActive } from './schedules.mjs'
+import { targetQuery } from './target.mjs'
+
+/** Upper bound for every per-chat cache below; stale entries are evicted LRU. */
+const CACHE_MAX = 500
 
 const COMMANDS = [
   { name: 'help', description: 'Справка; /help all — все команды' },
@@ -66,29 +71,41 @@ export function createBot({
   let running = false
   let disposed = false
   let commandsRegistered = false
-  /** chatKey -> ordered session ids for `/use N` */
-  const choices = new Map()
-  /** chatKey -> numbered model list for `/model N` */
-  const modelChoices = new Map()
-  /** chatKey -> numbered workspace list for `/workspace N` */
-  const workspaceChoices = new Map()
-  /** chatKey -> { policy, at } pending `/approve <policy> confirm` */
-  const approvalConfirms = new Map()
-  /** chatKey -> normalized schedule list for `/schedules <action> N` */
+  /** chatKey -> ordered session ids for `/use N` (LRU-bounded). */
+  const choices = createLruMap({ max: CACHE_MAX })
+  /** chatKey -> numbered model list for `/model N` (LRU-bounded). */
+  const modelChoices = createLruMap({ max: CACHE_MAX })
+  /** chatKey -> numbered workspace list for `/workspace N` (LRU-bounded). */
+  const workspaceChoices = createLruMap({ max: CACHE_MAX })
+  /** chatKey -> { policy, at } pending `/approve <policy> confirm` (LRU-bounded). */
+  const approvalConfirms = createLruMap({ max: CACHE_MAX })
   /** update keys currently being handled (poll/webhook overlap). */
   const inFlight = new Set()
   /** Aborts an in-flight long poll when the plugin is disposed. */
   let pollAbort
-  const scheduleChoices = new Map()
-  /** chatKey -> { id, at } pending `/schedules cancel N confirm` */
-  const scheduleCancels = new Map()
-  const scheduleModeConfirms = new Map()
+  /** chatKey -> normalized schedule list for `/schedules <action> N` (LRU-bounded). */
+  const scheduleChoices = createLruMap({ max: CACHE_MAX })
+  /** chatKey -> { id, at } pending `/schedules cancel N confirm` (LRU-bounded). */
+  const scheduleCancels = createLruMap({ max: CACHE_MAX })
+  /** chatKey -> { id, mode, at } pending `/schedules mode N auto confirm` (LRU-bounded). */
+  const scheduleModeConfirms = createLruMap({ max: CACHE_MAX })
   /** workspace path chosen for subsequent `/new` calls */
   let preferredWorkspacePath
-  /** chatKey -> token bucket for incoming flood protection */
-  const incomingBuckets = new Map()
-  /** chatKey -> last "too fast" warning */
-  const incomingWarnedAt = new Map()
+  /** chatKey -> token bucket for incoming flood protection (LRU-bounded). */
+  const incomingBuckets = createLruMap({ max: CACHE_MAX })
+  /** chatKey -> last "too fast" warning (LRU-bounded). */
+  const incomingWarnedAt = createLruMap({ max: CACHE_MAX })
+
+  /**
+   * Record a successful poll. A running poller must never be reported as
+   * "stopped": clear the stale marker on `health` (when the module object is
+   * available) and through the `runtime.healthUpdate` bridge used by index.js.
+   * The lifetime counter (`pollFailuresTotal`) is maintained by health.fail().
+   */
+  function markPollAlive(patch = {}) {
+    health?.resetPollState?.()
+    runtime?.healthUpdate?.({ pollStopped: false, pollStoppedReason: undefined, pollFailures: 0, ...patch })
+  }
 
   function allowIncoming(key) {
     const perMinute = Math.max(1, Number(config.incomingPerMinute) || 30)
@@ -143,7 +160,8 @@ export function createBot({
       `📡 transport: ${snapshot.transport === 'webhook' || snapshot.webhookActive ? 'webhook' : 'long polling'}`,
       snapshot.webhookActive
         ? `🔗 webhook: ${snapshot.webhookSubscribed ? 'подписан' : 'подписка не подтверждена'} · очередь ${snapshot.webhookQueueDepth ?? 0}`
-        : `📡 polling: ${snapshot.pollStopped ? `остановлен (${snapshot.pollStoppedReason ?? 'ошибка'})` : 'работает'}`,
+        : // A live poller wins over a stale marker in persisted state.
+          `📡 polling: ${snapshot.pollStopped === true && !running ? `остановлен (${snapshot.pollStoppedReason ?? 'ошибка'})` : 'работает'}`,
       `🕒 последний poll: ${formatRelative(snapshot.lastPollAt)}`,
       `📥 последнее обновление: ${formatRelative(snapshot.lastUpdateAt)}`,
       `📤 outbox: ${outboxStats.pending ?? 0} в очереди, доставлено ${outboxStats.sent ?? 0}, ошибок ${outboxStats.failed ?? 0}`,
@@ -154,14 +172,11 @@ export function createBot({
     if (snapshot.webhookActive && snapshot.webhookSubscriptionError) {
       lines.push(`⚠️ webhook: ${truncate(snapshot.webhookSubscriptionError, 300)}`)
     }
-    if (snapshot.lastError) lines.push(`⚠️ последняя ошибка: ${truncate(snapshot.lastError, 300)}`)
+    if (snapshot.lastError) {
+      const age = Number.isFinite(snapshot.lastErrorAgeMs) ? ` (${formatDuration(snapshot.lastErrorAgeMs)} назад)` : ''
+      lines.push(`⚠️ последняя ошибка${age}: ${truncate(snapshot.lastError, 300)}`)
+    }
     return lines.join('\n')
-  }
-
-  function targetQuery() {
-    if (config.chatId !== undefined) return { chatId: config.chatId }
-    if (config.userId !== undefined) return { userId: config.userId }
-    return {}
   }
 
   function chatKey(chatId) {
@@ -184,7 +199,7 @@ export function createBot({
   async function reply(chatId, text, extra = {}) {
     try {
       const response = await client.sendMessage({
-        ...(chatId !== undefined ? { chatId } : targetQuery()),
+        ...(chatId !== undefined ? { chatId } : targetQuery(config)),
         text,
         format: config.format,
         notify: config.notify,
@@ -1074,12 +1089,14 @@ export function createBot({
     if (state?.marker === undefined) {
       const response = await client.getUpdates({ ...params, signal: pollAbort?.signal })
       state?.setMarker?.(response?.marker)
-      runtime?.healthUpdate?.({ lastPollAt: Date.now() })
+      markPollAlive({ lastPollAt: Date.now() })
       return { primed: true, count: 0, handled: 0 }
     }
     const polledAt = Date.now()
-    runtime?.healthUpdate?.({ lastPollAt: polledAt })
     const response = await client.getUpdates({ ...params, marker: state.marker, signal: pollAbort?.signal })
+    // Reaching this point means MAX answered: the poller is alive again, so the
+    // stopped marker and the current failure streak must be cleared.
+    markPollAlive({ lastPollAt: polledAt })
     if (disposed) return { primed: false, count: 0, handled: 0 }
     const updates = Array.isArray(response?.updates) ? response.updates : []
     let handled = 0
@@ -1141,6 +1158,9 @@ export function createBot({
     if (typeof client.getUpdates !== 'function') return
     if (running) return
     running = true
+    // A fresh poller lifecycle must not inherit a stale "stopped" marker from a
+    // previous failure (e.g. an invalid token replaced via HMR).
+    markPollAlive()
     void pollLoop()
     logger?.info?.('MAX polling started (long poll)')
   }
@@ -1175,6 +1195,20 @@ export function createBot({
     noteSession,
     isAllowed,
     registerCommands,
+    /** Sizes of the bounded per-chat caches (observability/tests). */
+    get cacheSizes() {
+      return {
+        sessions: choices.size,
+        models: modelChoices.size,
+        workspaces: workspaceChoices.size,
+        approvals: approvalConfirms.size,
+        schedules: scheduleChoices.size,
+        scheduleCancels: scheduleCancels.size,
+        scheduleModes: scheduleModeConfirms.size,
+        incomingBuckets: incomingBuckets.size,
+        incomingWarnedAt: incomingWarnedAt.size,
+      }
+    },
   }
 }
 

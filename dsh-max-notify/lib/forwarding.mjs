@@ -5,9 +5,14 @@
  * The image dedupe map (`imagesSent`) is per factory instance and per session:
  * files already delivered by the `deliverables/presented` pipeline are not
  * re-sent with the final message, and files uploaded successfully once are not
- * uploaded again for the same session.
+ * uploaded again for the same session. The map is LRU-bounded (500 sessions) so
+ * a long-lived plugin cannot grow it without limit; `dispose()` drops it.
  */
 import { collectMessageImages, extractImageReferences } from './images.mjs'
+import { createLruMap } from './lru.mjs'
+
+/** Sessions remembered for image dedupe before the oldest entry is evicted. */
+const IMAGES_SENT_MAX = 500
 
 /**
  * @param {object} options
@@ -18,11 +23,11 @@ import { collectMessageImages, extractImageReferences } from './images.mjs'
  *   state, mirroring the other factories; the dedupe map stays private for now.
  * @param {(name: string) => any} [options.getService] - host service accessor
  *   (`ctx.get`) used to read image blocks through the `attachments` service.
- * @returns {{noteSentImages: Function, collectFinalImages: Function, finalKeyboard: Function}}
+ * @returns {{noteSentImages: Function, collectFinalImages: Function, finalKeyboard: Function, dispose: Function}}
  */
 export function createForwarding({ client, config, logger, state, getService = () => undefined } = {}) {
   /** Paths already sent to MAX by the deliverables pipeline (per session). */
-  const imagesSent = new Map()
+  const imagesSent = createLruMap({ max: IMAGES_SENT_MAX })
 
   function noteSentImages(sessionId, paths) {
     if (!Array.isArray(paths) || paths.length === 0) return
@@ -108,5 +113,10 @@ export function createForwarding({ client, config, logger, state, getService = (
     return [{ type: 'inline_keyboard', payload: { buttons: rows } }]
   }
 
-  return { noteSentImages, collectFinalImages, finalKeyboard }
+  /** Drop the per-session dedupe cache (plugin reload / teardown). Idempotent. */
+  function dispose() {
+    imagesSent.clear()
+  }
+
+  return { noteSentImages, collectFinalImages, finalKeyboard, dispose }
 }

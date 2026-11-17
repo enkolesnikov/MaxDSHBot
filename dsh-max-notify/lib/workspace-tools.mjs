@@ -9,6 +9,11 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { realpathSync, statSync } from 'node:fs'
 import { basename, extname, isAbsolute, resolve, sep } from 'node:path'
+import { formatBytes } from './format.mjs'
+
+// Re-exported for existing callers (`index.js`, tests); the implementation
+// lives in lib/format.mjs.
+export { formatBytes }
 
 const MAX_DIFF_BYTES = 1024 * 1024
 const MAX_SEND_BYTES = 25 * 1024 * 1024
@@ -121,14 +126,6 @@ export function resolveSendFile({
     bytes: stats.size,
     type: classifyUploadType(target),
   }
-}
-
-export function formatBytes(bytes) {
-  const value = Number(bytes)
-  if (!Number.isFinite(value) || value <= 0) return '0 B'
-  if (value < 1024) return `${value} B`
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
-  return `${(value / (1024 * 1024)).toFixed(1)} MB`
 }
 
 export const WORKSPACE_LIMITS = Object.freeze({

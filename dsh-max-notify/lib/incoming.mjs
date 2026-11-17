@@ -6,6 +6,11 @@ import { mkdirSync, renameSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { basename, extname, isAbsolute, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
+import { formatBytes } from './format.mjs'
+
+// Re-exported for existing callers (`lib/bot.mjs`, tests); the implementation
+// lives in lib/format.mjs next to the other shared helpers.
+export { formatBytes }
 
 const TYPE_EXTENSION = { image: '', video: '.mp4', audio: '.mp3', file: '.bin' }
 const CONTENT_TYPE_EXTENSION = {
@@ -24,16 +29,6 @@ function extensionForContentType(contentType) {
   return CONTENT_TYPE_EXTENSION[normalized] ?? ''
 }
 const SAFE_CHARS = /[^A-Za-z0-9._ ()-]+/g
-
-/** Human-readable byte size. */
-export function formatBytes(bytes) {
-  const value = Number(bytes)
-  if (!Number.isFinite(value) || value <= 0) return '0 B'
-  if (value < 1024) return `${value} B`
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
-  if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`
-  return `${(value / (1024 * 1024 * 1024)).toFixed(2)} GB`
-}
 
 function describeAttachment(attachment) {
   const payload = attachment?.payload ?? {}

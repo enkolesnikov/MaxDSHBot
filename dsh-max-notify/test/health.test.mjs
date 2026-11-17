@@ -26,6 +26,39 @@ test('health.fail redacts a registered secret before storing the error', () => {
   }
 })
 
+test('resetPollState clears the stopped marker and the streak but keeps totals and the last error', () => {
+  let time = 5_000
+  const health = createHealth({ version: 'test', startedAt: 1_000, now: () => time })
+  health.fail(new Error('network down'))
+  time = 6_500
+  health.fail(new Error('unauthorized'), { stopped: true, reason: 'unauthorized (401)' })
+
+  const failed = health.snapshot()
+  assert.equal(failed.pollStopped, true)
+  assert.equal(failed.pollFailures, 2)
+  assert.equal(failed.pollFailuresTotal, 2)
+  assert.equal(failed.lastError, 'unauthorized')
+  assert.equal(failed.lastErrorAgeMs, 0)
+
+  time = 60_000
+  assert.equal(health.snapshot().lastErrorAgeMs, 53_500)
+
+  health.resetPollState()
+  const reset = health.snapshot()
+  assert.equal(reset.pollStopped, false)
+  assert.equal(reset.pollStoppedReason, undefined)
+  // The current streak is gone, the lifetime total and the diagnostic error stay.
+  assert.equal(reset.pollFailures, 0)
+  assert.equal(reset.pollFailuresTotal, 2)
+  assert.equal(reset.lastError, 'unauthorized')
+  assert.equal(reset.lastErrorAgeMs, 53_500)
+
+  // Counting restarts from zero after a reset but keeps accumulating totals.
+  health.fail(new Error('timeout'))
+  assert.equal(health.snapshot().pollFailures, 1)
+  assert.equal(health.snapshot().pollFailuresTotal, 3)
+})
+
 test('health.update redacts string patches on write', () => {
   const secret = 'voice-api-key-0123456789abcdef'
   registerSecret(secret)

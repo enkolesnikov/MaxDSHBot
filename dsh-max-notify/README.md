@@ -77,11 +77,17 @@ Published on npm: https://www.npmjs.com/package/dsh-max-notify
   budget alerts (80/100 by default) fire once per period and survive reloads.
   `costMeterFile`, `budgetAlertEnabled`, `budgetAlertThresholds` configure it.
 
+## Tech-debt 1.9
+
+- P2 audit 17.11: dedupe, LRU caches, observability, limiter, transport,
+  config validation, full dryRun, teardown tests, CI TLS requirement.
+- 490 tests on Node 20/22/24.
+
 ## Tech-debt 1.8
 
 - P1 audit 17.11: webhook byte caps + redaction, deliverable path boundary,
   strict autonomy matching, outbox race, lifecycle/HMR, CI leak guard.
-- 435 tests on Node 20/22/24.
+- 490 tests on Node 20/22/24.
 
 ## Tech-debt 1.7
 
@@ -169,7 +175,7 @@ for per-run `new` sessions, the title plus a recent delivery receipt.
 | `lib/autonomy.mjs` | schedule autonomy policies/matching |
 | `lib/settings.mjs` | GUI settings validation/overlay/API |
 | `client/client.js` | hand-written settings page bundle |
-| `test/*.test.mjs` | `node --test` (435 unit tests) |
+| `test/*.test.mjs` | `node --test` (490 unit tests) |
 
 ## Config
 
@@ -233,6 +239,8 @@ Set in `cordis.patch.yml` (or override the row by id from the profile's own
 | `tableFiles` / `tableMaxFiles` | `true` / `4` | Markdown tables as CSV/MD attachments |
 | `nativeIncomingImages` | `true` | Incoming images as native image parts |
 | `voiceTranscribe` / `voiceEndpoint` / `voiceApiKey` | `false` / — / env | Optional STT for MAX audio |
+| `insecureVoiceEndpoint` | `false` | Allow an `http:` STT endpoint (debug only; the key travels in clear text) |
+| `readOnlyNetwork` | `false` | Allow `web_search`/`web_fetch` in read-only schedules |
 | `settingsPage` / `settingsFile` | `true` / `$DSH_HOME/max-notify/config.json` | GUI settings overlay |
 | `voiceTts` / `voiceTtsMode` | `false` / `short` | Auto TTS mode |
 | `voiceTtsEndpoint` / `voiceTtsApiKey` | env `MAX_NOTIFY_TTS_*` | OpenAI-compatible TTS |

@@ -7,6 +7,11 @@
  * with `next()` (so the Web GUI keeps its card), and then race the MAX answer
  * against the GUI answer: whichever arrives first wins. The losing channel's
  * card is edited to say where the decision was made.
+ *
+ * Free-text answers are routed by a per-chat index of pending question tokens.
+ * The index is LRU-bounded (500 chats) and an entry is dropped as soon as its
+ * question is answered, aborted with the host request, or the plugin disposes,
+ * so a long-lived instance cannot grow it without limit.
  */
 import { randomUUID } from 'node:crypto'
 import {
@@ -17,15 +22,14 @@ import {
 } from './cards.mjs'
 import { PRIORITY } from './limits.mjs'
 import { classifyAutonomyDecision } from './autonomy.mjs'
+import { createLruMap } from './lru.mjs'
+import { isTopLevelSession } from './session-kind.mjs'
+import { targetQuery } from './target.mjs'
 
 const APPROVAL_TARGET = 'approval/request'
 
-function isTopLevelAgent(agent) {
-  const header = agent?.session?.header
-  if (!header) return true
-  if (header.origin === 'subagent') return false
-  return !(Number(header.delegationDepth ?? 0) > 0)
-}
+/** Chat -> pending question tokens. Bounded: old chats are evicted LRU. */
+const QUESTIONS_BY_CHAT_MAX = 500
 
 function callbackButton(text, payload) {
   return { type: 'callback', text, payload: JSON.stringify(payload) }
@@ -46,8 +50,8 @@ function keyboard(rows) {
 export function createInteractions({ client, config, logger, target, resolveTitle, state, audit, resolveAutonomy } = {}) {
   /** token -> pending interaction */
   const pending = new Map()
-  /** chat key -> Set<token> for text-answered questions */
-  const questionsByChat = new Map()
+  /** chat key -> Set<token> for text-answered questions (LRU-bounded, see below) */
+  const questionsByChat = createLruMap({ max: QUESTIONS_BY_CHAT_MAX })
   let disposed = false
 
   const enabled = config?.interactive !== false
@@ -59,19 +63,13 @@ export function createInteractions({ client, config, logger, target, resolveTitl
   const rememberTools = new Set(Array.isArray(config?.approvalRememberTools) ? config.approvalRememberTools : [])
   const rememberMs = Math.max(1000, Number(config?.approvalRememberMs) || 60 * 60 * 1000)
 
-  function targetQuery() {
-    if (target?.chatId !== undefined) return { chatId: target.chatId }
-    if (target?.userId !== undefined) return { userId: target.userId }
-    return {}
-  }
-
   function chatKey(chatId) {
     return String(chatId ?? target?.chatId ?? target?.userId ?? 'default')
   }
 
   async function sendCard(text, rows, extraAttachments = []) {
     const params = {
-      ...targetQuery(),
+      ...targetQuery(target),
       text,
       format: config?.format,
       notify: config?.notify,
@@ -132,7 +130,7 @@ export function createInteractions({ client, config, logger, target, resolveTitl
 
   async function handleApproval(request, next) {
     if (!enabled || disposed) return next()
-    if (!isTopLevelAgent(request?.agent)) return next()
+    if (!isTopLevelSession(request?.agent?.session)) return next()
     const toolName = request?.toolName
 
     if (typeof resolveAutonomy === 'function' && toolName) {
@@ -149,7 +147,11 @@ export function createInteractions({ client, config, logger, target, resolveTitl
             policy.scheduleId,
           )
         } else if (policy?.mode) {
-          const decision = classifyAutonomyDecision(policy.mode, toolName)
+          // Read-only denies network egress unless the plugin config opts in
+          // (`readOnlyNetwork: true`, default false).
+          const decision = classifyAutonomyDecision(policy.mode, toolName, {
+            allowNetwork: config?.readOnlyNetwork === true,
+          })
           if (decision.action === 'allow' || decision.action === 'deny') {
             audit?.write?.({
               kind: 'autonomy',
@@ -364,7 +366,7 @@ export function createInteractions({ client, config, logger, target, resolveTitl
     const guiPromise = next()
     if (!enabled || disposed) return guiPromise
     if (questionChannel === 'gui') return guiPromise
-    if (!isTopLevelAgent(request?.agent)) return guiPromise
+    if (!isTopLevelSession(request?.agent?.session)) return guiPromise
     if (typeof client.sendMessage !== 'function') return guiPromise
 
     const questions = Array.isArray(request?.questions) ? request.questions : []

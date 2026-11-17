@@ -7,6 +7,7 @@
  */
 
 import { formatMoney, formatPercent } from './cost-meter.mjs'
+import { folderOf, formatClock } from './format.mjs'
 
 /** Trim a string to `max` characters with an ellipsis. */
 export function truncate(text, max) {
@@ -19,18 +20,6 @@ export function truncate(text, max) {
 export function shortSessionId(sessionId) {
   const value = String(sessionId ?? '')
   return value.length > 8 ? value.slice(-8) : value || '?'
-}
-
-function clock(date) {
-  const d = date instanceof Date ? date : new Date(date)
-  if (Number.isNaN(d.getTime())) return '—'
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
-}
-
-function folderOf(cwd) {
-  if (typeof cwd !== 'string' || cwd === '') return ''
-  const normalized = cwd.replace(/[/\\]+$/, '')
-  return normalized.split(/[/\\]/).pop() || normalized
 }
 
 function pluralRu(value, one, few, many) {
@@ -99,7 +88,7 @@ export function formatStatusCard({ title, sessionId, running, agentStatus, model
   const state = `${runnerLabel({ running, agentStatus })}${model ? ` · \`${provider ? `${provider}/` : ''}${model}\`` : ''}`
   lines.push(state)
   if (cwd) lines.push(`📁 ${folderOf(cwd)}`)
-  if (updatedAt) lines.push(`🕒 ${clock(updatedAt)}${sessionId ? ` · ${shortSessionId(sessionId)}` : ''}`)
+  if (updatedAt) lines.push(`🕒 ${formatClock(updatedAt)}${sessionId ? ` · ${shortSessionId(sessionId)}` : ''}`)
   return lines.join('\n')
 }
 
@@ -321,13 +310,7 @@ export function formatBriefingCard({ date, sessions = [], pending, cost, schedul
   }
   const next = Array.isArray(schedules) ? schedules.filter((item) => item?.scheduledAt).slice(0, 2) : []
   if (next.length > 0) {
-    const parts = next.map((item) => {
-      const at = new Date(item.scheduledAt)
-      const time = Number.isNaN(at.getTime())
-        ? '—'
-        : `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`
-      return `${time} ${truncate(item.title || 'задача', 40)}`
-    })
+    const parts = next.map((item) => `${formatClock(item.scheduledAt)} ${truncate(item.title || 'задача', 40)}`)
     lines.push(`⏰ Дальше: ${parts.join(' · ')}`)
   }
   return lines.join('\n')

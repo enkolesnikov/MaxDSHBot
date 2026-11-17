@@ -15,6 +15,7 @@ import {
   sanitizeSettingsPatch,
   saveSettings,
 } from '../lib/settings.mjs'
+import { asBoolean, coerceBoolean, parseBoolean } from '../lib/settings-validate.mjs'
 
 function tempDir(t) {
   const directory = mkdtempSync(join(tmpdir(), 'dsh-max-notify-settings-'))
@@ -56,6 +57,39 @@ async function postSettings(api, body, headers = { 'content-type': 'application/
   await api(fakeRequest({ method: 'POST', url: SETTINGS_JSON_PATH, body, headers }), res)
   return res
 }
+
+test('shared boolean parser keeps strict and fallback modes', () => {
+  const recognized = [
+    [true, true],
+    ['true', true],
+    [' TRUE ', true],
+    ['yes', true],
+    ['on', true],
+    [1, true],
+    [false, false],
+    ['false', false],
+    ['OFF', false],
+    ['no', false],
+    [0, false],
+  ]
+  for (const [value, expected] of recognized) {
+    assert.equal(parseBoolean(value), expected, `parseBoolean(${JSON.stringify(value)})`)
+    assert.equal(coerceBoolean(value), expected, `coerceBoolean(${JSON.stringify(value)})`)
+    assert.equal(asBoolean(value, 'fallback'), expected, `asBoolean(${JSON.stringify(value)})`)
+  }
+  for (const invalid of ['maybe', '', '2', undefined, null, 2, {}, []]) {
+    assert.equal(parseBoolean(invalid), undefined, `parseBoolean(${JSON.stringify(invalid)})`)
+    assert.throws(() => coerceBoolean(invalid), /must be a boolean/)
+    assert.equal(asBoolean(invalid, 'fallback'), 'fallback')
+  }
+})
+
+test('settings overlay keeps the throwing boolean semantics', () => {
+  const result = sanitizeSettingsPatch({ threads: 'maybe', notify: 'yes' })
+  assert.equal(result.ok, false)
+  assert.deepEqual(result.values, { notify: true })
+  assert.match(result.errors[0], /threads: must be a boolean/)
+})
 
 test('SETTINGS_KEYS exposes exactly the safe allowlist with defaults', () => {
   assert.deepEqual(Object.keys(SETTINGS_KEYS).sort(), [

@@ -16,178 +16,23 @@ import { chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSy
 import { randomBytes } from 'node:crypto'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { SETTINGS_DEFAULTS, SETTINGS_KEYS, coerceValue } from './settings-validate.mjs'
+
+// The rule table and validators live in the pure `settings-validate.mjs` module
+// so `lib/config.mjs` (private profile) applies exactly the same rules as this
+// overlay. Re-exported here because the GUI/integration imports them from here.
+export { SETTINGS_DEFAULTS, SETTINGS_KEYS }
 
 export const SETTINGS_JSON_PATH = '/max-notify/settings.json'
 
 /** Maximum accepted JSON body for POST, in bytes. */
 export const SETTINGS_BODY_LIMIT = 64 * 1024
 
-const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/
-const BOOLEAN_TRUE = new Set(['true', '1', 'yes', 'on'])
-const BOOLEAN_FALSE = new Set(['false', '0', 'no', 'off'])
-
-/**
- * Allowlist of editable settings with their type and constraints. Every entry
- * also carries the built-in default used when the overlay has no value yet.
- */
-export const SETTINGS_KEYS = Object.freeze({
-  mode: Object.freeze({ type: 'enum', values: Object.freeze(['all', 'errors', 'mute']), default: 'all' }),
-  digestEnabled: Object.freeze({ type: 'boolean', default: false }),
-  digestTime: Object.freeze({ type: 'time', default: '21:00' }),
-  quietHours: Object.freeze({ type: 'quietHours', default: null }),
-  threads: Object.freeze({ type: 'boolean', default: true }),
-  tableFiles: Object.freeze({ type: 'boolean', default: true }),
-  tableMaxFiles: Object.freeze({ type: 'integer', min: 0, max: 8, default: 4 }),
-  notify: Object.freeze({ type: 'boolean', default: true }),
-  progress: Object.freeze({ type: 'boolean', default: true }),
-  typing: Object.freeze({ type: 'boolean', default: true }),
-  messageStyle: Object.freeze({ type: 'enum', values: Object.freeze(['compact', 'detailed']), default: 'compact' }),
-  notifySubagents: Object.freeze({ type: 'boolean', default: false }),
-  notifyJobs: Object.freeze({ type: 'boolean', default: false }),
-  notifyGoals: Object.freeze({ type: 'boolean', default: false }),
-  notifyErrors: Object.freeze({ type: 'boolean', default: true }),
-  todoProgress: Object.freeze({ type: 'boolean', default: false }),
-  approvalTimeoutMs: Object.freeze({ type: 'integer', min: 0, max: 600000, default: 120000 }),
-  receiveFiles: Object.freeze({ type: 'boolean', default: true }),
-  nativeIncomingImages: Object.freeze({ type: 'boolean', default: true }),
-  buttonsPresets: Object.freeze({
-    type: 'presets',
-    maxItems: 6,
-    labelMax: 40,
-    promptMax: 500,
-    default: Object.freeze([]),
-  }),
-  voiceTranscribe: Object.freeze({ type: 'boolean', default: false }),
-  voiceTts: Object.freeze({ type: 'boolean', default: false }),
-  voiceTtsMode: Object.freeze({ type: 'enum', values: Object.freeze(['off', 'short', 'always']), default: 'short' }),
-  voiceTtsVoice: Object.freeze({ type: 'string', maxLength: 80, default: 'alloy' }),
-  voiceTtsModel: Object.freeze({ type: 'string', maxLength: 80, default: 'gpt-4o-mini-tts' }),
-  voiceTtsMaxChars: Object.freeze({ type: 'integer', min: 20, max: 2000, default: 600 }),
-})
-
-/** Built-in defaults derived from {@link SETTINGS_KEYS}. */
-export const SETTINGS_DEFAULTS = Object.freeze(
-  Object.fromEntries(Object.entries(SETTINGS_KEYS).map(([key, definition]) => [key, definition.default])),
-)
-
 /** Resolve the overlay path: explicit config path, or `$DSH_HOME/max-notify/config.json`. */
 export function resolveSettingsFile(config = {}) {
   if (typeof config.settingsFile === 'string' && config.settingsFile.trim() !== '') return config.settingsFile
   const home = process.env.DSH_HOME || join(homedir(), '.dsh')
   return join(home, 'max-notify', 'config.json')
-}
-
-function charLength(value) {
-  return Array.from(value).length
-}
-
-function normalizeTime(value) {
-  const text = typeof value === 'string' || typeof value === 'number' ? String(value).trim() : ''
-  return TIME_RE.test(text) ? text : undefined
-}
-
-function coerceBoolean(value) {
-  if (typeof value === 'boolean') return value
-  if (value === 1 || value === 0) return value === 1
-  if (typeof value === 'string') {
-    const text = value.trim().toLowerCase()
-    if (BOOLEAN_TRUE.has(text)) return true
-    if (BOOLEAN_FALSE.has(text)) return false
-  }
-  throw new Error('must be a boolean')
-}
-
-function coerceInteger(value, definition) {
-  const raw = typeof value === 'string' ? value.trim() : value
-  if (typeof raw !== 'number' && typeof raw !== 'string') throw new Error('must be an integer')
-  if (typeof raw === 'string' && !/^-?\d+$/.test(raw)) throw new Error('must be an integer')
-  const number = Number(raw)
-  if (!Number.isInteger(number)) throw new Error('must be an integer')
-  if (number < definition.min || number > definition.max) {
-    throw new Error(`must be between ${definition.min} and ${definition.max}`)
-  }
-  return number
-}
-
-function coercePresets(value, definition) {
-  if (!Array.isArray(value)) throw new Error('must be an array of { label, prompt } objects')
-  if (value.length > definition.maxItems) throw new Error(`supports at most ${definition.maxItems} items`)
-  return value.map((item, index) => {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) {
-      throw new Error(`item ${index + 1} must be a { label, prompt } object`)
-    }
-    const label = typeof item.label === 'string' ? item.label.trim() : ''
-    const prompt = typeof item.prompt === 'string' ? item.prompt.trim() : ''
-    if (label === '' || charLength(label) > definition.labelMax) {
-      throw new Error(`item ${index + 1} label must be 1..${definition.labelMax} characters`)
-    }
-    if (prompt === '' || charLength(prompt) > definition.promptMax) {
-      throw new Error(`item ${index + 1} prompt must be 1..${definition.promptMax} characters`)
-    }
-    return { label, prompt }
-  })
-}
-
-function coerceHttpsUrl(value) {
-  if (value === null) return null
-  if (typeof value !== 'string') throw new Error('must be an https:// URL or null')
-  const text = value.trim()
-  if (text === '') return null
-  let parsed
-  try {
-    parsed = new URL(text)
-  } catch {
-    throw new Error('must be a valid https:// URL or null')
-  }
-  if (parsed.protocol !== 'https:' || parsed.hostname === '') {
-    throw new Error('must be an https:// URL or null')
-  }
-  return text
-}
-
-function coerceValue(definition, value) {
-  switch (definition.type) {
-    case 'enum': {
-      const text = typeof value === 'string' ? value.trim().toLowerCase() : ''
-      if (!definition.values.includes(text)) throw new Error(`must be one of ${definition.values.join('|')}`)
-      return text
-    }
-    case 'boolean':
-      return coerceBoolean(value)
-    case 'time': {
-      const time = normalizeTime(value)
-      if (time === undefined) throw new Error('must be HH:MM (24-hour)')
-      return time
-    }
-    case 'quietHours': {
-      if (value === null) return null
-      if (!value || typeof value !== 'object' || Array.isArray(value)) {
-        throw new Error('must be null or { start, end } with HH:MM times')
-      }
-      const start = normalizeTime(value.start)
-      const end = normalizeTime(value.end)
-      if (start === undefined || end === undefined) {
-        throw new Error('must be null or { start, end } with HH:MM times')
-      }
-      return { start, end }
-    }
-    case 'integer':
-      return coerceInteger(value, definition)
-    case 'presets':
-      return coercePresets(value, definition)
-    case 'httpsUrl':
-      return coerceHttpsUrl(value)
-    case 'string': {
-      if (typeof value !== 'string') throw new Error('must be a string')
-      const text = value.trim()
-      if (charLength(text) > definition.maxLength) {
-        throw new Error(`must be a string of at most ${definition.maxLength} characters`)
-      }
-      return text
-    }
-    default:
-      throw new Error('unsupported setting type')
-  }
 }
 
 /**

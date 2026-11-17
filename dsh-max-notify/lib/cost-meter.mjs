@@ -13,6 +13,13 @@
  * pricing currency and the UI compares `budgetUsed * exchangeRate` with
  * `budget.amount` in the display currency. Ledger `cost` fields are in the
  * pricing currency; `costCny`/`costEur` are pre-converted.
+ *
+ * Caching: every `snapshot()` stats the ledger (a single cheap syscall) and
+ * re-reads/parses it only when BOTH `mtimeMs` and `size` change. Size is part
+ * of the key because a rewrite that lands within the filesystem's mtime
+ * granularity (same-second rewrite) can leave `mtimeMs` untouched while the
+ * payload length changes. An unchanged ledger is served from the parsed
+ * snapshot without any synchronous read/parse, however stale the snapshot is.
  */
 import { readFileSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -105,21 +112,44 @@ function budgetWindow(budget, today) {
  * @param {string} [options.file]
  * @param {object} [options.logger]
  * @param {() => number} [options.now]
- * @param {number} [options.cacheMs] - mtime-check throttle, default 1000 ms.
+ * @param {number} [options.cacheMs] - optional minimum interval between stat
+ *   checks, default 0 (stat every snapshot, so a same-second rewrite is noticed
+ *   immediately). A positive value trades freshness for fewer `statSync` calls
+ *   in very hot loops; the parsed ledger is never re-read while `size`+`mtimeMs`
+ *   stay unchanged.
  */
-export function createCostMeter({ file, logger, now = () => Date.now(), cacheMs = 1000 } = {}) {
+export function createCostMeter({ file, logger, now = () => Date.now(), cacheMs = 0 } = {}) {
   const path = file ?? resolveCostLedgerFile()
+  const statSkipMs = Number.isFinite(Number(cacheMs)) ? Math.max(0, Number(cacheMs)) : 0
   let cache
   let cacheAt = 0
   let cacheMtime = 0
+  let cacheSize = -1
+  let loggedUnsupportedVersion
 
   function unavailable(reason) {
     return { available: false, reason, ledgerFile: path }
   }
 
+  /** Log an unknown ledger version once per version (not on every snapshot). */
+  function noteUnsupportedVersion(version) {
+    const key = String(version ?? '?')
+    if (loggedUnsupportedVersion === key) return
+    loggedUnsupportedVersion = key
+    logger?.warn?.(
+      'cannot read cost-meter ledger %s: unsupported ledger version %s (expected %s); spend data is unavailable',
+      path,
+      version ?? '?',
+      LEDGER_VERSION,
+    )
+  }
+
   function build(ledger) {
     if (!ledger || typeof ledger !== 'object') return unavailable('ledger is not an object')
-    if (ledger.version !== LEDGER_VERSION) return unavailable(`unsupported ledger version: ${ledger.version ?? '?'}`)
+    if (ledger.version !== LEDGER_VERSION) {
+      noteUnsupportedVersion(ledger.version)
+      return unavailable(`unsupported ledger version: ${ledger.version ?? '?'}`)
+    }
     const config = ledger.config ?? {}
     const currency = currencyOfConfig(config)
     const days = ledger.days && typeof ledger.days === 'object' ? ledger.days : {}
@@ -179,19 +209,26 @@ export function createCostMeter({ file, logger, now = () => Date.now(), cacheMs 
 
   function snapshot() {
     const at = now()
+    // Optional high-frequency throttle; default 0 = always stat.
+    if (statSkipMs > 0 && cache && at - cacheAt < statSkipMs) return cache
     let stats
     try {
       stats = statSync(path)
     } catch (error) {
       return unavailable(error?.code === 'ENOENT' ? 'ledger not found' : `cannot stat ledger: ${error?.message || String(error)}`)
     }
-    if (cache && at - cacheAt < cacheMs && stats.mtimeMs === cacheMtime) return cache
+    // Invalidate on size AND mtime: a same-second rewrite may keep mtimeMs equal.
+    if (cache && stats.mtimeMs === cacheMtime && stats.size === cacheSize) {
+      cacheAt = at
+      return cache
+    }
     if (stats.size > MAX_LEDGER_BYTES) return unavailable(`ledger is too large (${stats.size} bytes)`)
     try {
       const ledger = JSON.parse(readFileSync(path, 'utf8'))
       cache = build(ledger)
       cacheAt = at
       cacheMtime = stats.mtimeMs
+      cacheSize = stats.size
       return cache
     } catch (error) {
       logger?.debug?.('cannot read cost-meter ledger %s: %s', path, error?.message || String(error))

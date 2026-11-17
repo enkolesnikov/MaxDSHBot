@@ -94,6 +94,43 @@ test('failed items stay queued, are retried and removed after success', async ()
   assert.equal(attempts.length, 2)
 })
 
+test('transient delivery counters stay in memory and are never written to the outbox file', async () => {
+  const clock = memoryNow()
+  const file = freshFile()
+  let fail = true
+  const outbox = createOutbox({
+    file,
+    now: clock.now,
+    logger: silent,
+    send: async () => {
+      if (fail) throw new Error('MAX unavailable')
+    },
+  })
+  const counters = ['sent', 'failed', 'dropped', 'enqueued', 'lastSentAt']
+  const assertDurableShape = () => {
+    const saved = JSON.parse(readFileSync(file, 'utf8'))
+    assert.deepEqual(Object.keys(saved).sort(), ['delivered', 'pending', 'version'])
+    const serialized = JSON.stringify(saved)
+    for (const counter of counters) assert.equal(serialized.includes(`"${counter}"`), false, counter)
+  }
+
+  outbox.enqueue({ params: { text: 'queued' }, dedupeKey: 'counters' })
+  await outbox.flush()
+  assert.equal(outbox.snapshot().failed, 1)
+  assert.equal(outbox.snapshot().sent, 0)
+  assertDurableShape()
+
+  fail = false
+  clock.advance(10_000)
+  assert.deepEqual(await outbox.flush(), { attempted: 1, sent: 1, failed: 0 })
+  assert.equal(outbox.snapshot().sent, 1)
+  assert.equal(outbox.snapshot().enqueued, 1)
+  assertDurableShape()
+
+  outbox.dispose()
+  assertDurableShape()
+})
+
 test('deliverNow falls back to the queue when the direct send fails', async () => {
   const { now } = memoryNow()
   let fail = true

@@ -194,6 +194,11 @@ export function createOutbox({
   // Synchronous lock for deliverNow(): reserved before the first await so two
   // concurrent callers with the same dedupeKey cannot both send.
   const inflightKeys = new Set()
+  // Process-lifetime delivery counters. They are observability only: `save()`
+  // never writes them, and no method of this module persists them into plugin
+  // state. A host that copies `snapshot()` into durable state (index.js does
+  // this for the health heartbeat) must strip them itself, otherwise every
+  // restart would keep replaying numbers that only describe this process.
   const stats = { sent: 0, failed: 0, dropped: 0, enqueued: 0, lastError: undefined, lastSentAt: undefined }
 
   let storedVersion
@@ -425,6 +430,13 @@ export function createOutbox({
     save()
   }
 
+  /**
+   * Operational snapshot for `/health` and monitoring.
+   *
+   * `pending`/`delivered` describe the durable queue; `sent`/`failed`/`dropped`/
+   * `enqueued` (and `lastError`/`lastSentAt`) are transient process-lifetime
+   * values and are never part of the persisted outbox document.
+   */
   function snapshot() {
     return {
       pending: pending.length,

@@ -4,21 +4,13 @@
  * when the turn ends — the final answer arrives as the normal notification.
  */
 import { truncate } from './cards.mjs'
-
-function isTopLevelSession(session) {
-  const header = session?.header
-  if (!header) return true
-  if (header.origin === 'subagent') return false
-  return !(Number(header.delegationDepth ?? 0) > 0)
-}
+import { isTopLevelSession } from './session-kind.mjs'
+import { targetQuery } from './target.mjs'
 
 export function createProgress({ client, config, logger, target, policy } = {}) {
   /** sessionId -> { session, startedAt, text, tool, messageId, timers... } */
   const active = new Map()
   let disposed = false
-
-  const targetQuery = () =>
-    target?.chatId !== undefined ? { chatId: target.chatId } : { userId: target?.userId }
 
   function statusText(record) {
     const elapsed = Math.max(1, Math.round((Date.now() - record.startedAt) / 1000))
@@ -43,7 +35,7 @@ export function createProgress({ client, config, logger, target, policy } = {}) 
     if (disposed || !active.has(record.id)) return
     try {
       const response = await client.sendMessage({
-        ...targetQuery(),
+        ...targetQuery(target),
         text: statusText(record),
         format: config.format,
         notify: false,

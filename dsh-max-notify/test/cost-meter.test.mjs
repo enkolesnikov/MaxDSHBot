@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -170,4 +170,93 @@ test('formatting helpers and cards include cost and budget', () => {
 test('localDayKey matches the cost-meter calendar key', () => {
   assert.equal(localDayKey(new Date(2026, 10, 9, 23, 59)), '2026-11-09')
   assert.equal(localDayKey(new Date(2026, 0, 1, 0, 0)), '2026-01-01')
+})
+
+// ---------------------------------------------------------------------------
+// P2: cache invalidation by size + mtime, and explicit unknown-version logging
+// ---------------------------------------------------------------------------
+
+const FIXED_MTIME = new Date(1_700_000_000_000)
+
+function dayEntry({ costCny, cost, costEur }) {
+  return {
+    date: TODAY,
+    input: 200,
+    output: 80,
+    calls: 3,
+    cost,
+    costCny,
+    costEur,
+    sessions: [{ id: 'session-b', title: 'B', at: 2, cost, costCny, costEur }],
+  }
+}
+
+test('cache invalidation includes the ledger size (same-second rewrite)', () => {
+  const file = freshFile()
+  writeFileSync(file, JSON.stringify(ledger()))
+  utimesSync(file, FIXED_MTIME, FIXED_MTIME)
+  // Default cacheMs: a same-second rewrite must be noticed on the next snapshot.
+  const meter = createCostMeter({ file, now: fakeNow })
+  assert.equal(meter.snapshot().today.amount, 5)
+
+  // Same mtime, different content length: "5" -> "55" CNY.
+  writeFileSync(file, JSON.stringify(ledger({ days: { [TODAY]: dayEntry({ costCny: 55, cost: 0.5, costEur: 0.45 }) } })))
+  utimesSync(file, FIXED_MTIME, FIXED_MTIME)
+  const after = meter.snapshot()
+  assert.equal(after.available, true)
+  assert.equal(after.today.amount, 55, 'a same-mtime rewrite with a new size must invalidate the cache')
+})
+
+test('a same-size rewrite with a newer mtime is picked up', () => {
+  const file = freshFile()
+  writeFileSync(file, JSON.stringify(ledger()))
+  utimesSync(file, FIXED_MTIME, FIXED_MTIME)
+  const meter = createCostMeter({ file, now: fakeNow })
+  assert.equal(meter.snapshot().today.amount, 5)
+
+  // Same byte length, newer mtime: "5" -> "7" CNY.
+  writeFileSync(file, JSON.stringify(ledger({ days: { [TODAY]: dayEntry({ costCny: 7, cost: 0.7, costEur: 0.65 }) } })))
+  const later = new Date(FIXED_MTIME.getTime() + 1000)
+  utimesSync(file, later, later)
+  assert.equal(meter.snapshot().today.amount, 7)
+})
+
+test('an unchanged ledger is served from the parsed cache without re-reading', () => {
+  const file = freshFile()
+  writeFileSync(file, JSON.stringify(ledger()))
+  let clock = 1_700_000_000_000
+  const meter = createCostMeter({ file, now: () => clock })
+  const first = meter.snapshot()
+  assert.equal(first.available, true)
+
+  // Even a long time after the last read, an unchanged file must not be re-parsed.
+  clock += 5000
+  const second = meter.snapshot()
+  assert.equal(second.readAt, first.readAt, 'unchanged ledger must not be re-parsed')
+  assert.equal(second.today.amount, first.today.amount)
+})
+
+test('an unknown ledger version logs a warning with the expected version', () => {
+  const warnings = []
+  const logger = {
+    warn: (...args) => warnings.push(args),
+    debug() {},
+  }
+  const file = freshFile()
+  writeFileSync(file, JSON.stringify(ledger({ extra: { version: 2 } })))
+  const meter = createCostMeter({ file, logger, now: fakeNow, cacheMs: 0 })
+
+  const snapshot = meter.snapshot()
+  assert.equal(snapshot.available, false)
+  assert.match(snapshot.reason, /unsupported ledger version: 2/)
+  assert.equal(warnings.length, 1, 'the version mismatch must not stay silent')
+  const [format, ledgerPath, version, expected] = warnings[0]
+  assert.match(String(format), /unsupported ledger version/)
+  assert.equal(ledgerPath, file)
+  assert.equal(version, 2)
+  assert.equal(expected, 1)
+
+  // The same version is only reported once; the snapshot itself stays cached.
+  meter.snapshot()
+  assert.equal(warnings.length, 1)
 })

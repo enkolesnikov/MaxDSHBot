@@ -4,6 +4,7 @@
  */
 import { statSync } from 'node:fs'
 import { formatDeliverablesCard } from './cards.mjs'
+import { targetQuery } from './target.mjs'
 import { resolveSendFile } from './workspace-tools.mjs'
 
 const IMAGE_LIMIT_BYTES = 50 * 1024 * 1024
@@ -29,9 +30,6 @@ export function createDeliverables({
   allowOutside = false,
   resolvePath = resolveSendFile,
 } = {}) {
-  const targetQuery = () =>
-    target?.chatId !== undefined ? { chatId: target.chatId } : { userId: target?.userId }
-
   function fileRecord(raw) {
     if (typeof raw === 'string') return { path: raw }
     return { path: raw?.path, description: raw?.description }
@@ -91,7 +89,7 @@ export function createDeliverables({
     if (images.length > 0) {
       try {
         await client.sendWithAttachments({
-          ...targetQuery(),
+          ...targetQuery(target),
           text,
           format: config.format,
           notify: decision.notify,
@@ -108,7 +106,7 @@ export function createDeliverables({
     for (const document of documents.slice(0, MAX_ATTACHMENTS)) {
       try {
         await client.sendWithAttachments({
-          ...targetQuery(),
+          ...targetQuery(target),
           text: document.description ? `📎 ${document.description}` : text,
           format: config.format,
           notify: decision.notify,

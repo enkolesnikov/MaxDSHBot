@@ -38,7 +38,7 @@
 - `npm test`: 435/435 (1.8.0).
 - 1.6.1: `lib/config.mjs` вынесен из `index.js` (324 строки), поведение без изменений.
 - 1.7.0: `lib/forwarding.mjs`, dead settings removed, state/outbox durability, CI 20/22/24, transport 38.
-- 1.8.0: закрыты P1 аудита 17.11 — webhook caps/redaction, deliverables path boundary, autonomy identity, outbox race, lifecycle/HMR, CI sensitive guard; 435 тестов. Остаток P2 — `docs/p2-backlog.md`.
+- 1.8.0: закрыты P1 аудита 17.11 — webhook caps/redaction, deliverables path boundary, autonomy identity, outbox race, lifecycle/HMR, CI sensitive guard; 490 тестов. Остаток P2 — `docs/p2-backlog.md`.
 - `npm run check`: OK; `npm pack --dry-run`: 45 файлов.
 - Live hot-reload: `transport=webhook`, `webhookActive=true`, `webhookSubscribed=true`,
   `/max/webhook` → 401 без секрета, `/max-notify/settings.json` → 401 без cookie.

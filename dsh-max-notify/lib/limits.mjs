@@ -9,17 +9,32 @@
  * when the caller may issue the request. A missing/`null` chat key means the
  * request is only counted against the global bucket (e.g. media uploads or
  * message edits where the chat is not known at the call site).
+ *
+ * Timers: while the queue is non-empty the refill timer is deliberately kept
+ * referenced. An unref'd timer would let Node exit with `acquire()` promises
+ * still pending (unsettled top-level await), so a pending outbound request could
+ * silently never resolve. `stop()` rejects every waiter and clears the timer.
+ *
+ * Chat buckets: bounded by `maxChatBuckets` (default 500) with least-recently-
+ * used eviction - a chat that is actively sending is kept, an idle one is
+ * dropped. `waitFor()` never creates or refills buckets; it is a pure estimate.
  */
 export const PRIORITY = Object.freeze({ normal: 0, critical: 10 })
+export const DEFAULT_MAX_CHAT_BUCKETS = 500
 
 export function createLimiter({
   perChatPerSecond = 2,
   globalPerSecond = 30,
+  maxChatBuckets = DEFAULT_MAX_CHAT_BUCKETS,
   now = () => Date.now(),
   logger,
 } = {}) {
   const chatCapacity = Math.max(1, perChatPerSecond)
   const globalCapacity = Math.max(1, globalPerSecond)
+  const bucketLimit = Number.isFinite(Number(maxChatBuckets)) && Number(maxChatBuckets) >= 1
+    ? Math.floor(Number(maxChatBuckets))
+    : DEFAULT_MAX_CHAT_BUCKETS
+  /** Map iteration order is the LRU order: first entry = least recently used. */
   const chatBuckets = new Map()
   const globalBucket = { tokens: globalCapacity, last: now() }
   /** @type {Array<{chatKey: string|null, priority: number, enqueuedAt: number, resolve: Function}>} */
@@ -36,16 +51,25 @@ export function createLimiter({
     rejected: 0,
   }
 
+  function touchBucket(chatKey, bucket) {
+    // Re-insert to move the entry to the most-recently-used end of the Map.
+    chatBuckets.delete(chatKey)
+    chatBuckets.set(chatKey, bucket)
+  }
+
   function bucketFor(chatKey) {
-    let bucket = chatBuckets.get(chatKey)
-    if (!bucket) {
-      bucket = { tokens: chatCapacity, last: now() }
-      chatBuckets.set(chatKey, bucket)
-      if (chatBuckets.size > 500) {
-        // Bound memory on long-lived processes with many chats.
-        const oldest = chatBuckets.keys().next().value
-        if (oldest !== undefined) chatBuckets.delete(oldest)
-      }
+    const existing = chatBuckets.get(chatKey)
+    if (existing) {
+      touchBucket(chatKey, existing)
+      return existing
+    }
+    const bucket = { tokens: chatCapacity, last: now() }
+    chatBuckets.set(chatKey, bucket)
+    // Bound memory on long-lived processes: drop the least recently used chat.
+    while (chatBuckets.size > bucketLimit) {
+      const oldest = chatBuckets.keys().next().value
+      if (oldest === undefined) break
+      chatBuckets.delete(oldest)
     }
     return bucket
   }
@@ -55,6 +79,13 @@ export function createLimiter({
     if (elapsedMs <= 0) return
     bucket.tokens = Math.min(capacity, bucket.tokens + (elapsedMs / 1000) * rate)
     bucket.last = at
+  }
+
+  /** Token count at `at` without mutating the bucket (used by read-only waitFor). */
+  function projectedTokens(bucket, capacity, at) {
+    const elapsedMs = Math.max(0, at - bucket.last)
+    if (elapsedMs === 0) return bucket.tokens
+    return Math.min(capacity, bucket.tokens + (elapsedMs / 1000) * capacity)
   }
 
   function available(chatKey, at) {
@@ -76,16 +107,23 @@ export function createLimiter({
     }
   }
 
-  /** Milliseconds until both buckets allow one request for this key. */
-  function waitFor(chatKey, at) {
+  /**
+   * Milliseconds until both buckets would allow one request for this key.
+   * Read-only: it never creates, refills or reorders buckets, so callers
+   * (metrics, tests) may probe freely without affecting scheduling.
+   */
+  function waitFor(chatKey, at = now()) {
     let waitMs = 0
-    if (globalBucket.tokens < 1) {
-      waitMs = Math.max(waitMs, ((1 - globalBucket.tokens) / globalCapacity) * 1000)
+    const globalTokens = projectedTokens(globalBucket, globalCapacity, at)
+    if (globalTokens < 1) {
+      waitMs = Math.max(waitMs, ((1 - globalTokens) / globalCapacity) * 1000)
     }
     if (chatKey !== null && chatKey !== undefined) {
-      const bucket = bucketFor(chatKey)
-      if (bucket.tokens < 1) {
-        waitMs = Math.max(waitMs, ((1 - bucket.tokens) / chatCapacity) * 1000)
+      // A missing bucket means a fresh one would be created full of tokens.
+      const bucket = chatBuckets.get(String(chatKey))
+      const tokens = bucket ? projectedTokens(bucket, chatCapacity, at) : chatCapacity
+      if (tokens < 1) {
+        waitMs = Math.max(waitMs, ((1 - tokens) / chatCapacity) * 1000)
       }
     }
     return Math.max(0, Math.ceil(waitMs))
@@ -114,14 +152,24 @@ export function createLimiter({
         consume(item.chatKey, at)
         item.resolve()
       }
-      if (queue.length > 0 && !timer && !stopped) {
+      if (queue.length === 0) {
+        // Nothing left to wait for: drop a previously scheduled refill timer so
+        // an idle limiter does not keep the event loop alive.
+        if (timer) {
+          clearTimeout(timer)
+          timer = undefined
+        }
+        return
+      }
+      if (!timer && !stopped) {
         let waitMs = 1000
         for (const item of queue) waitMs = Math.min(waitMs, waitFor(item.chatKey, now()))
         timer = setTimeout(() => {
           timer = undefined
           pump()
         }, Math.max(5, waitMs))
-        timer.unref?.()
+        // Kept referenced on purpose: an unref'd timer lets Node exit with
+        // queued `acquire()` promises still unresolved.
       }
     } finally {
       draining = false
@@ -176,11 +224,12 @@ export function createLimiter({
       ...stats,
       queueDepth: queue.length,
       chatBuckets: chatBuckets.size,
+      maxChatBuckets: bucketLimit,
       perChatPerSecond: chatCapacity,
       globalPerSecond: globalCapacity,
       stopped,
     }
   }
 
-  return { acquire, stop, snapshot, pump }
+  return { acquire, stop, snapshot, pump, waitFor }
 }

@@ -86,6 +86,34 @@ test('resolveVoiceEndpoint rejects credentials in the URL', () => {
   assert.throws(() => resolveVoiceEndpoint('https://user:pass@example.com/v1'), TypeError)
 })
 
+test('resolveVoiceEndpoint requires https when an API key is sent', () => {
+  // Plain http is rejected as soon as the request would carry a bearer token.
+  assert.throws(() => resolveVoiceEndpoint('http://127.0.0.1:8080/v1', { hasApiKey: true }), /https/)
+  assert.throws(
+    () => resolveVoiceEndpoint('http://127.0.0.1:8080/v1', { hasApiKey: true, insecureVoiceEndpoint: false }),
+    /https/,
+  )
+  // Only an explicit truthy opt-in allows insecure http; "false"/"0" do not.
+  assert.throws(
+    () => resolveVoiceEndpoint('http://host/v1', { hasApiKey: true, insecureVoiceEndpoint: 'false' }),
+    /https/,
+  )
+  assert.equal(
+    resolveVoiceEndpoint('http://host/v1', { hasApiKey: true, insecureVoiceEndpoint: true }),
+    'http://host/v1/audio/transcriptions',
+  )
+  assert.equal(
+    resolveVoiceEndpoint('http://host/v1', { hasApiKey: true, insecureVoiceEndpoint: 'on' }),
+    'http://host/v1/audio/transcriptions',
+  )
+  // https is unaffected, and http stays valid when no key is attached.
+  assert.equal(
+    resolveVoiceEndpoint('https://api.openai.com/v1', { hasApiKey: true }),
+    'https://api.openai.com/v1/audio/transcriptions',
+  )
+  assert.equal(resolveVoiceEndpoint('http://host/v1'), 'http://host/v1/audio/transcriptions')
+})
+
 // ---------------------------------------------------------------------------
 // transcribeAudio: request shape and success
 // ---------------------------------------------------------------------------
@@ -315,6 +343,36 @@ test('transcribeAudio maps an aborted request to a timeout error', async () => {
   assert.match(result.error, /Таймаут/)
 })
 
+test('transcribeAudio refuses a plain-http endpoint unless insecureVoiceEndpoint is set', async () => {
+  const filePath = await audioFile()
+  let calls = 0
+  const fetchImpl = async (url) => {
+    calls += 1
+    assert.match(url, /^http:\/\//)
+    return jsonResponse({ text: 'insecure ok' })
+  }
+
+  const refused = await transcribeAudio({
+    filePath,
+    endpoint: 'http://127.0.0.1:8080/v1',
+    apiKey: API_KEY,
+    fetchImpl,
+  })
+  assert.equal(refused.ok, false)
+  assert.match(refused.error, /https/)
+  assert.equal(calls, 0)
+
+  const allowed = await transcribeAudio({
+    filePath,
+    endpoint: 'http://127.0.0.1:8080/v1',
+    apiKey: API_KEY,
+    insecureVoiceEndpoint: true,
+    fetchImpl,
+  })
+  assert.deepEqual(allowed, { ok: true, text: 'insecure ok' })
+  assert.equal(calls, 1)
+})
+
 // ---------------------------------------------------------------------------
 // voicePromptText
 // ---------------------------------------------------------------------------
@@ -363,6 +421,38 @@ test('voiceConfigured accepts apiKey or apiKeyFile without reading the file', ()
   assert.deepEqual(voiceConfigured({ ...base, voiceEndpoint: 'https://api.openai.com/v1/audio/transcriptions' }), {
     ok: true,
   })
+})
+
+test('voiceConfigured enforces https unless insecureVoiceEndpoint is explicit', () => {
+  const base = {
+    voiceTranscribe: true,
+    voiceEndpoint: 'http://127.0.0.1:8080/v1',
+    voiceApiKey: 'sk-key',
+  }
+  const refused = voiceConfigured(base)
+  assert.equal(refused.ok, false)
+  assert.match(refused.reason, /https/)
+
+  assert.deepEqual(voiceConfigured({ ...base, insecureVoiceEndpoint: true }), { ok: true })
+  assert.deepEqual(voiceConfigured({ ...base, voiceEndpoint: 'https://api.openai.com/v1' }), { ok: true })
+
+  // An apiKeyFile counts as a configured key, so http needs the same opt-in.
+  const fileOnly = { ...base, voiceApiKey: undefined, voiceApiKeyFile: '/definitely/does/not/exist/key.txt' }
+  assert.equal(voiceConfigured(fileOnly).ok, false)
+  assert.match(voiceConfigured(fileOnly).reason, /https/)
+  assert.deepEqual(voiceConfigured({ ...fileOnly, insecureVoiceEndpoint: 'true' }), { ok: true })
+})
+
+test('voiceConfigured parses voiceTranscribe with the shared boolean parser', () => {
+  const base = { voiceEndpoint: 'https://api.openai.com/v1', voiceApiKey: 'sk-key' }
+  for (const value of [true, 'true', ' TRUE ', '1', 'yes', 'on']) {
+    assert.deepEqual(voiceConfigured({ ...base, voiceTranscribe: value }), { ok: true }, String(value))
+  }
+  for (const value of [false, 'false', '0', 'no', 'off', 'maybe', '', 0]) {
+    const result = voiceConfigured({ ...base, voiceTranscribe: value })
+    assert.equal(result.ok, false, String(value))
+    assert.match(result.reason, /voiceTranscribe/)
+  }
 })
 
 test('voiceConfigured explains why it is disabled', () => {

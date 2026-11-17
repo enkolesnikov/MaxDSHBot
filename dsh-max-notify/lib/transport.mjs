@@ -24,6 +24,8 @@ import { classifyUploadType } from './workspace-tools.mjs'
 export const MAX_API_BASE = 'https://platform-api2.max.ru'
 export const MAX_TEXT_LIMIT = 4000
 export const MAX_MESSAGES_PER_SECOND = 2
+/** Hard cap for JSON responses (API/upload endpoints return tiny payloads). */
+export const MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
 const USER_AGENT = (() => {
   try {
@@ -53,6 +55,105 @@ export function isTrustedMaxUrl(value, { baseUrl = MAX_API_BASE } = {}) {
   return host === baseHost || host === 'max.ru' || host.endsWith('.max.ru')
 }
 
+function isLoopbackHostname(hostname) {
+  const host = String(hostname ?? '').toLowerCase()
+  return (
+    host === 'localhost' ||
+    host.endsWith('.localhost') ||
+    host === '[::1]' ||
+    host === '::1' ||
+    /^127(?:\.\d{1,3}){3}$/.test(host)
+  )
+}
+
+/**
+ * Validate and normalise a MAX API `baseUrl`.
+ *
+ * HTTPS is always required. Unless `allowInsecureBaseUrl` is set, the host must
+ * also pass `isTrustedMaxUrl()` (a MAX-owned host). `allowInsecureBaseUrl`
+ * relaxes ONLY the host allowlist, and then only for loopback test servers
+ * (`localhost`, `*.localhost`, `127.0.0.0/8`, `::1`) - it can never point the
+ * bot token at an arbitrary host and never enables plain HTTP.
+ *
+ * Ports are deliberately NOT restricted: the MAX host allowlist is the trust
+ * boundary, and MAX may serve API/CDN endpoints on non-443 ports (the transport
+ * contract tests pin `https://CDN.MAX.RU:8443/` as trusted for that reason).
+ */
+export function normalizeMaxApiBaseUrl(value, { allowInsecureBaseUrl = false } = {}) {
+  let url
+  try {
+    url = new URL(String(value))
+  } catch {
+    throw new Error(`invalid MAX API baseUrl: ${value === undefined ? 'undefined' : String(value)}`)
+  }
+  if (url.protocol !== 'https:') {
+    throw new Error(`MAX API baseUrl must use https, got ${url.protocol || 'an unknown scheme'}`)
+  }
+  if (url.username || url.password) {
+    throw new Error('invalid MAX API baseUrl: embedded credentials are not allowed')
+  }
+  if (!isTrustedMaxUrl(url.toString())) {
+    if (!allowInsecureBaseUrl || !isLoopbackHostname(url.hostname)) {
+      throw new Error(
+        `refusing untrusted MAX API baseUrl: ${url.host}; MAX-owned https hosts only (allowInsecureBaseUrl permits loopback test servers)`,
+      )
+    }
+  }
+  return url.toString()
+}
+
+/** Reject a response once it exceeds the configured byte cap. */
+function responseTooLarge(limitBytes, actualBytes) {
+  const error = new Error(
+    `MAX API response exceeds ${limitBytes} bytes${Number.isFinite(actualBytes) ? ` (got ${actualBytes})` : ''}`,
+  )
+  error.code = 'max.response.too.large'
+  error.limitBytes = limitBytes
+  return error
+}
+
+/**
+ * Read an HTTP response body with a hard byte cap. Oversized responses are
+ * rejected (and the stream destroyed) instead of being buffered in memory.
+ * @returns {Promise<{raw: string, bytes: number}>}
+ */
+function readCappedBody(res, limitBytes) {
+  return new Promise((resolve, reject) => {
+    const declared = Number(res.headers?.['content-length'])
+    if (Number.isFinite(declared) && declared > limitBytes) {
+      res.destroy?.()
+      reject(responseTooLarge(limitBytes, declared))
+      return
+    }
+    const chunks = []
+    let bytes = 0
+    let settled = false
+    const fail = (error) => {
+      if (settled) return
+      settled = true
+      res.destroy?.()
+      reject(error)
+    }
+    res.on('data', (chunk) => {
+      bytes += chunk.length
+      if (bytes > limitBytes) {
+        fail(responseTooLarge(limitBytes, bytes))
+        return
+      }
+      chunks.push(chunk)
+    })
+    res.on('end', () => {
+      if (settled) return
+      settled = true
+      resolve({ raw: Buffer.concat(chunks).toString('utf8'), bytes })
+    })
+    res.on('error', (error) => {
+      if (settled) return
+      settled = true
+      reject(error)
+    })
+  })
+}
 
 /** Load the bundled Russian Trusted CA chain; returns undefined when absent. */
 export function loadBundledCa() {
@@ -122,14 +223,22 @@ function parseRetryAfter(header) {
 /**
  * Create a MAX API client.
  *
+ * The `baseUrl` is validated before any request: it must be HTTPS and, unless
+ * `allowInsecureBaseUrl` is set, a MAX-owned host (see `normalizeMaxApiBaseUrl`).
+ * The validated URL is used for every token-bearing request and is exposed as
+ * `client.baseUrl`.
+ *
  * @param {object} options
  * @param {string} options.token - bot access token (required).
  * @param {string} [options.baseUrl] - API base, default https://platform-api2.max.ru.
+ * @param {boolean} [options.allowInsecureBaseUrl] - allow a loopback HTTPS base
+ *   URL for local test servers (default false; plain HTTP is never allowed).
  * @param {string|Buffer|Array<string|Buffer>} [options.ca] - explicit CA PEM(s).
  * @param {string} [options.caFile] - PEM file to trust instead of the bundled chain.
  * @param {boolean} [options.insecureTls] - disable TLS verification (debug only).
  * @param {number} [options.timeoutMs] - per-request timeout, default 15000.
  * @param {number} [options.maxRetries] - retries for 429/5xx/network errors, default 3.
+ * @param {number} [options.maxResponseBytes] - reject responses above this size, default 8 MiB.
  * @param {number} [options.minIntervalMs] - min gap between message sends, default 600.
  * @param {(level: string, message: string, extra?: unknown) => void} [options.log] - optional log sink.
  */
@@ -137,11 +246,13 @@ export function createMaxClient(options = {}) {
   const {
     token,
     baseUrl = MAX_API_BASE,
+    allowInsecureBaseUrl = false,
     ca,
     caFile,
     insecureTls = false,
     timeoutMs = 15000,
     maxRetries = 3,
+    maxResponseBytes = MAX_RESPONSE_BYTES,
     minIntervalMs = 600,
     log,
     limiter,
@@ -150,6 +261,12 @@ export function createMaxClient(options = {}) {
   if (typeof token !== 'string' || token.trim() === '') {
     throw new Error('MAX bot token is required (config.botToken or MAX_BOT_TOKEN)')
   }
+  // Fail fast on a token-exfiltration base URL before any network/TLS work.
+  const resolvedBaseUrl = normalizeMaxApiBaseUrl(baseUrl, { allowInsecureBaseUrl })
+  const responseLimitBytes =
+    Number.isFinite(Number(maxResponseBytes)) && Number(maxResponseBytes) > 0
+      ? Math.floor(Number(maxResponseBytes))
+      : MAX_RESPONSE_BYTES
   // The log sink must never receive token-like material.
   const logSink = typeof log === 'function' ? (level, message) => log(level, redact(String(message))) : undefined
 
@@ -177,9 +294,15 @@ export function createMaxClient(options = {}) {
       new Promise((resolve, reject) => {
       let url
       try {
-        url = new URL(path, baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`)
+        url = new URL(path, resolvedBaseUrl.endsWith('/') ? resolvedBaseUrl : `${resolvedBaseUrl}/`)
       } catch (error) {
         reject(error)
+        return
+      }
+      // Defence in depth: the validated base is the only host allowed to
+      // receive the token, even if a path ever resolved elsewhere.
+      if (!isTrustedMaxUrl(url.toString(), { baseUrl: resolvedBaseUrl })) {
+        reject(new Error(`refusing MAX API request to untrusted host: ${url.host}`))
         return
       }
       if (query) {
@@ -215,10 +338,7 @@ export function createMaxClient(options = {}) {
           signal,
         },
         (res) => {
-          const chunks = []
-          res.on('data', (chunk) => chunks.push(chunk))
-          res.on('end', () => {
-            const raw = Buffer.concat(chunks).toString('utf8')
+          readCappedBody(res, responseLimitBytes).then(({ raw }) => {
             let json
             try {
               json = raw ? JSON.parse(raw) : undefined
@@ -230,8 +350,7 @@ export function createMaxClient(options = {}) {
               return
             }
             reject(httpError(res.statusCode, raw, json, parseRetryAfter(res.headers['retry-after'])))
-          })
-          res.on('error', reject)
+          }, reject)
         },
       )
       req.on('timeout', () =>
@@ -409,7 +528,7 @@ export function createMaxClient(options = {}) {
         reject(error)
         return
       }
-      if (!isTrustedMaxUrl(url.toString(), { baseUrl })) {
+      if (!isTrustedMaxUrl(url.toString(), { baseUrl: resolvedBaseUrl })) {
         reject(new Error(`refusing to send the MAX token to untrusted upload host: ${url.hostname}`))
         return
       }
@@ -432,10 +551,7 @@ export function createMaxClient(options = {}) {
           timeout: Math.max(timeoutMs, 60000),
         },
         (res) => {
-          const chunks = []
-          res.on('data', (chunk) => chunks.push(chunk))
-          res.on('end', () => {
-            const raw = Buffer.concat(chunks).toString('utf8')
+          readCappedBody(res, responseLimitBytes).then(({ raw }) => {
             let json
             try {
               json = raw ? JSON.parse(raw) : undefined
@@ -447,8 +563,7 @@ export function createMaxClient(options = {}) {
               return
             }
             reject(httpError(res.statusCode, raw, json))
-          })
-          res.on('error', reject)
+          }, reject)
         },
       )
       req.on('timeout', () => req.destroy(new Error('MAX upload timed out')))
@@ -534,11 +649,11 @@ export function createMaxClient(options = {}) {
           reject(error)
           return
         }
-        if (!isTrustedMaxUrl(url.toString(), { baseUrl })) {
+        if (!isTrustedMaxUrl(url.toString(), { baseUrl: resolvedBaseUrl })) {
           reject(new Error(`refusing untrusted attachment URL: ${url.hostname}`))
           return
         }
-        const trustedApiHost = url.hostname.toLowerCase() === new URL(baseUrl).hostname.toLowerCase()
+        const trustedApiHost = url.hostname.toLowerCase() === new URL(resolvedBaseUrl).hostname.toLowerCase()
         const headers = { 'User-Agent': USER_AGENT }
         // Pre-signed MAX CDN URLs do not need the long-lived bot token.
         if (trustedApiHost) headers.Authorization = token
@@ -666,7 +781,7 @@ export function createMaxClient(options = {}) {
     sendWithAttachments,
     downloadToFile,
     uploadTypeFor,
-    baseUrl,
+    baseUrl: resolvedBaseUrl,
     token,
     limiter,
     stats: () => ({ limiter: limiter?.snapshot?.() }),
