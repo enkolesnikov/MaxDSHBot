@@ -72,7 +72,7 @@ function isLoopbackHostname(hostname) {
  * HTTPS is always required. Unless `allowInsecureBaseUrl` is set, the host must
  * also pass `isTrustedMaxUrl()` (a MAX-owned host). `allowInsecureBaseUrl`
  * relaxes ONLY the host allowlist, and then only for loopback test servers
- * (`localhost`, `*.localhost`, `127.0.0.0/8`, `::1`) - it can never point the
+ * (`localhost`, `*.localhost`, IPv4 loopback and `::1`) - it can never point the
  * bot token at an arbitrary host and never enables plain HTTP.
  *
  * Ports are deliberately NOT restricted: the MAX host allowlist is the trust
