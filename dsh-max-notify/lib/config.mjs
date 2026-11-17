@@ -120,6 +120,9 @@ export const DEFAULTS = {
   webhookAutoSubscribe: true,
   webhookRemoveOnStop: false,
   webhookQueueMax: 200,
+  // webhook durability/DoS caps (P1): a single update body and the whole queue.
+  webhookEntryBytesMax: 64 * 1024,
+  webhookQueueBytesMax: 8 * 1024 * 1024,
 }
 
 function asBoolean(value, fallback) {
@@ -298,6 +301,8 @@ export function normalizeConfig(raw = {}) {
     webhookAutoSubscribe: asBoolean(merged.webhookAutoSubscribe, DEFAULTS.webhookAutoSubscribe),
     webhookRemoveOnStop: asBoolean(merged.webhookRemoveOnStop, DEFAULTS.webhookRemoveOnStop),
     webhookQueueMax: asInteger(merged.webhookQueueMax, DEFAULTS.webhookQueueMax, 1, 5000),
+    webhookEntryBytesMax: asInteger(merged.webhookEntryBytesMax, DEFAULTS.webhookEntryBytesMax, 1024, 1024 * 1024),
+    webhookQueueBytesMax: asInteger(merged.webhookQueueBytesMax, DEFAULTS.webhookQueueBytesMax, 64 * 1024, 256 * 1024 * 1024),
   }
 
   const format = typeof config.format === 'string' ? config.format.trim().toLowerCase() : ''

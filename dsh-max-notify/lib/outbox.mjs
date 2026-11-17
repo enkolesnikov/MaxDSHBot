@@ -120,16 +120,48 @@ function defaultFile(config = {}) {
   return resolveOutboxFile(config)
 }
 
-/** Merge a loaded outbox document into the in-memory queues (v1 compatible). */
-function applyLoadedOutbox(pending, delivered, parsed) {
+/** Parse a finite number from a persisted timestamp, or `undefined` when bogus. */
+function finiteNumber(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return undefined
+}
+
+/**
+ * Merge a loaded outbox document into the in-memory queues (v1 compatible).
+ * Persisted items are normalized: a missing/invalid `nextAt` falls back to
+ * `createdAt` (so legacy entries become due instead of sleeping forever), and a
+ * missing/invalid `createdAt` falls back to now (so it is not TTL-pruned on the
+ * first flush). Bogus entries are dropped with a warning that never includes
+ * the sensitive `params`.
+ */
+function applyLoadedOutbox(pending, delivered, parsed, logger, now) {
   if (Array.isArray(parsed.pending)) {
     for (const item of parsed.pending) {
-      if (item && typeof item.id === 'string' && typeof item.call === 'string') pending.push(item)
+      if (
+        !item || typeof item !== 'object' || Array.isArray(item) ||
+        typeof item.id !== 'string' || typeof item.call !== 'string' ||
+        !item.params || typeof item.params !== 'object' || Array.isArray(item.params)
+      ) {
+        logger?.warn?.('MAX outbox dropped invalid pending entry on load')
+        continue
+      }
+      const current = now()
+      const createdAt = finiteNumber(item.createdAt) ?? current
+      const nextAt = finiteNumber(item.nextAt) ?? createdAt
+      pending.push({ ...item, createdAt, nextAt })
     }
   }
   if (Array.isArray(parsed.delivered)) {
     for (const entry of parsed.delivered) {
-      if (entry && typeof entry.key === 'string') delivered.push(entry)
+      if (!entry || typeof entry !== 'object' || typeof entry.key !== 'string') {
+        logger?.warn?.('MAX outbox dropped invalid delivered entry on load')
+        continue
+      }
+      delivered.push(entry)
     }
   }
 }
@@ -159,6 +191,9 @@ export function createOutbox({
   let timer
   let flushing = false
   let disposed = false
+  // Synchronous lock for deliverNow(): reserved before the first await so two
+  // concurrent callers with the same dedupeKey cannot both send.
+  const inflightKeys = new Set()
   const stats = { sent: 0, failed: 0, dropped: 0, enqueued: 0, lastError: undefined, lastSentAt: undefined }
 
   let storedVersion
@@ -207,7 +242,7 @@ export function createOutbox({
         logger?.warn?.('cannot back up newer MAX outbox file %s: %s', path, error?.message || String(error))
       }
     } else {
-      applyLoadedOutbox(pending, delivered, loaded)
+      applyLoadedOutbox(pending, delivered, loaded, logger, now)
     }
   }
 
@@ -238,8 +273,9 @@ export function createOutbox({
     const cutoff = now() - ttlMs
     for (let index = pending.length - 1; index >= 0; index -= 1) {
       if (pending[index].createdAt < cutoff) {
-        pending.splice(index, 1)
+        const [dropped] = pending.splice(index, 1)
         stats.dropped += 1
+        logger?.warn?.('MAX outbox dropped expired pending item (dedupeKey=%s, kind=%s)', dropped.dedupeKey, dropped.kind)
       }
     }
     for (let index = delivered.length - 1; index >= 0; index -= 1) {
@@ -250,8 +286,9 @@ export function createOutbox({
     if (pending.length > maxItems) {
       pending.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0) || a.createdAt - b.createdAt)
       while (pending.length > maxItems) {
-        pending.pop()
+        const dropped = pending.pop()
         stats.dropped += 1
+        logger?.warn?.('MAX outbox dropped pending item over size cap (dedupeKey=%s, kind=%s)', dropped.dedupeKey, dropped.kind)
       }
     }
   }
@@ -346,6 +383,8 @@ export function createOutbox({
   /** Deliver a message now; persist it only when the direct attempt fails. */
   async function deliverNow(params, { dedupeKey, call = 'sendMessage', priority = 0, kind = 'message' } = {}) {
     if (dedupeKey && (isDelivered(dedupeKey) || isPending(dedupeKey))) return { skipped: true }
+    if (dedupeKey && inflightKeys.has(dedupeKey)) return { skipped: true }
+    if (dedupeKey) inflightKeys.add(dedupeKey)
     try {
       const response = await send(call, params)
       stats.sent += 1
@@ -359,6 +398,8 @@ export function createOutbox({
     } catch (error) {
       const queued = enqueue({ dedupeKey, call, params, priority, kind })
       return { queued, error: error?.message || String(error) }
+    } finally {
+      if (dedupeKey) inflightKeys.delete(dedupeKey)
     }
   }
 

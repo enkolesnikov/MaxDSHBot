@@ -18,8 +18,8 @@
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/enkolesnikov/MaxDSHBot?style=flat-square"/></a>
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img alt="DSH" src="https://img.shields.io/badge/DSH-0.2.x-6C5CE7?style=flat-square"/></a>
   <a href="https://max.ru"><img alt="MAX" src="https://img.shields.io/badge/MAX-messenger-8B5CF6?style=flat-square"/></a>
-  <img alt="Tests" src="https://img.shields.io/badge/tests-400%20passed-2ecc71?style=flat-square"/>
-  <a href="https://nodejs.org"><img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A524.9-339933?style=flat-square&logo=nodedotjs&logoColor=white"/></a>
+  <img alt="Tests" src="https://img.shields.io/badge/tests-435%20passed-2ecc71?style=flat-square"/>
+  <a href="https://nodejs.org"><img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A520-339933?style=flat-square&logo=nodedotjs&logoColor=white"/></a>
   <img alt="Runtime dependencies" src="https://img.shields.io/badge/runtime%20deps-0-brightgreen?style=flat-square"/>
   <a href="https://github.com/enkolesnikov/MaxDSHBot/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/enkolesnikov/MaxDSHBot?style=flat-square"/></a>
 </p>
@@ -166,7 +166,7 @@ MAX будет сам присылать обновления на публич�
     transport: webhook
     webhookPath: /max/webhook
     webhookPublicUrl: https://example.com/max/webhook
-    webhookSecret: ${MAX_NOTIFY_WEBHOOK_SECRET}   # 5–256 символов [A-Za-z0-9_-]
+    webhookSecret: ${MAX_NOTIFY_WEBHOOK_SECRET}   # 32–256 символов [A-Za-z0-9_-]
     webhookAutoSubscribe: true
 ```
 
@@ -183,13 +183,19 @@ MAX будет сам присылать обновления на публич�
 long polling и пишет warning в лог. Официальная документация MAX:
 [webhooks](https://dev.max.ru/docs-api/methods/POST/subscriptions).
 
+## Техдолг 1.8
+
+- P1 аудита 17.11: webhook-лимиты и redaction, граница путей deliverables,
+  строгий матчинг автономии, гонка outbox, lifecycle/HMR, CI-guard утечек.
+- 435 тестов на Node 20/22/24.
+
 ## Техдолг 1.7
 
 - `index.js` 2051 → 1870 строк: config и forwarding вынесены в модули.
 - Удалена мёртвая HTML-страница настроек (~360 строк).
 - State/outbox: future-schema guard, fsync, corrupt-бэкапы, 0600/0700.
 - CI: Node 20/22/24, actions pinned by SHA; транспортные контрактные тесты
-  (38) на локальном HTTPS; всего 400 тестов.
+  (38) на локальном HTTPS; всего 435 тестов.
 
 ## Аудит 1.6: rc.2, безопасность, надёжность
 
@@ -212,7 +218,7 @@ long polling и пишет warning в лог. Официальная докум�
 
 ## UX-аудит (v1.4)
 
-- **12 команд в меню** вместо 31 (в 1.5 — 13 с `/brief`); `/help` ≤450 символов, полный список — `/help all`.
+- **13 команд в меню** (было 31; `/brief` добавил 13-ю в v1.5); `/help` ≤450 символов, полный список — `/help all`.
 - **Компактный заголовок** `🕒 20:03 · Название`; старый подробный режим —
   `messageStyle: detailed`.
 - **Тише по умолчанию**: subagent/job/goal/TODO-уведомления выключены; остаются
@@ -315,8 +321,7 @@ long polling и пишет warning в лог. Официальная докум�
 | `registerCommands` / `greetOnStart` | `true` / `true` | меню команд MAX и приветствие по Start |
 | `newSessionDir` | — | папка для `/new` (по умолчанию — папка активной сессии) |
 | `notifySubagents` / `notifyJobs` / `notifyGoals` | `false` | уведомления о событиях (тихие по умолчанию) |
-| `notifyErrors` / `todoProgress` | `true` / `false` | ошибки, TODO-прогресс |
-| `todoProgress` | `true` | TODO-прогресс в MAX |
+| `notifyErrors` / `todoProgress` | `true` / `false` | ошибки, TODO-прогресс (по умолчанию выключен) |
 | `quietHours` | — | `{start: '23:00', end: '08:00'}` — без push ночью |
 | `digestEnabled` / `digestTime` | `false` / `21:00` | ежедневный дайджест |
 | `mode` | `all` | стартовый режим: `all`, `errors`, `mute` |
@@ -379,7 +384,7 @@ long polling и пишет warning в лог. Официальная докум�
 | `client/client.js` | клиентская страница настроек (без сборки) |
 | `lib/observer.mjs`, `lib/policy.mjs` | события, дайджест, режимы, алерты бюджета |
 | `certs/ca-chain.pem` | Russian Trusted Sub CA + Root CA |
-| `test/` | 187 тестов (`node --test`) |
+| `test/` | 435 тестов (`node --test`) |
 | `tools/` | `pair.mjs`, `send-test.mjs`, `smoke.mjs`, `webhook.mjs` |
 
 </details>
@@ -392,7 +397,7 @@ long polling и пишет warning в лог. Официальная докум�
 - Пересылается только финальный текст хода, не стрим и не tool-шаги.
 - MAX markdown не поддерживает списки/таблицы: `- пункт` отрисуется текстом.
 - Fail-closed: без allowlist интерактив выключен (уведомления идут). `allowUnlistedUsers: true` открывает бота всем, кто знает чат.
-- Long polling — **один поллер на токен**; `tools/pair.mjs` конкурирует с плагином за события. Webhook — в roadmap 0.9 (MAX требует публичный HTTPS :443; nginx с Let's Encrypt готов).
+- Long polling — **один поллер на токен**; `tools/pair.mjs` конкурирует с плагином за события. Для production MAX рекомендует webhook (публичный HTTPS :443); включается через `transport: webhook`, см. раздел «Webhook» выше.
 - Approvals по умолчанию истекают через 120 с; `approvalTimeoutMs: 0` — ждать бесконечно.
 - Outbox гарантирует **at-least-once**: редкий повтор возможен при сбое между отправкой и записью ключа; типовые reload/батч закрыты дедупом.
 - Один `chatId` на строку `max-notify`; для нескольких получателей — отдельные профили/патчи.
@@ -403,7 +408,7 @@ long polling и пишет warning в лог. Официальная докум�
 ## Проверка
 
 ```bash
-cd dsh-max-notify && npm test          # 400 unit tests
+cd dsh-max-notify && npm test          # 435 unit tests
 npm run check                          # синтаксис всех модулей
 node tools/smoke.mjs --env ../.env     # read-only: GET /me, state, outbox
 node tools/send-test.mjs "проверка"    # реальная отправка

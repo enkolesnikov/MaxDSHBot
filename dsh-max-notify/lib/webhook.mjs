@@ -9,7 +9,14 @@
  */
 import { timingSafeEqual } from 'node:crypto'
 
-const DEFAULT_MAX_BYTES = 1024 * 1024
+/**
+ * Default HTTP body cap. Kept in sync with `DEFAULTS.webhookEntryBytesMax` from
+ * lib/config.mjs: oversized updates are best rejected with 413 at the door,
+ * before they can occupy the durable queue. `index.js` may pass the normalized
+ * `config.webhookEntryBytesMax` explicitly to keep both bounds identical.
+ */
+export const WEBHOOK_BODY_BYTES_MAX = 64 * 1024
+const DEFAULT_MAX_BYTES = WEBHOOK_BODY_BYTES_MAX
 
 /** Constant-time comparison of the webhook secret header. */
 export function safeEqual(provided, expected) {

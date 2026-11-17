@@ -3,7 +3,12 @@
  *
  * The snapshot is cheap to read and updated from the polling loop, transports
  * and outbox; a periodic task copies it into durable state.
+ *
+ * Error strings are redacted at write time (same filter as the log sinks), so a
+ * secret that leaked into an exception message never lands in state or /health.
  */
+import { redact } from './redact.mjs'
+
 export function createHealth({ version, startedAt = Date.now(), now = () => Date.now() } = {}) {
   const health = {
     version,
@@ -20,16 +25,18 @@ export function createHealth({ version, startedAt = Date.now(), now = () => Date
 
   function update(patch) {
     if (!patch || typeof patch !== 'object') return
-    Object.assign(health, patch)
+    const safe = {}
+    for (const [key, value] of Object.entries(patch)) safe[key] = typeof value === 'string' ? redact(value) : value
+    Object.assign(health, safe)
   }
 
   function fail(error, { stopped = false, reason } = {}) {
-    health.lastError = error?.message || String(error)
+    health.lastError = redact(error?.message || String(error))
     health.lastErrorAt = now()
     health.pollFailures += 1
     if (stopped) {
       health.pollStopped = true
-      health.pollStoppedReason = reason ?? health.lastError
+      health.pollStoppedReason = reason === undefined ? health.lastError : redact(String(reason))
     }
   }
 

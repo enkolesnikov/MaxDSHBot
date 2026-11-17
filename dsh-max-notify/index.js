@@ -59,8 +59,13 @@ import { createOutbox, resolveOutboxFile } from './lib/outbox.mjs'
 import { createHealth } from './lib/health.mjs'
 import { createAudit, resolveAuditFile } from './lib/audit.mjs'
 import { createCostMeter, resolveCostLedgerFile } from './lib/cost-meter.mjs'
-import { createWebhookHandler, ensureWebhookSubscription, removeWebhookSubscription } from './lib/webhook.mjs'
-import { wrapLogger } from './lib/redact.mjs'
+import {
+  createWebhookHandler,
+  ensureWebhookSubscription,
+  removeWebhookSubscription,
+  WEBHOOK_BODY_BYTES_MAX,
+} from './lib/webhook.mjs'
+import { redact, registerSecret, wrapLogger } from './lib/redact.mjs'
 
 export const name = 'dsh-max-notify'
 
@@ -88,12 +93,25 @@ export function isTopLevelSession(session) {
   return !(Number.isFinite(depth) && depth > 0)
 }
 
+/** Bounded, redacted copy of a webhook update for the dead-letter audit trail. */
+function redactUpdateForAudit(update) {
+  try {
+    const text = redact(JSON.stringify(update ?? {}))
+    return text.length > 4000 ? `${text.slice(0, 4000)}…` : text
+  } catch {
+    return '[unserializable update]'
+  }
+}
+
 /** Serialized sender with a minimum gap between messages (MAX: max 2 messages/second). */
-function createSendQueue({ minIntervalMs, logger }) {
+function createSendQueue({ minIntervalMs, logger, isStopped = () => false }) {
   let tail = Promise.resolve()
   let lastAt = 0
   const enqueue = (task) => {
     tail = tail.then(async () => {
+      // Check after the task has been captured so a legitimate last message
+      // queued before shutdown is not dropped.
+      if (isStopped()) return
       const wait = minIntervalMs - (Date.now() - lastAt)
       if (wait > 0) await sleep(wait)
       lastAt = Date.now()
@@ -105,6 +123,7 @@ function createSendQueue({ minIntervalMs, logger }) {
     })
     return tail
   }
+  enqueue.idle = () => tail
   return enqueue
 }
 
@@ -123,10 +142,21 @@ export function readTokenFile(path) {
  * @param {object} [deps] - test seams (`createClient`).
  */
 export function apply(ctx, rawConfig = {}, deps = {}) {
+  // Set by the Cordis disposer; every fire-and-forget task checks it so an
+  // unloaded/HMR generation can no longer send or subscribe.
+  let disposed = false
   const baseConfig = normalizeConfig(rawConfig)
   const settingsFilePath = resolveSettingsFile(baseConfig)
   let config = mergeSettings(baseConfig, loadSettings(settingsFilePath))
-  const logger = wrapLogger(ctx.logger('max-notify'))
+  const logger = wrapLogger(ctx.logger('max-notify'), [
+    config.botToken,
+    config.webhookSecret,
+    config.voiceApiKey,
+    config.voiceTtsApiKey,
+  ])
+  for (const secret of [config.botToken, config.webhookSecret, config.voiceApiKey, config.voiceTtsApiKey]) {
+    if (secret) registerSecret(secret)
+  }
   const createClient = deps.createClient ?? createMaxClient
 
   if (config.enabled && !config.botToken && config.botTokenFile) {
@@ -219,7 +249,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     },
   })
 
-  const enqueue = createSendQueue({ minIntervalMs: config.minIntervalMs, logger })
+  const enqueue = createSendQueue({ minIntervalMs: config.minIntervalMs, logger, isStopped: () => disposed })
 
   // Fail-closed remote control: without an allowlist anyone could drive the
   // agent. Notifications stay on; polling/commands/approvals are disabled
@@ -1119,7 +1149,14 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     resolveAutonomy,
   })
   const progress = createProgress({ client, config, logger, target, policy })
-  const deliverables = createDeliverables({ client, config, logger, target, policy })
+  const deliverables = createDeliverables({
+    client,
+    config,
+    logger,
+    target,
+    policy,
+    allowOutside: config.fileSendAllowOutside,
+  })
   const observer = createObserver({
     client,
     config,
@@ -1189,6 +1226,8 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
   let webhookRouteDispose
   let webhookActive = false
   let webhookDraining = false
+  // Bumped on every HMR generation / unsubscribe so late async results are ignored.
+  let subscriptionGeneration = 0
   let webhookRetryTimer
   let webhookSubscribed = false
   let webhookSubscriptionError
@@ -1198,6 +1237,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     webhookDraining = true
     try {
       for (;;) {
+        if (disposed) break
         const queue = state.getWebhookQueue()
         if (queue.length === 0) break
         const entry = queue[0]
@@ -1210,32 +1250,61 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
           if (attempts >= 3) {
             state.shiftWebhookQueue()
             state.save()
-            audit.write({ kind: 'webhook', action: 'dead-letter', attempts, error: error?.message || String(error) })
+            audit.write({
+              kind: 'webhook',
+              action: 'dead-letter',
+              attempts,
+              error: error?.message || String(error),
+              update: redactUpdateForAudit(entry.update),
+            })
             logger.error?.('dropping poison webhook update after %d attempts: %s', attempts, error?.message || String(error))
             continue
           }
           break
         }
         const nextLength = state.shiftWebhookQueue()
-        health.update({ webhookQueueDepth: nextLength, webhookLastProcessedAt: Date.now() })
+        health.update({
+          webhookQueueDepth: nextLength,
+          webhookQueueBytes: state.getWebhookQueueBytes?.(),
+          webhookLastProcessedAt: Date.now(),
+        })
       }
     } finally {
       webhookDraining = false
-      health.update({ webhookQueueDepth: state.getWebhookQueue().length })
+      const queueStats = state.getWebhookQueueStats?.() ?? { depth: state.getWebhookQueue().length, bytes: undefined }
+      health.update({ webhookQueueDepth: queueStats.depth, webhookQueueBytes: queueStats.bytes })
     }
   }
 
   /** Persist one MAX update durably, then answer 200; processing follows. */
   async function acceptWebhookUpdate(update) {
+    if (disposed) return
     const key = bot.updateKey?.(update)
     if (key && state.hasProcessed(key)) return
     const queue = state.getWebhookQueue()
     if (key && queue.some((entry) => entry.key === key)) return
     if (queue.length >= config.webhookQueueMax) throw new Error('webhook queue is full')
-    const depth = state.pushWebhookQueue({ key, update, at: Date.now() }, config.webhookQueueMax)
+    const result = state.pushWebhookQueue(
+      { key, update, at: Date.now() },
+      config.webhookQueueMax,
+      config.webhookQueueBytesMax,
+      config.webhookEntryBytesMax,
+    )
+    if (result.rejected) {
+      // The HTTP layer already caps bodies; this is a second fence for direct
+      // calls. Answering 200 avoids endless MAX retries for an unparkable update.
+      logger.warn('dropped an oversized MAX webhook update (%s)', result.reason ?? 'bytes')
+      audit.write({ kind: 'webhook', action: 'drop', reason: result.reason, bytes: result.bytes })
+      health.update({ webhookLastDropAt: Date.now(), webhookQueueBytes: result.bytes })
+      return
+    }
     // Durability contract: the 200 must not be sent until the update is on disk.
     state.save()
-    health.update({ webhookLastAt: Date.now(), webhookQueueDepth: depth })
+    health.update({
+      webhookLastAt: Date.now(),
+      webhookQueueDepth: result.depth,
+      webhookQueueBytes: result.bytes,
+    })
     void drainWebhookQueue()
   }
 
@@ -1302,6 +1371,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
         secret: config.webhookSecret,
         accept: acceptWebhookUpdate,
         logger,
+        maxBytes: config.webhookEntryBytesMax ?? WEBHOOK_BODY_BYTES_MAX,
       })
       const disposeRoute = registerRoute(webServer, { kind: 'exact', path: config.webhookPath, handler })
       webhookRouteDispose = () => {
@@ -1467,7 +1537,8 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
   }
 
   async function startWebhookSubscription() {
-    if (!webhookActive || !config.webhookAutoSubscribe) return
+    if (disposed || !webhookActive || !config.webhookAutoSubscribe) return
+    const generation = ++subscriptionGeneration
     const result = await ensureWebhookSubscription({
       client,
       url: config.webhookPublicUrl,
@@ -1475,6 +1546,8 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       updateTypes: config.webhookUpdateTypes,
       logger,
     })
+    // HMR may have swapped generations while the API call was in flight.
+    if (disposed || generation !== subscriptionGeneration) return
     webhookSubscribed = result.ok === true
     webhookSubscriptionError = result.ok ? undefined : result.reason
     health.update({ webhookSubscribed, webhookSubscriptionError })
@@ -1666,12 +1739,12 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
         return
       }
       case 'deliverables/presented': {
-        if (!config.deliverables) return
+        if (disposed || !config.deliverables) return
         if (!config.includeSubagents && !isTopLevelSession(session)) return
         const files = Array.isArray(data.files) ? data.files : []
         if (files.length === 0) return
         void deliverables
-          .send(files)
+          .send(files, { cwd: session?.header?.cwd })
           .then((sentPaths) => noteSentImages(session.id, sentPaths))
           .catch((error) => {
             logger.warn('cannot forward deliverables: %s', error?.message || String(error))
@@ -1791,7 +1864,9 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       writeHeartbeat()
       const healthTimer = setInterval(writeHeartbeat, 60_000)
       healthTimer.unref?.()
-      return () => {
+      return async () => {
+        disposed = true
+        subscriptionGeneration += 1
         clearInterval(healthTimer)
         if (webhookFallbackTimer) {
           clearTimeout(webhookFallbackTimer)
@@ -1804,14 +1879,30 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
         settingsRouteDispose?.()
         webhookRouteDispose?.()
         if (webhookActive && config.webhookRemoveOnStop && config.webhookPublicUrl) {
+          const generation = subscriptionGeneration
           void removeWebhookSubscription({ client, url: config.webhookPublicUrl, logger })
+            .then?.((result) => {
+              if (generation !== subscriptionGeneration) {
+                logger.debug('ignoring stale webhook unsubscribe result after HMR')
+              }
+              return result
+            })
+            .catch?.((error) => {
+              logger.warn('cannot remove MAX webhook subscription on stop: %s', error?.message || String(error))
+            })
         }
         bot.stop()
         observer.dispose()
         progress.dispose()
         interactions.dispose()
-        outbox?.dispose()
+        // Let already queued sends finish before tearing down their dependencies.
+        try {
+          await enqueue.idle()
+        } catch (error) {
+          logger.debug('error while draining send queue on stop: %s', error?.message || String(error))
+        }
         limiter.stop()
+        outbox?.dispose()
         state.dispose()
       }
     })

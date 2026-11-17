@@ -160,6 +160,82 @@ test('webhook updates are persisted in a durable queue', () => {
   second.dispose()
 })
 
+test('pushWebhookQueue keeps the 2000-entry count cap', () => {
+  const file = join(workspace, 'webhook-count-cap.json')
+  const state = createState({ file, logger: { warn() {} } })
+  for (let index = 0; index < 2005; index += 1) {
+    const result = state.pushWebhookQueue({ key: `k${index}`, update: { n: index }, at: index }, 2000)
+    assert.ok(result.depth <= 2000)
+  }
+  const queue = state.getWebhookQueue()
+  assert.equal(queue.length, 2000)
+  assert.equal(state.snapshot().depth, 2000)
+  assert.equal(queue[0].key, 'k5')
+  assert.equal(queue[queue.length - 1].key, 'k2004')
+  state.dispose()
+})
+
+test('pushWebhookQueue rejects an entry larger than 64KiB', () => {
+  const file = join(workspace, 'webhook-entry-cap.json')
+  const state = createState({ file, logger: { warn() {} } })
+  const huge = { key: 'huge', update: { body: 'a'.repeat(64 * 1024) }, at: 1 }
+  const result = state.pushWebhookQueue(huge, 200, 8 * 1024 * 1024, 64 * 1024)
+  assert.equal(result.rejected, true)
+  assert.equal(result.reason, 'entry-bytes')
+  assert.equal(result.added, false)
+  assert.equal(result.depth, 0)
+  assert.equal(state.getWebhookQueue().length, 0)
+  assert.equal(state.snapshot().bytes, 0)
+  state.dispose()
+})
+
+test('pushWebhookQueue drops oldest entries at the 8MiB byte cap', () => {
+  const file = join(workspace, 'webhook-bytes-cap.json')
+  const state = createState({ file, logger: { warn() {} } })
+  const body = 'x'.repeat(60 * 1024) // under the 64KiB per-entry cap
+  for (let index = 0; index < 150; index += 1) {
+    state.pushWebhookQueue({ key: `b${index}`, update: { body }, at: index }, 200, 8 * 1024 * 1024, 64 * 1024)
+  }
+  const stats = state.getWebhookQueueStats()
+  const queue = state.getWebhookQueue()
+  assert.ok(stats.bytes <= 8 * 1024 * 1024)
+  assert.ok(stats.depth < 150 && stats.depth > 100)
+  assert.equal(stats.depth, queue.length)
+  assert.notEqual(queue[0].key, 'b0')
+  assert.equal(queue[queue.length - 1].key, 'b149')
+  state.dispose()
+})
+
+test('state snapshot exposes webhook queue bytes and survives a reload', () => {
+  const file = join(workspace, 'webhook-bytes-snapshot.json')
+  const first = createState({ file, logger: { warn() {} } })
+  first.pushWebhookQueue({ key: 'a', update: { msg: 'hello' }, at: 1 }, 200, 8 * 1024 * 1024, 64 * 1024)
+  const snapshot = first.snapshot()
+  assert.equal(snapshot.depth, 1)
+  assert.ok(snapshot.bytes > 0)
+  assert.equal(snapshot.webhookQueueDepth, 1)
+  assert.equal(snapshot.webhookQueueBytes, snapshot.bytes)
+  first.save()
+  first.dispose()
+
+  const second = createState({ file, logger: { warn() {} } })
+  assert.equal(second.snapshot().bytes, snapshot.bytes)
+  assert.equal(second.snapshot().depth, 1)
+  second.dispose()
+})
+
+test('bumpWebhookHeadAttempts persists the counter immediately', () => {
+  const file = join(workspace, 'webhook-attempts.json')
+  const state = createState({ file, logger: { warn() {} } })
+  state.pushWebhookQueue({ key: 'x', update: {}, at: 1 }, 200, 8 * 1024 * 1024, 64 * 1024)
+  state.save()
+  assert.equal(state.bumpWebhookHeadAttempts(), 1)
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).webhookQueue[0].attempts, 1)
+  assert.equal(state.bumpWebhookHeadAttempts(), 2)
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).webhookQueue[0].attempts, 2)
+  state.dispose()
+})
+
 test('session anchors and message routing survive reloads', () => {
   const file = join(workspace, 'anchors.json')
   const first = createState({ file, logger: { warn() {} } })

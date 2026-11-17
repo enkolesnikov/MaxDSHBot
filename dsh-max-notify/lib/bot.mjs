@@ -77,6 +77,8 @@ export function createBot({
   /** chatKey -> normalized schedule list for `/schedules <action> N` */
   /** update keys currently being handled (poll/webhook overlap). */
   const inFlight = new Set()
+  /** Aborts an in-flight long poll when the plugin is disposed. */
+  let pollAbort
   const scheduleChoices = new Map()
   /** chatKey -> { id, at } pending `/schedules cancel N confirm` */
   const scheduleCancels = new Map()
@@ -1063,23 +1065,26 @@ export function createBot({
 
   /** One long-poll iteration; returns `{primed, count, handled}` (exposed for tests). */
   async function pollOnce() {
+    if (disposed) return { primed: false, count: 0, handled: 0 }
     const params = {
       timeout: Math.max(0, Math.min(90, config.pollTimeoutSec ?? 25)),
       limit: 100,
       types: UPDATE_TYPES,
     }
     if (state?.marker === undefined) {
-      const response = await client.getUpdates(params)
+      const response = await client.getUpdates({ ...params, signal: pollAbort?.signal })
       state?.setMarker?.(response?.marker)
       runtime?.healthUpdate?.({ lastPollAt: Date.now() })
       return { primed: true, count: 0, handled: 0 }
     }
     const polledAt = Date.now()
     runtime?.healthUpdate?.({ lastPollAt: polledAt })
-    const response = await client.getUpdates({ ...params, marker: state.marker })
+    const response = await client.getUpdates({ ...params, marker: state.marker, signal: pollAbort?.signal })
+    if (disposed) return { primed: false, count: 0, handled: 0 }
     const updates = Array.isArray(response?.updates) ? response.updates : []
     let handled = 0
     for (const update of updates) {
+      if (disposed) break
       // A handler failure must leave the marker untouched: the batch is retried
       // and already handled updates are skipped by their dedupe keys.
       if (await applyUpdate(update)) handled += 1
@@ -1127,6 +1132,7 @@ export function createBot({
     if (disposed || config.interactive === false) return
     if (!config.botToken) return
     if (config.chatId === undefined && config.userId === undefined) return
+    pollAbort = new AbortController()
     void registerCommands()
     if (!config.polling) {
       logger?.info?.('MAX long polling is disabled (webhook transport)')
@@ -1141,12 +1147,14 @@ export function createBot({
 
   function stopPolling() {
     running = false
+    pollAbort?.abort()
     logger?.info?.('MAX polling stopped')
   }
 
   function stop() {
     running = false
     disposed = true
+    pollAbort?.abort()
   }
 
   /** Remember the session that just produced a forwarded reply (default target). */

@@ -4,6 +4,47 @@ All notable changes to `dsh-max-notify` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] — 2026-11-17
+
+Закрытие P1-техдолга из аудита 17.11. Поведение местами строже — см. ниже.
+
+### Fixed
+
+- **Webhook-очередь:** байтовые лимиты `webhookEntryBytesMax` (64 КиБ) и
+  `webhookQueueBytesMax` (8 МиБ); HTTP-слой отклоняет тело >64 КиБ с 413,
+  переполнение вытесняет старые записи, а не блокирует event loop. В health
+  добавлены `webhookQueueBytes` и `webhookLastDropAt`.
+- **Dead-letter:** счётчик попыток сохраняется синхронно; в audit пишется
+  redacted-копия update (до 4 КБ), чтобы poison можно было разобрать.
+- **Redaction:** `registerSecret()` маскирует реальные runtime-секреты любой
+  длины (включая 32-символьный webhook secret); `health.fail()`/`health.update()`
+  редактируют строки на записи.
+- **Deliverables:** путь из `present` проходит `realpath` + границу cwd сессии
+  (как `/send`); файлы вне cwd пропускаются с warn, `fileSendAllowOutside`
+  разрешает явно. Исправлен лог «over 4 GB» → 50 MB.
+- **Autonomy:** заголовки расписаний больше не матчатся подстрокой — только
+  точно или анкорным префиксом; `auto` без подтверждённой идентичности сессии
+  понижается до интерактивного подтверждения. Расписания с `auto` должны
+  указывать `targetSessionId`/`involvedSessionIds`.
+- **Outbox:** гонка `deliverNow` устранена in-flight-набором; загруженные
+  элементы нормализуются (`nextAt`/`createdAt`/`params`), битые отбрасываются
+  с warn, TTL-дропы логируются.
+- **Lifecycle:** единый `disposed`-флаг, `AbortController` для long-poll,
+  ожидание очереди отправки при teardown, генерационный guard для
+  subscribe/unsubscribe при HMR.
+- **Тесты/CI:** восстановлены негативные тесты settings API (405/413/aborted/
+  500); rc.2-fallback покрыт; CI-шаг `Sensitive-data guard` (generic-паттерны,
+  без приватных значений) ловит PAT/токены/PEM/приватные `.ru`-домены/IPv4;
+  всего 435 тестов на Node 20/22/24.
+- Docs: webhook secret 32–256 (было 5–256), Node ≥20, 13 команд, устранены
+  противоречия `todoProgress`.
+
+### Changed
+
+- `transport.getUpdates()` принимает `signal`; `deliverables.send(files,{cwd})`
+  принимает cwd сессии; `state.pushWebhookQueue()` возвращает depth-Number с
+  метриками.
+
 ## [1.7.0] — 2026-11-13
 
 Закрытие техдолга после аудита 1.6.

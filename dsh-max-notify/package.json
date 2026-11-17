@@ -1,6 +1,6 @@
 {
   "name": "dsh-max-notify",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "description": "DSH → MAX messenger plugin: rc.2-safe webhook, hardened outbound/allowlist, compact UX, briefings, remote control, schedules, GUI settings, zero runtime deps.",
   "type": "module",
   "main": "index.js",

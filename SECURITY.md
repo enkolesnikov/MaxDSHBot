@@ -44,7 +44,7 @@
 
 ## Webhook
 
-- Включайте `transport: webhook` только с `webhookSecret` (32–256 символов `[A-Za-z0-9_-]`
+- Включайте `transport: webhook` только с `webhookSecret` (32–256 символов
   `[A-Za-z0-9_-]`); заголовок `X-Max-Bot-Api-Secret` сравнивается в
   constant-time, при несовпадении — `401`.
 - Маршрут `/max/webhook` отвечает `200` только после durable-записи обновления

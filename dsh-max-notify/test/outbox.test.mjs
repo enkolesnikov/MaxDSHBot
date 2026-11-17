@@ -266,7 +266,10 @@ test('a missing outbox is not corruption while legacy versionless files still lo
   assert.equal(legacy.save(), true)
   legacy.dispose()
   assert.equal(JSON.parse(readFileSync(legacyPath, 'utf8')).version, OUTBOX_SCHEMA_VERSION)
-  assert.deepEqual(calls, [])
+  // The bogus `{ nope: true }` entry is dropped on load with a warning; this is
+  // not a corruption warning, and the valid legacy entry is kept.
+  assert.equal(calls.length, 1)
+  assert.match(String(calls[0][0]), /dropped invalid pending/)
 })
 
 test('outbox file is 0600 and its directory 0700 after a save', () => {
@@ -282,6 +285,122 @@ test('outbox file is 0600 and its directory 0700 after a save', () => {
   assert.deepEqual(readdirSync(directory), ['outbox.json'])
   outbox.dispose()
   assert.equal(modeOf(path), 0o600)
+})
+
+test('concurrent deliverNow calls with one dedupeKey cause exactly one send', async () => {
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const sends = []
+  const outbox = createOutbox({
+    file: freshFile(),
+    logger: silent,
+    send: async (call, params) => {
+      sends.push(params.text)
+      await gate
+      return { ok: true }
+    },
+  })
+  const first = outbox.deliverNow({ text: 'exactly-once' }, { dedupeKey: 'race-key' })
+  const second = outbox.deliverNow({ text: 'exactly-once' }, { dedupeKey: 'race-key' })
+  assert.deepEqual(await second, { skipped: true })
+  release()
+  const result = await first
+  assert.equal(result.sent, true)
+  assert.deepEqual(sends, ['exactly-once'])
+  assert.equal(outbox.snapshot().sent, 1)
+  assert.equal(outbox.isDelivered('race-key'), true)
+  // The lock is released after completion; the delivered history still dedupes.
+  assert.deepEqual(await outbox.deliverNow({ text: 'exactly-once' }, { dedupeKey: 'race-key' }), { skipped: true })
+})
+
+test('a legacy persisted item without nextAt is normalized and sent', async () => {
+  const clock = memoryNow()
+  const file = freshFile()
+  writeFileSync(file, JSON.stringify({
+    pending: [{
+      id: 'legacy-due',
+      call: 'sendMessage',
+      params: { text: 'legacy-due-text' },
+      dedupeKey: 'legacy-due-key',
+      createdAt: clock.now() - 1000,
+    }],
+  }))
+  const sent = []
+  const outbox = createOutbox({
+    file,
+    now: clock.now,
+    logger: silent,
+    send: async (call, params) => sent.push(params.text),
+  })
+  assert.equal(outbox.snapshot().pending, 1)
+  assert.deepEqual(await outbox.flush(), { attempted: 1, sent: 1, failed: 0 })
+  assert.deepEqual(sent, ['legacy-due-text'])
+  assert.equal(outbox.isDelivered('legacy-due-key'), true)
+})
+
+test('invalid persisted entries are dropped on load with a warning', async () => {
+  const clock = memoryNow()
+  const file = freshFile()
+  writeFileSync(file, JSON.stringify({
+    pending: [
+      { id: 'good', call: 'sendMessage', params: { text: 'good-text' }, createdAt: 'bogus-date' },
+      { id: 'no-params', call: 'sendMessage' },
+      { nope: true },
+      null,
+    ],
+    delivered: [
+      { key: 'kept', at: clock.now() },
+      { at: clock.now() },
+    ],
+  }))
+  const { calls, logger } = collectingLogger()
+  const sent = []
+  const outbox = createOutbox({
+    file,
+    now: clock.now,
+    logger,
+    send: async (call, params) => sent.push(params.text),
+  })
+  assert.equal(outbox.snapshot().pending, 1)
+  assert.equal(outbox.isDelivered('kept'), true)
+  assert.deepEqual(await outbox.flush(), { attempted: 1, sent: 1, failed: 0 })
+  assert.deepEqual(sent, ['good-text'])
+  const warnings = calls.map((args) => String(args[0]))
+  assert.equal(warnings.filter((message) => message.includes('dropped invalid pending')).length, 3)
+  assert.equal(warnings.filter((message) => message.includes('dropped invalid delivered')).length, 1)
+  assert.equal(JSON.stringify(calls).includes('good-text'), false)
+})
+
+test('TTL prune warns with dedupeKey and kind without leaking params', async () => {
+  const clock = memoryNow()
+  const file = freshFile()
+  writeFileSync(file, JSON.stringify({
+    pending: [{
+      id: 'old',
+      call: 'sendMessage',
+      params: { text: 'secret-payload-marker' },
+      dedupeKey: 'ttl-key',
+      kind: 'digest',
+      createdAt: clock.now() - 3 * 60 * 60 * 1000,
+      nextAt: clock.now() - 3 * 60 * 60 * 1000,
+    }],
+  }))
+  const { calls, logger } = collectingLogger()
+  const outbox = createOutbox({
+    file,
+    now: clock.now,
+    ttlHours: 1,
+    logger,
+    send: async () => {},
+  })
+  assert.deepEqual(await outbox.flush(), { attempted: 0, sent: 0, failed: 0 })
+  assert.equal(outbox.snapshot().pending, 0)
+  assert.equal(outbox.snapshot().dropped, 1)
+  const warn = calls.find((args) => String(args[0]).includes('dropped expired'))
+  assert.ok(warn, 'expected an expired-item warning')
+  assert.ok(warn.includes('ttl-key'))
+  assert.ok(warn.includes('digest'))
+  assert.equal(JSON.stringify(calls).includes('secret-payload-marker'), false)
 })
 
 test('repeated outbox saves keep the file valid and leave no tmp files', () => {

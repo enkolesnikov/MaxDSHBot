@@ -12,7 +12,11 @@
  *
  * Matching is deliberately conservative: direct target-session hits require an
  * active execution, while per-run `new` sessions additionally need a title and
- * a recent delivery receipt. Pure helpers, no DSH imports.
+ * a recent delivery receipt. Titles match exactly or as an anchored prefix with
+ * a clear word boundary — never as a free substring. A schedule that declares
+ * session identity is matched by identity only: a fresh delivery plus a title
+ * can never grant access to a different session, nor grant `auto` on its own.
+ * Pure helpers, no DSH imports.
  */
 
 export const AUTONOMY_MODES = Object.freeze(['inherit', 'read-only', 'auto'])
@@ -86,11 +90,62 @@ function normalizeSessionTitle(value) {
     .toLowerCase()
 }
 
+/** Any non-letter/non-number character is a clear title boundary. */
+const TITLE_BOUNDARY = /[^\p{L}\p{N}]/u
+
 function titleMatches(sessionTitle, scheduleTitle) {
   const left = normalizeSessionTitle(sessionTitle)
   const right = normalizeSessionTitle(scheduleTitle)
   if (left === '' || right === '') return false
-  return left === right || left.startsWith(`${right} `) || left.includes(right)
+  if (left === right) return true
+  if (!left.startsWith(right)) return false
+  // Anchored prefix only: "ci" may prefix "ci build", but must never match
+  // "circleci" or "Redeploy" through a free substring search.
+  return TITLE_BOUNDARY.test(left.charAt(right.length))
+}
+
+function sessionIdentity(schedule, sid) {
+  const target = String(schedule.targetSessionId ?? '')
+  const involved = Array.isArray(schedule.involvedSessionIds)
+    ? schedule.involvedSessionIds.map((id) => String(id ?? ''))
+    : []
+  return {
+    declared: target !== '' || involved.some((id) => id !== ''),
+    matched: target === sid || involved.includes(sid),
+  }
+}
+
+/**
+ * Detailed match for one normalized schedule and one live session.
+ * @returns {{matched:boolean, identityVerified:boolean}}
+ */
+function matchDetails(schedule, {
+  sessionId,
+  sessionTitle,
+  now = Date.now(),
+  titleWindowMs = 30 * 60 * 1000,
+} = {}) {
+  if (!schedule || typeof schedule !== 'object') return { matched: false, identityVerified: false }
+  const sid = String(sessionId ?? '')
+  if (sid === '') return { matched: false, identityVerified: false }
+  const identity = sessionIdentity(schedule, sid)
+  // A schedule that names its session(s) is bound to them. Never fall back to
+  // title+time on an identity mismatch — that is how an unrelated session was
+  // able to inherit an `auto` policy.
+  if (identity.declared && !identity.matched) return { matched: false, identityVerified: false }
+  if (identity.matched && schedule.executionActive === true) {
+    return { matched: true, identityVerified: true }
+  }
+  // Some targets (a one-shot `new` session) never set executionActive. The
+  // receipt+title fallback is allowed only with no declared identity or with a
+  // verified identity match — never in place of one.
+  const deliveredAt = instantMs(schedule.lastDelivery?.deliveredAt)
+  const recent = deliveredAt !== undefined && Number.isFinite(now) &&
+    deliveredAt <= now && now - deliveredAt <= titleWindowMs
+  if (recent && titleMatches(sessionTitle, schedule.title)) {
+    return { matched: true, identityVerified: identity.matched }
+  }
+  return { matched: false, identityVerified: false }
 }
 
 /**
@@ -99,26 +154,8 @@ function titleMatches(sessionTitle, scheduleTitle) {
  * @param {object} options
  * @returns {boolean}
  */
-export function scheduleMatchesSession(schedule, {
-  sessionId,
-  sessionTitle,
-  now = Date.now(),
-  titleWindowMs = 30 * 60 * 1000,
-} = {}) {
-  if (!schedule || typeof schedule !== 'object') return false
-  const sid = String(sessionId ?? '')
-  if (sid === '') return false
-  const direct = schedule.targetSessionId === sid ||
-    (Array.isArray(schedule.involvedSessionIds) && schedule.involvedSessionIds.includes(sid))
-  if (direct) {
-    if (schedule.executionActive === true) return true
-    // Some targets (a one-shot `new` session) never set executionActive; a
-    // receipt plus a matching title is the fallback below.
-  }
-  const deliveredAt = instantMs(schedule.lastDelivery?.deliveredAt)
-  const recent = deliveredAt !== undefined && Number.isFinite(now) && now - deliveredAt <= titleWindowMs
-  if (recent && titleMatches(sessionTitle, schedule.title)) return true
-  return false
+export function scheduleMatchesSession(schedule, options = {}) {
+  return matchDetails(schedule, options).matched
 }
 
 /**
@@ -126,7 +163,10 @@ export function scheduleMatchesSession(schedule, {
  * @param {object} options
  * @param {object} options.policies - scheduleId -> stored policy
  * @param {Array<object>} options.schedules - normalized schedule list
- * @returns {{ok:true, mode:string, scheduleId:string, title:string}|{ok:false}}
+ * A title+time match without a verified session identity demotes `auto` to
+ * `inherit`: read-only keeps its safe behaviour, but `auto` is never granted
+ * on a title alone.
+ * @returns {{ok:true, mode:string, scheduleId:string, title:string, identityVerified:boolean}|{ok:false}}
  */
 export function resolveAutonomyPolicy({
   sessionId,
@@ -144,8 +184,16 @@ export function resolveAutonomyPolicy({
     const policy = normalizePolicy(map[id])
     if (!policy) continue
     if (schedule.status !== 'active' && schedule.executionActive !== true) continue
-    if (!scheduleMatchesSession(schedule, { sessionId, sessionTitle, now })) continue
-    matches.push({ scheduleId: id, title: policy.title || schedule.title || '', mode: policy.mode })
+    const match = matchDetails(schedule, { sessionId, sessionTitle, now })
+    if (!match.matched) continue
+    matches.push({
+      scheduleId: id,
+      title: policy.title || schedule.title || '',
+      // Only `auto` needs an identity-verified match; a title-only `auto`
+      // becomes inherit. `read-only` keeps its safe allow/deny behaviour.
+      mode: match.identityVerified || policy.mode !== 'auto' ? policy.mode : 'inherit',
+      identityVerified: match.identityVerified,
+    })
   }
   if (matches.length === 0) return { ok: false }
   // Least privilege wins if several schedules point at the same session.

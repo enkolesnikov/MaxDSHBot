@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -49,6 +49,12 @@ function fakeResponse() {
       this.finished = true
     },
   }
+}
+
+async function postSettings(api, body, headers = { 'content-type': 'application/json' }) {
+  const res = fakeResponse()
+  await api(fakeRequest({ method: 'POST', url: SETTINGS_JSON_PATH, body, headers }), res)
+  return res
 }
 
 test('SETTINGS_KEYS exposes exactly the safe allowlist with defaults', () => {
@@ -329,6 +335,60 @@ test('legacy createSettingsApi stays compatible with the DSH client integration'
   assert.equal(data.restartRequired, true)
   assert.equal(data.ignored.length, 1)
   assert.deepEqual(loadSettings(file), { mode: 'mute' })
+})
+
+// Negative transport cases restored from the removed standalone HTML handler;
+// they now exercise the JSON-only createSettingsApi (the host owns auth/routes).
+test('createSettingsApi rejects unsupported methods with 405', async (t) => {
+  const api = createSettingsApi({ file: join(tempDir(t), 'config.json') })
+  const res = fakeResponse()
+  await api(fakeRequest({ method: 'PUT', url: SETTINGS_JSON_PATH }), res)
+  assert.equal(res.statusCode, 405)
+  assert.deepEqual(JSON.parse(res.body), { ok: false, error: 'method not allowed' })
+})
+
+test('createSettingsApi rejects an oversized body with 413', async (t) => {
+  const file = join(tempDir(t), 'config.json')
+  const api = createSettingsApi({ file })
+
+  const tooBig = await postSettings(api, 'x'.repeat(70 * 1024))
+  assert.equal(tooBig.statusCode, 413)
+  assert.deepEqual(JSON.parse(tooBig.body), { ok: false, error: 'request body too large' })
+  assert.equal(existsSync(file), false)
+
+  // The declared content-length is rejected before any body is read.
+  const declared = fakeResponse()
+  await api(fakeRequest({
+    method: 'POST',
+    url: SETTINGS_JSON_PATH,
+    body: '{}',
+    headers: { 'content-type': 'application/json', 'content-length': '999999' },
+  }), declared)
+  assert.equal(declared.statusCode, 413)
+})
+
+test('createSettingsApi rejects an aborted body with 400', async (t) => {
+  const api = createSettingsApi({ file: join(tempDir(t), 'config.json') })
+  const req = new EventEmitter()
+  req.method = 'POST'
+  req.url = SETTINGS_JSON_PATH
+  req.headers = {}
+  req.resume = () => {}
+  const res = fakeResponse()
+  queueMicrotask(() => req.emit('aborted'))
+  await api(req, res)
+  assert.equal(res.statusCode, 400)
+  assert.deepEqual(JSON.parse(res.body), { ok: false, error: 'cannot read request body' })
+})
+
+test('createSettingsApi answers 500 when the settings file cannot be written', async (t) => {
+  const directory = tempDir(t)
+  const blocker = join(directory, 'blocker')
+  writeFileSync(blocker, 'not a directory')
+  const api = createSettingsApi({ file: join(blocker, 'config.json') })
+  const res = await postSettings(api, { mode: 'mute' })
+  assert.equal(res.statusCode, 500)
+  assert.deepEqual(JSON.parse(res.body), { ok: false, error: 'cannot save settings' })
 })
 
 test('resolveSettingsFile honors settingsFile and falls back outside the repository', () => {

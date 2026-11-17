@@ -29,6 +29,27 @@ jobs:
       # Pinned to commit SHAs (tags are mutable). Both are v4.4.0, verified
       # with `git ls-remote` / the GitHub commits API.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Sensitive-data guard (tracked files)
+        working-directory: ${{ github.workspace }}
+        # Generic patterns only: no private host, IP, path or personal id is
+        # stored here. On failure only file:line is printed, never the matched
+        # text, so a real leak is not copied into public CI logs.
+        # Limitation: the domain rule covers .ru/.rf/.su hosts; other TLDs need
+        # a new generic rule rather than embedding a private hostname here.
+        run: |
+          set -euo pipefail
+          pattern='(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|npm_[A-Za-z0-9]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|/root/[A-Za-z0-9_.-]+|\b[a-z0-9-]+\.(ru|rf|su)\b|\b[0-9]{1,3}(\.[0-9]{1,3}){3}\b)'
+          # Documented exceptions: public MAX/government domains used in docs,
+          # example.com/test style fixtures and the loopback test host.
+          allow='(max|oneme|okcdn|gu-st|gosuslugi|gov|voskhod|evilmax|notmax)\.(ru|rf|su)|example\.(com|org|net|test|invalid)|127\.0\.0\.1|0\.0\.0\.0'
+          raw=$(git grep -nIE "$pattern" -- . || true)
+          hits=$(printf '%s\n' "$raw" | grep -vE "$allow" || true)
+          if [ -n "$hits" ]; then
+            echo '::error::Sensitive pattern found in tracked files (file:line):'
+            printf '%s\n' "$hits" | cut -d: -f1,2
+            exit 1
+          fi
+          echo 'Sensitive-data guard: clean'
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ matrix.node }}

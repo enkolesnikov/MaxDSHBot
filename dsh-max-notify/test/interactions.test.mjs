@@ -2,6 +2,7 @@ import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import { normalizeConfig } from '../index.js'
 import { createInteractions } from '../lib/interactions.mjs'
+import { resolveAutonomyPolicy } from '../lib/autonomy.mjs'
 // Keep the event loop alive on Node 20/22: the plugin uses unref'd approval
 // timers, and the test runner otherwise cancels pending tests.
 const keepAliveTimer = setInterval(() => {}, 1000)
@@ -370,10 +371,120 @@ test('autonomy read-only rejects side effects without a MAX card', async () => {
   assert.equal(read.client.sent.length, 0)
 })
 
-test('autonomy auto allows approvals silently', async () => {
+test('autonomy auto allows approvals silently when session identity is verified', async () => {
   const { client, interactions } = makeInteractions({
-    resolveAutonomy: async () => ({ mode: 'auto', scheduleId: 'sched-auto', title: 'Nightly' }),
+    resolveAutonomy: async () => ({
+      mode: 'auto', scheduleId: 'sched-auto', title: 'Nightly', identityVerified: true,
+    }),
   })
   assert.equal(await interactions.handleApproval(approvalRequest(), () => new Promise(() => {})), 'allowed-once')
   assert.equal(client.sent.length, 0)
+})
+
+// ── P1: an unverified title match must not silently auto-approve ────────────
+
+test('autonomy auto without verified identity falls back to a MAX card', async () => {
+  const auditEntries = []
+  const { client, interactions } = makeInteractions({
+    resolveAutonomy: async () => ({
+      mode: 'auto', scheduleId: 'sched-auto', title: 'Nightly', identityVerified: false,
+    }),
+    audit: { write: (entry) => auditEntries.push(entry), approve() {} },
+  })
+  let guiResolve
+  const guiPromise = new Promise((resolve) => { guiResolve = resolve })
+  const outcomePromise = interactions.handleApproval(approvalRequest(), () => guiPromise)
+  await tick()
+  assert.equal(client.sent.length, 1)
+  assert.equal(auditEntries.length, 0)
+
+  const allow = cardButtons(client)[0][0].payload
+  assert.equal(await interactions.handleCallback({ callbackId: 'cb-allow', payload: allow }), true)
+  assert.equal(await outcomePromise, 'allowed-once')
+  guiResolve('unavailable')
+  await tick()
+})
+
+test('a mismatched session id cannot inherit an auto policy through the real matcher', async () => {
+  const now = Date.now()
+  const schedules = [{
+    id: 'sched-1',
+    title: 'Nightly',
+    targetSessionId: 'real-session',
+    involvedSessionIds: ['real-session'],
+    executionActive: true,
+    status: 'active',
+  }]
+  const policies = { 'sched-1': { mode: 'auto', title: 'Nightly' } }
+  const { client, interactions } = makeInteractions({
+    resolveAutonomy: async (session) => resolveAutonomyPolicy({
+      sessionId: session?.id, sessionTitle: 'Nightly', schedules, policies, now,
+    }),
+  })
+  const outcomePromise = interactions.handleApproval(
+    approvalRequest({ session: { id: 'attacker-session', header: {} } }),
+    () => new Promise(() => {}),
+  )
+  await tick()
+  // No silent auto: the normal approval card is shown instead.
+  assert.equal(client.sent.length, 1)
+  const deny = cardButtons(client)[1][0].payload
+  await interactions.handleCallback({ callbackId: 'cb-deny', payload: deny })
+  assert.equal(await outcomePromise, 'rejected')
+})
+
+test('fresh delivery plus a matching title cannot auto-approve another session', async () => {
+  const now = Date.now()
+  const schedules = [{
+    id: 'sched-1',
+    title: 'Nightly',
+    targetSessionId: 'real-session',
+    involvedSessionIds: [],
+    executionActive: false,
+    status: 'active',
+    lastDelivery: { deliveredAt: new Date(now - 60_000).toISOString() },
+  }]
+  const policies = { 'sched-1': { mode: 'auto', title: 'Nightly' } }
+  const { client, interactions } = makeInteractions({
+    resolveAutonomy: async (session) => resolveAutonomyPolicy({
+      sessionId: session?.id, sessionTitle: 'Nightly', schedules, policies, now,
+    }),
+  })
+  const outcomePromise = interactions.handleApproval(
+    approvalRequest({ session: { id: 'unrelated-session', header: {} } }),
+    () => new Promise(() => {}),
+  )
+  await tick()
+  assert.equal(client.sent.length, 1)
+  const deny = cardButtons(client)[1][0].payload
+  await interactions.handleCallback({ callbackId: 'cb-deny', payload: deny })
+  assert.equal(await outcomePromise, 'rejected')
+})
+
+test('a title-only auto policy is demoted to inherit and still prompts on the card', async () => {
+  const now = Date.now()
+  const schedules = [{
+    id: 'sched-new',
+    title: 'Nightly',
+    targetSessionId: '',
+    involvedSessionIds: [],
+    executionActive: false,
+    status: 'active',
+    lastDelivery: { deliveredAt: new Date(now - 60_000).toISOString() },
+  }]
+  const policies = { 'sched-new': { mode: 'auto', title: 'Nightly' } }
+  const { client, interactions } = makeInteractions({
+    resolveAutonomy: async (session) => resolveAutonomyPolicy({
+      sessionId: session?.id, sessionTitle: 'Nightly', schedules, policies, now,
+    }),
+  })
+  const outcomePromise = interactions.handleApproval(
+    approvalRequest({ session: { id: 'new-session', header: {} } }),
+    () => new Promise(() => {}),
+  )
+  await tick()
+  assert.equal(client.sent.length, 1)
+  const deny = cardButtons(client)[1][0].payload
+  await interactions.handleCallback({ callbackId: 'cb-deny', payload: deny })
+  assert.equal(await outcomePromise, 'rejected')
 })

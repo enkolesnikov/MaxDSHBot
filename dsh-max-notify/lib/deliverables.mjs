@@ -4,12 +4,31 @@
  */
 import { statSync } from 'node:fs'
 import { formatDeliverablesCard } from './cards.mjs'
+import { resolveSendFile } from './workspace-tools.mjs'
 
 const IMAGE_LIMIT_BYTES = 50 * 1024 * 1024
 const FILE_LIMIT_BYTES = 50 * 1024 * 1024
 const MAX_ATTACHMENTS = 12
 
-export function createDeliverables({ client, config, logger, target, policy } = {}) {
+/**
+ * @param {object} options
+ * @param {string} [options.cwd] - session working directory, the path boundary.
+ * @param {boolean} [options.allowOutside=false] - explicitly allow files outside cwd.
+ * @param {Function} [options.resolvePath=resolveSendFile] - resolver with the
+ *   `resolveSendFile({ cwd, arg, allowOutside, maxBytes })` contract.
+ * The cwd can be overridden per `send(files, { cwd })` call, because the
+ * factory is shared while cwd is session-scoped.
+ */
+export function createDeliverables({
+  client,
+  config,
+  logger,
+  target,
+  policy,
+  cwd,
+  allowOutside = false,
+  resolvePath = resolveSendFile,
+} = {}) {
   const targetQuery = () =>
     target?.chatId !== undefined ? { chatId: target.chatId } : { userId: target?.userId }
 
@@ -18,24 +37,36 @@ export function createDeliverables({ client, config, logger, target, policy } = 
     return { path: raw?.path, description: raw?.description }
   }
 
-  async function uploadOne(record) {
-    const stats = statSync(record.path)
+  async function uploadOne(record, sessionCwd) {
+    // Same boundary as /send: realpath + cwd check, unless explicitly allowed.
+    // Size stays a deliverables concern (own limits and warn messages).
+    const resolved = resolvePath({
+      cwd: sessionCwd ?? cwd,
+      arg: record.path,
+      allowOutside,
+      maxBytes: Number.MAX_SAFE_INTEGER,
+    })
+    if (!resolved?.ok) {
+      logger?.warn?.('skip deliverable %s: %s', record.path, resolved?.error ?? 'path rejected by resolver')
+      return undefined
+    }
+    const stats = statSync(resolved.path)
     if (!stats.isFile()) return undefined
-    const type = client.uploadTypeFor?.(record.path) ?? 'file'
+    const type = client.uploadTypeFor?.(resolved.path) ?? 'file'
     if (type === 'image' && stats.size > IMAGE_LIMIT_BYTES) {
       logger?.warn?.('skip deliverable image over 50 MB: %s', record.path)
       return undefined
     }
     if (stats.size > FILE_LIMIT_BYTES) {
-      logger?.warn?.('skip deliverable file over 4 GB: %s', record.path)
+      logger?.warn?.('skip deliverable file over 50 MB: %s', record.path)
       return undefined
     }
-    const { token } = await client.uploadMedia({ filePath: record.path, type })
-    return { type, token, description: record.description, path: record.path }
+    const { token } = await client.uploadMedia({ filePath: resolved.path, type })
+    return { type, token, description: record.description, path: resolved.path }
   }
 
   /** Upload and send the declared files; failures are logged, never thrown. */
-  async function send(files) {
+  async function send(files, { cwd: sessionCwd } = {}) {
     if (!config.deliverables || !Array.isArray(files) || files.length === 0) return
     const decision = policy?.decide?.('deliverables') ?? { send: true, notify: config.notify }
     if (!decision.send) return
@@ -46,7 +77,7 @@ export function createDeliverables({ client, config, logger, target, policy } = 
       const record = fileRecord(raw)
       if (!record.path) continue
       try {
-        const uploaded = await uploadOne(record)
+        const uploaded = await uploadOne(record, sessionCwd)
         if (!uploaded) continue
         if (uploaded.type === 'image') images.push(uploaded)
         else documents.push(uploaded)

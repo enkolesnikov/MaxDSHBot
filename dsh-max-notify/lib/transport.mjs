@@ -172,7 +172,7 @@ export function createMaxClient(options = {}) {
       ? caValue
       : [...(Array.isArray(caValue) ? caValue : [caValue]), ...rootCertificates]
 
-  const request = ({ method, path, query, body, timeoutMs: callTimeoutMs, chatKey, priority, skipLimiter }) => {
+  const request = ({ method, path, query, body, timeoutMs: callTimeoutMs, chatKey, priority, skipLimiter, signal }) => {
     const execute = () =>
       new Promise((resolve, reject) => {
       let url
@@ -197,6 +197,10 @@ export function createMaxClient(options = {}) {
         headers['Content-Type'] = 'application/json'
         headers['Content-Length'] = String(payload.length)
       }
+      if (signal?.aborted) {
+        reject(new Error('MAX request aborted'))
+        return
+      }
       const req = https.request(
         {
           method,
@@ -208,6 +212,7 @@ export function createMaxClient(options = {}) {
           ca: trustedCa,
           rejectUnauthorized: !insecureTls,
           timeout: callTimeoutMs ?? timeoutMs,
+          signal,
         },
         (res) => {
           const chunks = []
@@ -276,7 +281,7 @@ export function createMaxClient(options = {}) {
   }
 
   /** GET /updates — long polling for incoming updates (used by the pairing helper). */
-  function getUpdates({ timeout = 0, limit = 100, marker, types } = {}) {
+  function getUpdates({ timeout = 0, limit = 100, marker, types, signal } = {}) {
     // A long poll keeps the HTTP request open for `timeout` seconds.
     const callTimeoutMs = Math.max(timeoutMs, (Number(timeout) + 15) * 1000)
     return withRetry(() =>
@@ -286,6 +291,7 @@ export function createMaxClient(options = {}) {
         query: { timeout, limit, marker, types },
         timeoutMs: callTimeoutMs,
         skipLimiter: true,
+        signal,
       }),
     )
   }

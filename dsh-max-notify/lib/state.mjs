@@ -35,6 +35,15 @@ import { homedir } from 'node:os'
 export const STATE_SCHEMA_VERSION = 2
 const PROCESSED_LIMIT = 1000
 const PROCESSED_TTL_MS = 7 * 24 * 60 * 60 * 1000
+// P1 webhook caps: one update body and the whole durable queue. Callers may
+// override both via pushWebhookQueue(entry, max, maxBytes, entryMaxBytes).
+const WEBHOOK_ENTRY_BYTES_MAX = 64 * 1024
+const WEBHOOK_QUEUE_BYTES_MAX = 8 * 1024 * 1024
+
+function positiveInt(value, fallback) {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed > 0 ? Math.max(1, Math.trunc(parsed)) : fallback
+}
 
 /** Parse a stored schema marker; `undefined` means a legacy file without one. */
 function storedSchemaVersionOf(value) {
@@ -147,6 +156,54 @@ export function createState({ file, logger, chatId } = {}) {
     messageSessions: {},
   }
 
+  // Byte accounting for the durable webhook queue. Sizes are cached per entry
+  // object so a push/shift is O(dropped entries), not O(queue * body size).
+  const webhookEntrySizes = new WeakMap()
+  let webhookQueueBytes = 0
+
+  function measureWebhookEntry(entry) {
+    if (!entry || typeof entry !== 'object') return 0
+    try {
+      return Buffer.byteLength(JSON.stringify(entry), 'utf8')
+    } catch {
+      return 0
+    }
+  }
+
+  function sizeOfWebhookEntry(entry) {
+    let size = webhookEntrySizes.get(entry)
+    if (size === undefined) {
+      size = measureWebhookEntry(entry)
+      webhookEntrySizes.set(entry, size)
+    }
+    return size
+  }
+
+  function recalcWebhookQueueBytes() {
+    webhookQueueBytes = 0
+    for (const entry of state.webhookQueue) webhookQueueBytes += sizeOfWebhookEntry(entry)
+    return webhookQueueBytes
+  }
+
+  /**
+   * Result of pushWebhookQueue. It is a Number (depth) for backwards
+   * compatibility with existing callers, with extra metrics attached:
+   * `.depth`, `.bytes`, `.added`, `.dropped`, `.rejected`, `.reason`.
+   * `toJSON()` keeps health/state serialization as a plain number.
+   */
+  function webhookQueueResult(extra = {}) {
+    const depth = state.webhookQueue.length
+    const result = new Number(depth)
+    result.depth = depth
+    result.bytes = webhookQueueBytes
+    result.added = false
+    result.dropped = 0
+    result.rejected = false
+    Object.assign(result, extra)
+    result.toJSON = () => depth
+    return result
+  }
+
   let storedSchemaVersion
   let persistenceBlocked = false
   let blockedSaveWarned = false
@@ -222,6 +279,7 @@ export function createState({ file, logger, chatId } = {}) {
         state.webhookQueue = parsed.webhookQueue.filter(
           (entry) => entry && typeof entry === 'object' && entry.update && typeof entry.update === 'object',
         )
+        recalcWebhookQueueBytes()
       }
       if (parsed.budgetAlerts && typeof parsed.budgetAlerts === 'object' && !Array.isArray(parsed.budgetAlerts)) {
         state.budgetAlerts = { ...parsed.budgetAlerts }
@@ -494,27 +552,84 @@ export function createState({ file, logger, chatId } = {}) {
     setWebhookQueue(queue) {
       const list = Array.isArray(queue) ? queue.filter((entry) => entry && entry.update) : []
       state.webhookQueue = list.slice(-200)
+      recalcWebhookQueueBytes()
       saveSoon()
     },
-    pushWebhookQueue(entry, max = 200) {
-      if (!entry || typeof entry.update !== 'object') return state.webhookQueue.length
-      state.webhookQueue.push(entry)
+    /**
+     * Persist one update under BOTH a count cap and a byte cap. Oversized
+     * entries are rejected outright; otherwise the oldest entries are dropped
+     * until the queue fits both caps. Returns a depth Number with `.bytes`
+     * (and `.added`/`.dropped`/`.rejected`/`.reason`) attached.
+     *
+     * Only `entry` is required: two-argument callers keep working unchanged.
+     */
+    pushWebhookQueue(
+      entry,
+      max = 200,
+      maxBytes = WEBHOOK_QUEUE_BYTES_MAX,
+      entryMaxBytes = WEBHOOK_ENTRY_BYTES_MAX,
+    ) {
+      if (!entry || !entry.update || typeof entry.update !== 'object') return webhookQueueResult()
       const limit = Math.max(1, Number(max) || 200)
-      if (state.webhookQueue.length > limit) state.webhookQueue.splice(0, state.webhookQueue.length - limit)
+      const byteLimit = positiveInt(maxBytes, WEBHOOK_QUEUE_BYTES_MAX)
+      const entryLimit = positiveInt(entryMaxBytes, WEBHOOK_ENTRY_BYTES_MAX)
+      const size = measureWebhookEntry(entry)
+
+      if (size > entryLimit) return webhookQueueResult({ rejected: true, reason: 'entry-bytes' })
+      // Even an empty queue cannot hold it: never drop the whole history just
+      // to immediately discard the newcomer as well.
+      if (size > byteLimit) return webhookQueueResult({ rejected: true, reason: 'queue-bytes' })
+
+      state.webhookQueue.push(entry)
+      webhookEntrySizes.set(entry, size)
+      webhookQueueBytes += size
+      let dropped = 0
+      while ((state.webhookQueue.length > limit || webhookQueueBytes > byteLimit) && state.webhookQueue.length > 0) {
+        const removed = state.webhookQueue.shift()
+        webhookQueueBytes -= sizeOfWebhookEntry(removed)
+        dropped += 1
+      }
       saveSoon()
-      return state.webhookQueue.length
+      return webhookQueueResult({ added: true, dropped })
     },
     shiftWebhookQueue() {
-      if (state.webhookQueue.length > 0) state.webhookQueue.shift()
+      const removed = state.webhookQueue.shift()
+      if (removed !== undefined) webhookQueueBytes -= sizeOfWebhookEntry(removed)
       saveSoon()
       return state.webhookQueue.length
     },
-    bumpWebhookHeadAttempts() {
+    /**
+     * Bump the head's attempt counter. Writes immediately by default: this is
+     * the dead-letter accuracy path (index.js drops after 3 attempts), so a
+     * 250 ms debounce could lose the count on a crash. Pass
+     * `{ immediate: false }` only for non-critical bookkeeping.
+     */
+    bumpWebhookHeadAttempts({ immediate = true } = {}) {
       const head = state.webhookQueue[0]
       if (!head) return 0
       head.attempts = (Number(head.attempts) || 0) + 1
-      saveSoon()
+      const previous = webhookEntrySizes.get(head) ?? measureWebhookEntry(head)
+      const updated = measureWebhookEntry(head)
+      webhookEntrySizes.set(head, updated)
+      webhookQueueBytes += updated - previous
+      if (immediate) save()
+      else saveSoon()
       return head.attempts
+    },
+    /** Byte/depth metrics for the durable webhook queue. */
+    getWebhookQueueStats() {
+      return { depth: state.webhookQueue.length, bytes: webhookQueueBytes }
+    },
+    getWebhookQueueBytes() {
+      return webhookQueueBytes
+    },
+    snapshot() {
+      return {
+        depth: state.webhookQueue.length,
+        bytes: webhookQueueBytes,
+        webhookQueueDepth: state.webhookQueue.length,
+        webhookQueueBytes,
+      }
     },
     getBudgetAlerts() {
       return { ...state.budgetAlerts }

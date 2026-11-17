@@ -138,7 +138,17 @@ export function createInteractions({ client, config, logger, target, resolveTitl
     if (typeof resolveAutonomy === 'function' && toolName) {
       try {
         const policy = await resolveAutonomy(request?.agent?.session, request)
-        if (policy?.mode) {
+        // `auto` may only act on a session matched by explicit identity
+        // (targetSessionId / involvedSessionIds / sessionId). A title+time
+        // match is not enough to silently approve arbitrary tools on an
+        // unrelated session: fall through to the normal MAX/GUI confirmation.
+        if (policy?.mode === 'auto' && policy.identityVerified !== true) {
+          logger?.warn?.(
+            'MAX autonomy auto policy declined for %s: session identity not verified (schedule %s)',
+            toolName,
+            policy.scheduleId,
+          )
+        } else if (policy?.mode) {
           const decision = classifyAutonomyDecision(policy.mode, toolName)
           if (decision.action === 'allow' || decision.action === 'deny') {
             audit?.write?.({

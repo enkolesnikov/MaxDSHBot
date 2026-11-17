@@ -77,12 +77,18 @@ Published on npm: https://www.npmjs.com/package/dsh-max-notify
   budget alerts (80/100 by default) fire once per period and survive reloads.
   `costMeterFile`, `budgetAlertEnabled`, `budgetAlertThresholds` configure it.
 
+## Tech-debt 1.8
+
+- P1 audit 17.11: webhook byte caps + redaction, deliverable path boundary,
+  strict autonomy matching, outbox race, lifecycle/HMR, CI leak guard.
+- 435 tests on Node 20/22/24.
+
 ## Tech-debt 1.7
 
 - `index.js` 2051 → 1870 lines: config/forwarding modules extracted.
 - Dead standalone HTML settings page removed (~360 lines).
 - State/outbox future-schema guard, fsync, corrupt backups, 0600/0700.
-- CI Node 20/22/24 with SHA-pinned actions; 38 transport contract tests, 400
+- CI Node 20/22/24 with SHA-pinned actions; 38 transport contract tests, 400+
   total.
 
 ## Audit 1.6: rc.2 and hardening
@@ -104,7 +110,8 @@ Published on npm: https://www.npmjs.com/package/dsh-max-notify
 
 ## Compact UX (v1.4)
 
-- 12 core commands in the MAX menu; `/help` is short, `/help all` is complete.
+- 13 core commands in the MAX menu (`/brief` added the 13th in v1.5); `/help` is
+  short, `/help all` is complete.
 - Final header: `🕒 20:03 · title` (`messageStyle: detailed` restores the old one).
 - Quiet defaults: subagent/job/goal/TODO notifications off; final, errors,
   approvals/questions and budget alerts stay on.
@@ -162,7 +169,7 @@ for per-run `new` sessions, the title plus a recent delivery receipt.
 | `lib/autonomy.mjs` | schedule autonomy policies/matching |
 | `lib/settings.mjs` | GUI settings validation/overlay/API |
 | `client/client.js` | hand-written settings page bundle |
-| `test/*.test.mjs` | `node --test` (400 unit tests) |
+| `test/*.test.mjs` | `node --test` (435 unit tests) |
 
 ## Config
 
@@ -202,9 +209,8 @@ Set in `cordis.patch.yml` (or override the row by id from the profile's own
 | `stateFile` | `$DSH_HOME/max-notify/state.json` | Polling marker, active session, mode, digest date |
 | `messageStyle` | `compact` | Compact or detailed message header |
 | `notifySubagents` / `notifyJobs` / `notifyGoals` | `false` | Event notifications (quiet by default) |
-| `notifyErrors` / `todoProgress` | `true` / `false` | Agent errors and TODO progress |
+| `notifyErrors` / `todoProgress` | `true` / `false` | Agent errors and TODO progress (off by default) |
 | `notifyAwaitedJobs` | `false` | Also notify jobs the agent already waited for |
-| `todoProgress` | `true` | TODO progress notifications |
 | `quietHours` | — | `{start, end}`: non-critical delivered without push |
 | `mode` / `digestEnabled` / `digestTime` | `all` / `false` / `21:00` | Notification mode and daily digest |
 | `outboxEnabled` / `outboxMaxItems` / `outboxTtlHours` | `true` / `200` / `48` | Durable queue for undelivered messages |

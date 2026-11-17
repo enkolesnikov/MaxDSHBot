@@ -99,6 +99,13 @@ test('oversized bodies are rejected with 413', async () => {
   assert.equal(res.statusCode, 413)
 })
 
+test('the default body cap rejects updates above 64KiB', async () => {
+  const handler = createWebhookHandler({ secret: 's', accept: async () => {}, logger: silent })
+  const res = fakeResponse()
+  await handler(fakeRequest({ secret: 's', body: { update_type: 'x', padding: 'a'.repeat(64 * 1024 + 1) } }), res)
+  assert.equal(res.statusCode, 413)
+})
+
 test('missing secret configuration fails closed', async () => {
   let accepted = false
   const handler = createWebhookHandler({ secret: undefined, accept: async () => { accepted = true }, logger: silent })
