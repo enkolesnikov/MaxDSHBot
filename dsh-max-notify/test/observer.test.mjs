@@ -40,12 +40,19 @@ function baseConfig(overrides = {}) {
   }
 }
 
-function makeObserver({ config = {}, policy, runtime, state, outbox, now } = {}) {
+function makeObserver({ config = {}, policy, runtime, state, outbox, now, logger } = {}) {
   const client = createFakeClient()
+  const logs = []
+  const loggerStub = logger ?? {
+    info: (...args) => logs.push(['info', ...args]),
+    warn: (...args) => logs.push(['warn', ...args]),
+    error: (...args) => logs.push(['error', ...args]),
+    debug: (...args) => logs.push(['debug', ...args]),
+  }
   const observer = createObserver({
     client,
     config: baseConfig(config),
-    logger: { info() {}, warn() {}, debug() {} },
+    logger: loggerStub,
     target: { chatId: '123456789' },
     policy: policy ?? { decide: () => ({ send: true, notify: true, reason: 'normal' }) },
     runtime: runtime ?? {
@@ -59,7 +66,34 @@ function makeObserver({ config = {}, policy, runtime, state, outbox, now } = {})
     outbox,
     now,
   })
-  return { client, observer }
+  return { client, observer, logs }
+}
+
+/**
+ * Run `observer.start()` with interval/timeout factories captured instead of
+ * armed, so a test can fire one scheduled check without waiting 30 s / 5 min.
+ */
+function startWithCapturedTimers(observer) {
+  const intervals = []
+  const timeouts = []
+  const realSetInterval = globalThis.setInterval
+  const realSetTimeout = globalThis.setTimeout
+  const fakeHandle = () => ({ unref() {} })
+  globalThis.setInterval = (fn, ms) => {
+    intervals.push({ fn, ms })
+    return fakeHandle()
+  }
+  globalThis.setTimeout = (fn, ms) => {
+    timeouts.push({ fn, ms })
+    return fakeHandle()
+  }
+  try {
+    observer.start()
+  } finally {
+    globalThis.setInterval = realSetInterval
+    globalThis.setTimeout = realSetTimeout
+  }
+  return { intervals, timeouts, fire: (list, ms) => list.find((item) => item.ms === ms).fn() }
 }
 
 /** State stub that remembers the single persisted digest date. */
@@ -412,4 +446,119 @@ test('digest includes cost and budget lines', async () => {
   await observer.sendDigest()
   assert.match(client.sent.at(-1).text, /Деньги: ¥5\.00 сегодня/)
   assert.match(client.sent.at(-1).text, /бюджет 15\.0%/)
+})
+
+test('digest check failures are reported at warn, not debug', async () => {
+  const nowMs = new Date(2026, 10, 17, 10, 0, 0).getTime()
+  const { observer, logs } = makeObserver({
+    config: { digestEnabled: true, digestTime: '09:00' },
+    runtime: {
+      costSnapshot: async () => {
+        throw new Error('ledger boom')
+      },
+    },
+    now: () => nowMs,
+  })
+  const timers = startWithCapturedTimers(observer)
+  await tick(10)
+  let warns = logs.filter(([level]) => level === 'warn')
+  assert.equal(warns.length, 1)
+  assert.equal(warns[0][1], '%s check failed: %s')
+  assert.equal(warns[0][2], 'digest')
+  assert.match(String(warns[0][3]), /ledger boom/)
+  assert.equal(logs.some(([level]) => level === 'debug'), false)
+
+  // Each failed scheduled run logs exactly one warn (no debug duplicate).
+  timers.fire(timers.intervals, 30_000)
+  await tick(10)
+  warns = logs.filter(([level]) => level === 'warn')
+  assert.equal(warns.length, 2)
+  assert.equal(warns[1][2], 'digest')
+})
+
+test('budget check failures are reported at warn on startup and on the interval', async () => {
+  const { observer, logs } = makeObserver({
+    config: { digestEnabled: false, budgetAlertEnabled: true },
+    runtime: {
+      budgetStatus: async () => {
+        throw new Error('ledger boom')
+      },
+    },
+  })
+  const timers = startWithCapturedTimers(observer)
+  await tick(10)
+  // Digest is disabled and the budget check is not due yet: nothing to report.
+  assert.equal(logs.some(([level]) => level === 'warn'), false)
+
+  timers.fire(timers.timeouts, 20_000) // delayed first budget check
+  await tick(10)
+  let warns = logs.filter(([level]) => level === 'warn')
+  assert.equal(warns.length, 1)
+  assert.equal(warns[0][1], '%s check failed: %s')
+  assert.equal(warns[0][2], 'budget')
+  assert.match(String(warns[0][3]), /ledger boom/)
+
+  timers.fire(timers.intervals, 5 * 60_000) // periodic budget check
+  await tick(10)
+  warns = logs.filter(([level]) => level === 'warn')
+  assert.equal(warns.length, 2)
+  assert.equal(warns[1][2], 'budget')
+  assert.equal(logs.some(([level]) => level === 'debug'), false)
+})
+
+test('notification handler failures are logged once at warn (outer debug catch stays last resort)', async () => {
+  const policy = {
+    decide() {
+      throw new Error('policy boom')
+    },
+  }
+  const { observer, logs, client } = makeObserver({ policy, config: { notifyAwaitedJobs: true } })
+  observer.onSubagentEnd({ id: 'session-child', stopReason: 'completed' })
+  observer.onJobEvent({ type: 'settled', awaited: true, job: { id: 'bash-abc', status: 'completed' } })
+  observer.onGoalChanged({
+    agent: { session: session() },
+    change: { operation: 'start', goal: { id: 'goal-1', objective: 'x' } },
+  })
+  observer.onAgentError({ agent: { session: session() }, turn: 1, step: 1, error: new Error('boom') })
+  observer.onSessionEvent(session(), { type: 'todo/write', data: { todos: [{ content: 'x', status: 'pending' }] } })
+  await tick(20)
+
+  const warns = logs.filter(([level]) => level === 'warn')
+  assert.equal(warns.length, 5)
+  assert.deepEqual(
+    warns.map(([, message]) => message),
+    [
+      'subagent notification failed: %s',
+      'job notification failed: %s',
+      'goal notification failed: %s',
+      'error notification failed: %s',
+      'observer failed: %s',
+    ],
+  )
+  for (const [, , reason] of warns) assert.match(String(reason), /policy boom/)
+  assert.equal(logs.some(([level]) => level === 'debug'), false)
+  assert.equal(client.sent.length, 0)
+})
+
+test('expected service-absent results and policy suppression stay at debug, not warn', async () => {
+  // A partial runtime without budget/list services is an expected state, not a failure.
+  const missing = makeObserver({
+    config: { budgetAlertEnabled: true, digestEnabled: true, digestTime: '09:00' },
+    runtime: {},
+    now: () => new Date(2026, 10, 17, 10, 0, 0).getTime(),
+  })
+  assert.deepEqual(await missing.observer.checkBudget(), { sent: 0, skipped: 'budget disabled or ledger unavailable' })
+  await missing.observer.sendDigest()
+  await tick(20)
+  assert.equal(missing.logs.filter(([level]) => level === 'warn').length, 0)
+
+  // A suppressed notification is an expected decision: debug only.
+  const muted = makeObserver({ policy: { decide: () => ({ send: false, notify: false, reason: 'mute' }) } })
+  muted.observer.onSubagentEnd({ id: 'session-child', stopReason: 'completed' })
+  assert.equal(muted.logs.filter(([level]) => level === 'warn').length, 0)
+  const debugs = muted.logs.filter(([level]) => level === 'debug')
+  assert.equal(debugs.length, 1)
+  assert.equal(debugs[0][1], 'notification %s suppressed (%s)')
+  assert.equal(debugs[0][2], 'subagent')
+  assert.equal(debugs[0][3], 'mute')
 })

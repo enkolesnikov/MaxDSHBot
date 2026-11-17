@@ -18,6 +18,7 @@
  * needs `loadTlsCredentials()`; the top-level await rejects loudly on its own,
  * so no per-test skip logic has to read this flag.
  */
+
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -36,51 +37,69 @@ function tlsUnavailable(reason) {
   )
 }
 
-let credentialsPromise
+const credentialsByDnsNames = new Map()
 
 /**
- * Generate (once) a self-signed certificate valid for localhost/127.0.0.1.
+ * Generate (once per DNS-name set) a self-signed certificate valid for
+ * localhost/127.0.0.1 and any extra `dnsNames`.
+ *
+ * Extra names exist for the token-leak contract test: a trusted MAX CDN
+ * hostname is resolved to the loopback server through an injected `lookup`, so
+ * the certificate has to be valid for that hostname as well.
+ *
+ * @param {{dnsNames?: string[]}} [options]
  * @returns {Promise<{key: string, cert: string}|null>} `null` only when TLS
  *   tests are optional and `openssl` cannot run.
  * @throws when REQUIRE_TLS_TESTS=1 and the certificate cannot be generated.
  */
-export function loadTlsCredentials() {
-  credentialsPromise ??= (async () => {
-    try {
-      execFileSync('openssl', ['version'], { stdio: 'ignore' })
-    } catch (error) {
-      return tlsUnavailable(`openssl is not installed (${error?.code ?? error?.message ?? String(error)})`)
-    }
-    const dir = mkdtempSync(join(tmpdir(), 'dsh-max-tls-'))
-    const keyPath = join(dir, 'key.pem')
-    const certPath = join(dir, 'cert.pem')
-    try {
-      execFileSync(
-        'openssl',
-        [
-          'req', '-x509',
-          '-newkey', 'rsa:2048',
-          '-sha256',
-          '-nodes',
-          '-days', '2',
-          '-keyout', keyPath,
-          '-out', certPath,
-          '-subj', '/CN=localhost',
-          '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1',
-          '-addext', 'basicConstraints=critical,CA:TRUE',
-          '-addext', 'keyUsage=critical,keyCertSign,digitalSignature,keyEncipherment',
-          '-addext', 'extendedKeyUsage=serverAuth',
-        ],
-        { stdio: 'ignore' },
-      )
-      return { key: readFileSync(keyPath, 'utf8'), cert: readFileSync(certPath, 'utf8') }
-    } catch (error) {
-      return tlsUnavailable(`openssl req failed (${error?.message || String(error)})`)
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
-  })()
-  return credentialsPromise
+export function loadTlsCredentials({ dnsNames = [] } = {}) {
+  const extraNames = dnsNames.map((name) => {
+    const value = String(name)
+    if (!/^[a-z0-9.-]+$/i.test(value)) throw new TypeError(`invalid test certificate DNS name: ${value}`)
+    return value
+  })
+  const cacheKey = extraNames.join(',')
+  if (!credentialsByDnsNames.has(cacheKey)) {
+    credentialsByDnsNames.set(cacheKey, generateCredentials(extraNames))
+  }
+  return credentialsByDnsNames.get(cacheKey)
+}
+
+async function generateCredentials(extraNames) {
+  try {
+    execFileSync('openssl', ['version'], { stdio: 'ignore' })
+  } catch (error) {
+    return tlsUnavailable(`openssl is not installed (${error?.code ?? error?.message ?? String(error)})`)
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-max-tls-'))
+  const keyPath = join(dir, 'key.pem')
+  const certPath = join(dir, 'cert.pem')
+  const subjectAltName = ['DNS:localhost', 'IP:127.0.0.1', ...extraNames.map((name) => `DNS:${name}`)].join(',')
+  try {
+    execFileSync(
+      'openssl',
+      [
+        'req', '-x509',
+        '-newkey', 'rsa:2048',
+        '-sha256',
+        '-nodes',
+        '-days', '2',
+        '-keyout', keyPath,
+        '-out', certPath,
+        '-subj', '/CN=localhost',
+        '-addext', `subjectAltName=${subjectAltName}`,
+        '-addext', 'basicConstraints=critical,CA:TRUE',
+        '-addext', 'keyUsage=critical,keyCertSign,digitalSignature,keyEncipherment',
+        '-addext', 'extendedKeyUsage=serverAuth',
+      ],
+      { stdio: 'ignore' },
+    )
+    return { key: readFileSync(keyPath, 'utf8'), cert: readFileSync(certPath, 'utf8') }
+  } catch (error) {
+    return tlsUnavailable(`openssl req failed (${error?.message || String(error)})`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 }
 
 /**

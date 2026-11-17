@@ -19,8 +19,8 @@
  * MAX_CA_FILE, MAX_NOTIFY_DRY_RUN.
  */
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { mkdirSync, readFileSync } from 'node:fs'
+import { writePrivateFile } from './lib/fs-safe.mjs'
 
 import { createMaxClient, splitText, MAX_TEXT_LIMIT } from './lib/transport.mjs'
 import { DEFAULTS, normalizeConfig } from './lib/config.mjs'
@@ -60,12 +60,8 @@ import { createOutbox, resolveOutboxFile } from './lib/outbox.mjs'
 import { createHealth } from './lib/health.mjs'
 import { createAudit, resolveAuditFile } from './lib/audit.mjs'
 import { createCostMeter, resolveCostLedgerFile } from './lib/cost-meter.mjs'
-import {
-  createWebhookHandler,
-  ensureWebhookSubscription,
-  removeWebhookSubscription,
-  WEBHOOK_BODY_BYTES_MAX,
-} from './lib/webhook.mjs'
+import { createWebhookRuntime, ownRoute, registerRoute } from './lib/webhook-runtime.mjs'
+import { createDeliver } from './lib/deliver.mjs'
 import { redact, registerSecret, wrapLogger } from './lib/redact.mjs'
 
 export const name = 'dsh-max-notify'
@@ -723,7 +719,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
   function settingsSummary() {
     return {
       version: VERSION,
-      transport: webhookActive ? 'webhook' : 'polling',
+      transport: webhookRuntime.active ? 'webhook' : 'polling',
       interactive: config.interactive,
       allowlist: { users: config.allowedUserIds.length, chats: config.allowedChatIds.length },
       mode: config.mode,
@@ -790,14 +786,21 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
   function settingsStatus() {
     return {
       version: VERSION,
-      transport: webhookActive ? 'webhook' : 'polling',
-      webhookSubscribed,
+      transport: webhookRuntime.active ? 'webhook' : 'polling',
+      webhookSubscribed: webhookRuntime.subscribed,
       interactive: config.interactive,
       allowlist: { users: config.allowedUserIds.length, chats: config.allowedChatIds.length },
     }
   }
 
+  // Single source of truth for the `/workspace N` choice: bot.mjs reads it
+  // through `runtime.getPreferredWorkspace()` and `createSession()` below; the
+  // plugin never keeps a second copy.
   let preferredWorkspacePath
+
+  function getPreferredWorkspace() {
+    return preferredWorkspacePath
+  }
 
   function setPreferredWorkspace(path) {
     preferredWorkspacePath = typeof path === 'string' && path !== '' ? path : undefined
@@ -1067,9 +1070,10 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     const controller = getService('sessionController')
     if (!controller?.create) return { ok: false, error: 'sessionController недоступен' }
     const baseCwd = sessionId ? (await statusInfo(sessionId))?.cwd : undefined
+    const preferredWorkspace = getPreferredWorkspace()
     const cwd =
-      !sessionArg && preferredWorkspacePath
-        ? preferredWorkspacePath
+      !sessionArg && preferredWorkspace
+        ? preferredWorkspace
         : resolveSessionDir({
             arg: sessionArg,
             baseCwd,
@@ -1256,6 +1260,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       pinSession,
       listWorkspaces,
       createWorkspace,
+      getPreferredWorkspace,
       setPreferredWorkspace,
       getApprovalPolicy,
       setApprovalPolicy,
@@ -1274,214 +1279,31 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
   })
 
   // ── webhook transport (v0.9) ────────────────────────────────────────────
-  let webhookRouteDispose
-  let webhookActive = false
-  let webhookDraining = false
-  // Bumped on every HMR generation / unsubscribe so late async results are ignored.
-  let subscriptionGeneration = 0
-  let webhookRetryTimer
-  let webhookSubscribed = false
-  let webhookSubscriptionError
-
-  async function drainWebhookQueue() {
-    if (webhookDraining || !webhookActive) return
-    webhookDraining = true
-    try {
-      for (;;) {
-        if (disposed) break
-        const queue = state.getWebhookQueue()
-        if (queue.length === 0) break
-        const entry = queue[0]
-        try {
-          await bot.applyUpdate(entry.update)
-        } catch (error) {
-          logger.warn('cannot process a webhook update: %s', error?.message || String(error))
-          health.fail(error)
-          const attempts = state.bumpWebhookHeadAttempts()
-          if (attempts >= 3) {
-            state.shiftWebhookQueue()
-            state.save()
-            audit.write({
-              kind: 'webhook',
-              action: 'dead-letter',
-              attempts,
-              error: error?.message || String(error),
-              update: redactUpdateForAudit(entry.update),
-            })
-            logger.error?.('dropping poison webhook update after %d attempts: %s', attempts, error?.message || String(error))
-            continue
-          }
-          break
-        }
-        const nextLength = state.shiftWebhookQueue()
-        health.update({
-          webhookQueueDepth: nextLength,
-          webhookQueueBytes: state.getWebhookQueueBytes?.(),
-          webhookLastProcessedAt: Date.now(),
-        })
-      }
-    } finally {
-      webhookDraining = false
-      const queueStats = state.getWebhookQueueStats?.() ?? { depth: state.getWebhookQueue().length, bytes: undefined }
-      health.update({ webhookQueueDepth: queueStats.depth, webhookQueueBytes: queueStats.bytes })
-    }
-  }
-
-  /** Persist one MAX update durably, then answer 200; processing follows. */
-  async function acceptWebhookUpdate(update) {
-    if (disposed || config.dryRun) return
-    const key = bot.updateKey?.(update)
-    if (key && state.hasProcessed(key)) return
-    const queue = state.getWebhookQueue()
-    if (key && queue.some((entry) => entry.key === key)) return
-    if (queue.length >= config.webhookQueueMax) throw new Error('webhook queue is full')
-    const result = state.pushWebhookQueue(
-      { key, update, at: Date.now() },
-      config.webhookQueueMax,
-      config.webhookQueueBytesMax,
-      config.webhookEntryBytesMax,
-    )
-    if (result.rejected) {
-      // The HTTP layer already caps bodies; this is a second fence for direct
-      // calls. Answering 200 avoids endless MAX retries for an unparkable update.
-      logger.warn('dropped an oversized MAX webhook update (%s)', result.reason ?? 'bytes')
-      audit.write({ kind: 'webhook', action: 'drop', reason: result.reason, bytes: result.bytes })
-      health.update({ webhookLastDropAt: Date.now(), webhookQueueBytes: result.bytes })
-      return
-    }
-    // Durability contract: the 200 must not be sent until the update is on disk.
-    state.save()
-    health.update({
-      webhookLastAt: Date.now(),
-      webhookQueueDepth: result.depth,
-      webhookQueueBytes: result.bytes,
-    })
-    void drainWebhookQueue()
-  }
-
-  function ownRoute(webCtx, dispose) {
-    if (typeof webCtx?.effect === 'function' && typeof dispose === 'function') {
-      try {
-        webCtx.effect(() => () => {
-          try {
-            dispose()
-          } catch {
-            // already disposed
-          }
-        })
-      } catch {
-        // effect support is optional in minimal contexts
-      }
-    }
-    return dispose
-  }
-
-  /** Register a named route; replace a stale route left by an HMR generation. */
-  function registerRoute(webServer, route) {
-    const table = route.kind === 'exact' ? webServer.exact : webServer.prefixes
-    if (table instanceof Map && table.has(route.path)) {
-      logger.warn('replacing stale webServer route %s', route.path)
-      table.delete(route.path)
-    }
-    const dispose = webServer.register(route)
-    return () => {
-      try {
-        if (table instanceof Map && table.get(route.path) !== route) return
-      } catch {
-        // fall through to the stock disposer
-      }
-      try {
-        dispose()
-      } catch {
-        // already disposed
-      }
-    }
-  }
-
-  function registerWebhook(webServer, ownerCtx) {
-    if (webhookActive) return true
-    if (config.transport !== 'webhook') return false
-    if (!config.interactive) {
-      logger.info('webhook transport skipped: interactive remote control is off')
-      return false
-    }
-    if (!config.webhookSecret) {
-      logger.warn(
-        config.webhookSecretInvalid
-          ? 'webhook secret must be 32-256 chars [A-Za-z0-9_-]; falling back to long polling'
-          : 'webhook transport requested without webhookSecret; falling back to long polling',
-      )
-      return false
-    }
-    if (!webServer?.register) {
-      logger.warn('webhook transport requested but the DSH webServer service is unavailable; falling back to long polling')
-      return false
-    }
-    try {
-      const handler = createWebhookHandler({
-        secret: config.webhookSecret,
-        accept: acceptWebhookUpdate,
-        logger,
-        maxBytes: config.webhookEntryBytesMax ?? WEBHOOK_BODY_BYTES_MAX,
-      })
-      const disposeRoute = registerRoute(webServer, { kind: 'exact', path: config.webhookPath, handler })
-      webhookRouteDispose = () => {
-        try {
-          disposeRoute()
-        } finally {
-          webhookActive = false
-          webhookRuntimeStarted = false
-          webhookRouteDispose = undefined
-          if (webhookRetryTimer) {
-            clearInterval(webhookRetryTimer)
-            webhookRetryTimer = undefined
-          }
-        }
-      }
-      ownRoute(ownerCtx, webhookRouteDispose)
-      webhookActive = true
-      config.polling = false
-      // A polling fallback may already have started before the webServer service
-      // became available; stop it so both transports never consume updates.
-      try {
-        bot.stopPolling?.()
-      } catch {
-        // best effort during early startup
-      }
-      health.update({ transport: 'webhook', webhookPath: config.webhookPath, webhookActive: true, webhookSetupError: undefined })
+  // The route/runtime lifecycle lives in lib/webhook-runtime.mjs: route
+  // registration and replacement, durable accept (save before 200), the drain
+  // loop with its dead-letter fence, the subscription generation guard and
+  // start/stop/dispose. index.js keeps the host wiring: the rc.2 ctx.inject
+  // ordering, the polling fallback timer and the Cordis teardown call.
+  const webhookRuntime = createWebhookRuntime({
+    state,
+    health,
+    logger,
+    audit,
+    bot,
+    config,
+    client,
+    getService,
+    isDisposed: () => disposed,
+    redactUpdate: redactUpdateForAudit,
+    context: ctx,
+    writeHeartbeat,
+    clearFallbackTimer: () => {
       if (webhookFallbackTimer) {
         clearTimeout(webhookFallbackTimer)
         webhookFallbackTimer = undefined
       }
-      logger.info('MAX webhook route registered: %s', config.webhookPath)
-      writeHeartbeat()
-      startWebhookRuntime()
-      return true
-    } catch (error) {
-      logger.warn('cannot register the MAX webhook route %s: %s; falling back to long polling', config.webhookPath, error?.message || String(error))
-      config.polling = true
-      return false
-    }
-  }
-
-  /** Legacy synchronous path for minimal test contexts without ctx.inject. */
-  function setupWebhook() {
-    webhookActive = registerWebhook(getService('webServer'), ctx)
-    if (!webhookActive) config.polling = true
-    return webhookActive
-  }
-
-  let webhookRuntimeStarted = false
-  function startWebhookRuntime() {
-    if (!webhookActive || webhookRuntimeStarted) return
-    webhookRuntimeStarted = true
-    void drainWebhookQueue()
-    void startWebhookSubscription()
-    webhookRetryTimer = setInterval(() => {
-      void drainWebhookQueue()
-    }, 30_000)
-    webhookRetryTimer.unref?.()
-  }
+    },
+  })
 
   let settingsRouteDispose
   function registerSettingsPage(webServer, connection, ownerCtx) {
@@ -1517,7 +1339,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
           }
           await api(req, res)
         },
-      })
+      }, logger)
       settingsRouteDispose = () => {
         try {
           disposeRoute()
@@ -1539,7 +1361,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
 
   let webhookFallbackTimer
   function startPollingFallback() {
-    if (webhookActive) return
+    if (webhookRuntime.active) return
     config.polling = true
     health.update({ transport: 'polling', webhookActive: false, webhookFallbackAt: Date.now() })
     logger.warn('MAX webhook did not activate; using long polling')
@@ -1564,7 +1386,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
           webhookRegisterAvailable: Boolean(webCtx?.webServer?.register),
         })
         try {
-          if (!registerWebhook(webCtx.webServer, webCtx)) {
+          if (!webhookRuntime.registerWebhook(webCtx.webServer, webCtx)) {
             health.update({ webhookSetupError: 'registerWebhook returned false' })
             startPollingFallback()
           }
@@ -1583,25 +1405,8 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       })
     }
   } else {
-    setupWebhook()
+    webhookRuntime.setupWebhook(ctx)
     setupSettingsPage()
-  }
-
-  async function startWebhookSubscription() {
-    if (disposed || !webhookActive || !config.webhookAutoSubscribe) return
-    const generation = ++subscriptionGeneration
-    const result = await ensureWebhookSubscription({
-      client,
-      url: config.webhookPublicUrl,
-      secret: config.webhookSecret,
-      updateTypes: config.webhookUpdateTypes,
-      logger,
-    })
-    // HMR may have swapped generations while the API call was in flight.
-    if (disposed || generation !== subscriptionGeneration) return
-    webhookSubscribed = result.ok === true
-    webhookSubscriptionError = result.ok ? undefined : result.reason
-    health.update({ webhookSubscribed, webhookSubscriptionError })
   }
 
   // Final-message forwarding (image dedupe + inline keyboard) lives in its own module.
@@ -1614,126 +1419,29 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
   })
   const { noteSentImages, collectFinalImages, finalKeyboard } = forwarding
 
-  async function deliver(session, text, reason, message, toolImageRefs = [], turn, seq) {
-    if (!(await ensureTargetAllowed())) return
-    const decision = policy.decide('final')
-    if (!decision.send) {
-      logger.debug('final reply suppressed (%s)', decision.reason)
-      return
-    }
-    let displayText = text
-    let tableAttachments = []
-    if (config.tableFiles && config.tableMaxFiles > 0) {
-      const tables = buildTableFiles(text, { maxTables: config.tableMaxFiles })
-      if (tables.files.length > 0) {
-        for (const file of tables.files) {
-          try {
-            const uploaded = await client.uploadMedia({
-              buffer: Buffer.from(file.content, 'utf8'),
-              filename: file.filename,
-              type: 'file',
-            })
-            if (uploaded?.token) tableAttachments.push({ type: 'file', payload: { token: uploaded.token } })
-          } catch (error) {
-            logger.warn('cannot upload %s to MAX: %s', file.filename, error?.message || String(error))
-          }
-        }
-        if (tableAttachments.length > 0) displayText = tables.strippedText
-      }
-    }
-    const payload = formatNotification({
-      text: displayText,
-      cwd: session?.header?.cwd,
-      title: resolveTitle(session),
-      sessionId: session?.id,
-      reason,
-      format: config.format,
-      includeHeader: config.includeHeader,
-      includeSessionId: config.includeSessionId,
-      messageStyle: config.messageStyle,
-    })
-    const chunkLimit = Math.min(MAX_TEXT_LIMIT, Math.max(200, Number(config.maxChars) || MAX_TEXT_LIMIT))
-    const chunks = splitText(payload, chunkLimit).slice(0, 8)
-    if (config.dryRun) {
-      logger.info('[dry-run] would send %d chunk(s) to MAX: %s', chunks.length, chunks[0]?.slice(0, 120))
-      return
-    }
-    const keyboard = finalKeyboard(session)
-    const images = await collectFinalImages(session, text, message, toolImageRefs)
-    const attachments =
-      images.length > 0 || tableAttachments.length > 0 || keyboard
-        ? [...images, ...tableAttachments, ...(keyboard ?? [])]
-        : undefined
-    const finalKey = `final:${session?.id ?? 'unknown'}:${turn ?? 'na'}:${seq ?? 'na'}`
-    let threadMid = config.threads ? state.getAnchor?.(session.id) : undefined
-    let queuedAny = false
-    for (const [index, chunk] of chunks.entries()) {
-      const isLast = index === chunks.length - 1
-      const params = {
-        chatId: config.chatId,
-        userId: config.chatId === undefined ? config.userId : undefined,
-        text: chunk,
-        format: config.format,
-        notify: decision.notify,
-        disableLinkPreview: config.disableLinkPreview,
-        ...(isLast && attachments ? { attachments } : {}),
-        ...(threadMid ? { link: { type: 'reply', mid: threadMid } } : {}),
-      }
-      let sent
-      if (outbox) {
-        const result = await outbox.deliverNow(params, { dedupeKey: `${finalKey}:c${index}`, kind: 'final' })
-        if (result?.skipped) continue
-        if (result?.queued) {
-          queuedAny = true
-          logger.warn('MAX is unavailable; final reply chunk %d queued: %s', index + 1, result.error)
-          continue
-        }
-        sent = result?.response
-      } else {
-        sent = await client.sendMessage(params)
-      }
-      const mid = sent?.message?.body?.mid
-      if (mid) {
-        state.mapMessage?.(session.id, mid)
-        if (!threadMid && config.threads) {
-          threadMid = mid
-          state.setAnchor?.(session.id, mid)
-        }
-      }
-      logger.debug('MAX message sent%s', mid ? ` (mid ${mid})` : '')
-    }
-    if (config.voiceTts && !queuedAny && !config.dryRun) {
-      const speak = shouldSpeak(text, config)
-      if (speak.ok) {
-        try {
-          const audio = await synthesizeSpeech({
-            text,
-            endpoint: config.voiceTtsEndpoint || config.voiceEndpoint,
-            apiKey: config.voiceTtsApiKey || config.voiceApiKey,
-            model: config.voiceTtsModel,
-            voice: config.voiceTtsVoice,
-            format: config.voiceTtsFormat,
-            speed: config.voiceTtsSpeed,
-            maxChars: config.voiceTtsMaxChars,
-          })
-          if (audio.ok) {
-            const result = await uploadAndSendAudio({
-              buffer: audio.buffer,
-              format: config.voiceTtsFormat,
-              caption: '🔊',
-              dedupeKey: `tts:${finalKey}`,
-            })
-            if (!result.ok) logger.warn('cannot send TTS audio: %s', result.error)
-          } else {
-            logger.warn('TTS failed: %s', audio.error)
-          }
-        } catch (error) {
-          logger.warn('TTS failed: %s', error?.message || String(error))
-        }
-      }
-    }
-    bot.noteSession?.(String(session.id))
-  }
+  // Final-message delivery pipeline: formatting/chunking, table files, images,
+  // inline keyboard, threads, the durable outbox fallback and TTS. The factory
+  // in lib/deliver.mjs takes every collaborator explicitly; index.js only wires.
+  const deliver = createDeliver({
+    client,
+    config,
+    logger,
+    state,
+    policy,
+    ensureTargetAllowed,
+    resolveTitle,
+    formatNotification,
+    splitText,
+    maxTextLimit: MAX_TEXT_LIMIT,
+    buildTableFiles,
+    finalKeyboard,
+    collectFinalImages,
+    outbox,
+    shouldSpeak,
+    synthesizeSpeech,
+    uploadAndSendAudio,
+    noteSession: (sessionId) => bot.noteSession?.(sessionId),
+  })
 
   function onSessionEvent(session, event) {
     if (!session || !event || typeof event.type !== 'string') return
@@ -1904,8 +1612,8 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       const { sent, failed, dropped, enqueued, ...outboxDurable } = outboxStats
       const snapshot = health.snapshot({ outbox: outboxStats, limiter: limiter?.snapshot?.() })
       state.setHealth({ ...snapshot, outbox: outboxDurable })
-      mkdirSync(dirname(config.heartbeatFile), { recursive: true, mode: 0o700 })
-      writeFileSync(config.heartbeatFile, `${JSON.stringify(snapshot, null, 2)}\n`, { mode: 0o600 })
+      // Heartbeat can contain chat ids: private parent dirs (0700) and file 0600.
+      writePrivateFile(config.heartbeatFile, `${JSON.stringify(snapshot, null, 2)}\n`)
     } catch (error) {
       logger.debug('cannot write heartbeat file: %s', error?.message || String(error))
     }
@@ -1915,38 +1623,23 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     ctx.effect(() => {
       outbox?.start()
       void bot.start()
-      if (webhookActive) startWebhookRuntime()
+      if (webhookRuntime.active) webhookRuntime.start()
       observer.start()
       writeHeartbeat()
       const healthTimer = setInterval(writeHeartbeat, 60_000)
       healthTimer.unref?.()
       return async () => {
         disposed = true
-        subscriptionGeneration += 1
         clearInterval(healthTimer)
         if (webhookFallbackTimer) {
           clearTimeout(webhookFallbackTimer)
           webhookFallbackTimer = undefined
         }
-        if (webhookRetryTimer) {
-          clearInterval(webhookRetryTimer)
-          webhookRetryTimer = undefined
-        }
         settingsRouteDispose?.()
-        webhookRouteDispose?.()
-        if (webhookActive && config.webhookRemoveOnStop && config.webhookPublicUrl) {
-          const generation = subscriptionGeneration
-          void removeWebhookSubscription({ client, url: config.webhookPublicUrl, logger })
-            .then?.((result) => {
-              if (generation !== subscriptionGeneration) {
-                logger.debug('ignoring stale webhook unsubscribe result after HMR')
-              }
-              return result
-            })
-            .catch?.((error) => {
-              logger.warn('cannot remove MAX webhook subscription on stop: %s', error?.message || String(error))
-            })
-        }
+        // Invalidates in-flight subscription results, clears the retry timer,
+        // disposes the webhook route and runs the legacy best-effort unsubscribe
+        // gate — same ordering and semantics as the pre-split teardown.
+        webhookRuntime.dispose()
         bot.stop()
         observer.dispose()
         progress.dispose()
@@ -1983,7 +1676,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     config.interactive ? '; remote control on' : '; remote control off',
     config.outboxEnabled ? '; outbox on' : '',
     config.costMeterEnabled ? '; cost-meter on' : '',
-    webhookActive ? `; webhook ${config.webhookPath}` : '; long polling',
+    webhookRuntime.active ? `; webhook ${config.webhookPath}` : '; long polling',
     config.digestEnabled ? `; digest at ${config.digestTime}` : '',
   )
 

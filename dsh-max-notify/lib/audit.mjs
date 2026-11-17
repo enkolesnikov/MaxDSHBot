@@ -5,7 +5,8 @@
  * recorded — tool names, outcomes and sources, never message bodies or secrets.
  * Best-effort: write failures never break the agent flow.
  */
-import { appendFileSync, chmodSync, mkdirSync } from 'node:fs'
+import { appendFileSync, chmodSync } from 'node:fs'
+import { ensurePrivateDir } from './fs-safe.mjs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 
@@ -22,7 +23,7 @@ export function createAudit({ file, enabled = true, logger, now = () => Date.now
   function write(entry) {
     if (!enabled || !path) return
     try {
-      mkdirSync(dirname(path), { recursive: true })
+      ensurePrivateDir(dirname(path))
       appendFileSync(path, `${JSON.stringify({ at: now(), ...entry })}\n`, { mode: 0o600 })
       try {
         chmodSync(path, 0o600)

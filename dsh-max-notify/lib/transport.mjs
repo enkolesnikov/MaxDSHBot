@@ -12,12 +12,13 @@
  *    We ship certs/ca-chain.pem (Russian Trusted Sub CA + Russian Trusted Root CA)
  *    and pass it explicitly via https.request({ ca }).
  */
-import { createWriteStream, mkdirSync, readFileSync, renameSync, unlinkSync } from 'node:fs'
+import { createWriteStream, readFileSync, renameSync, unlinkSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { basename, extname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import https from 'node:https'
 import { rootCertificates } from 'node:tls'
+import { ensurePrivateDir } from './fs-safe.mjs'
 import { redact } from './redact.mjs'
 import { classifyUploadType } from './workspace-tools.mjs'
 
@@ -691,7 +692,9 @@ export function createMaxClient(options = {}) {
               return
             }
             try {
-              mkdirSync(dirname(destPath), { recursive: true, mode: 0o700 })
+              // Downloaded media is private: every missing directory component
+              // gets 0700 and a pre-existing destination directory is tightened.
+              ensurePrivateDir(dirname(destPath))
             } catch (error) {
               reject(error)
               return

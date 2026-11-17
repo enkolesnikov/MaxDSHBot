@@ -5,26 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, basename } from 'node:path'
 import { normalizeConfig } from '../index.js'
 import { createDeliverables } from '../lib/deliverables.mjs'
-
-function createFakeClient() {
-  const sends = []
-  const uploads = []
-  return {
-    sends,
-    uploads,
-    uploadTypeFor(filePath) {
-      return String(filePath).endsWith('.png') ? 'image' : 'file'
-    },
-    async uploadMedia({ filePath, type }) {
-      uploads.push({ filePath, type })
-      return { token: `token-${type}`, type }
-    },
-    async sendWithAttachments(params) {
-      sends.push(params)
-      return { message: { body: { mid: `mid-${sends.length}` } } }
-    },
-  }
-}
+import { createFakeClient } from './helpers/fakes.mjs'
 
 const workspace = mkdtempSync(join(tmpdir(), 'dsh-max-deliverables-'))
 const outside = mkdtempSync(join(tmpdir(), 'dsh-max-outside-'))

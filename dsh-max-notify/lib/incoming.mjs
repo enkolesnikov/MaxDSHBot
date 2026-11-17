@@ -2,10 +2,11 @@
  * Incoming files from MAX: download attachments sent by the allowlisted owner
  * into the session's workspace inbox and hand their paths to the agent.
  */
-import { mkdirSync, renameSync } from 'node:fs'
+import { renameSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { basename, extname, isAbsolute, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
+import { ensurePrivateDir } from './fs-safe.mjs'
 import { formatBytes } from './format.mjs'
 
 // Re-exported for existing callers (`lib/bot.mjs`, tests); the implementation
@@ -113,7 +114,9 @@ export function createIncoming({ client, config, logger, resolveCwd } = {}) {
     }
     const dir = inboxDirFor(cwd)
     try {
-      mkdirSync(dir, { recursive: true, mode: 0o700 })
+      // Inbox names/contents are private: create every missing component with
+      // 0700 and tighten a pre-existing inbox directory (see lib/fs-safe.mjs).
+      ensurePrivateDir(dir)
     } catch (error) {
       logger?.warn?.('cannot create MAX inbox %s: %s', dir, error?.message || String(error))
       return { saved: [], errors: [`не удалось создать папку ${dir}`], promptText: '' }

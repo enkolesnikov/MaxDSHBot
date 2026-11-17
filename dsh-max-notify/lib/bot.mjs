@@ -89,8 +89,19 @@ export function createBot({
   const scheduleCancels = createLruMap({ max: CACHE_MAX })
   /** chatKey -> { id, mode, at } pending `/schedules mode N auto confirm` (LRU-bounded). */
   const scheduleModeConfirms = createLruMap({ max: CACHE_MAX })
-  /** workspace path chosen for subsequent `/new` calls */
-  let preferredWorkspacePath
+  /**
+   * Preferred `/new` workspace: the runtime (index.js) owns the single store,
+   * the bot never keeps a copy. Partial runtime fakes without a getter fall
+   * back to "no active path"; a throwing getter must not break `/workspace`.
+   */
+  function preferredWorkspacePath() {
+    try {
+      const path = runtime?.getPreferredWorkspace?.()
+      return typeof path === 'string' && path !== '' ? path : undefined
+    } catch {
+      return undefined
+    }
+  }
   /** chatKey -> token bucket for incoming flood protection (LRU-bounded). */
   const incomingBuckets = createLruMap({ max: CACHE_MAX })
   /** chatKey -> last "too fast" warning (LRU-bounded). */
@@ -571,7 +582,7 @@ export function createBot({
         const registry = (await runtime.listWorkspaces?.()) ?? []
         if (arg === '' || arg === 'list') {
           workspaceChoices.set(chatKey(chatId), registry)
-          await reply(chatId, formatWorkspacesCard({ items: registry, activePath: preferredWorkspacePath }))
+          await reply(chatId, formatWorkspacesCard({ items: registry, activePath: preferredWorkspacePath() }))
           return true
         }
         if (/^add\s+/i.test(arg)) {
@@ -599,7 +610,7 @@ export function createBot({
             await reply(chatId, `Укажи номер из /workspace (сейчас ${cached.length}).`)
             return true
           }
-          preferredWorkspacePath = picked.path
+          // Runtime is the single source of truth for the preferred workspace.
           runtime.setPreferredWorkspace?.(picked.path)
           await reply(chatId, `📁 Новые сессии (/new) будут в \`${truncate(picked.path, 200)}\``)
           return true

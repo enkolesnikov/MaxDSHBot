@@ -60,6 +60,30 @@ export function createObserver({ client, config, logger, target, policy, runtime
     return policy?.decide?.(kind) ?? { send: true, notify: true, reason: 'no-policy' }
   }
 
+  /**
+   * Run one notification handler body. index.js keeps a last-resort try/catch
+   * around these handlers (logged at debug): catching here keeps an unexpected
+   * failure visible at warn, logs exactly one line per failure and stops the
+   * outer debug catch from double-reporting it.
+   */
+  function guarded(message, body) {
+    try {
+      return body()
+    } catch (error) {
+      logger?.warn?.(message, error?.message || String(error))
+      return undefined
+    }
+  }
+
+  /**
+   * Run one scheduled check (digest/budget). Failures are real failures, not
+   * expected "service absent" outcomes (those return a value), so each failed
+   * run is reported once at warn instead of being hidden at debug.
+   */
+  function runCheck(label, check) {
+    return check().catch((error) => logger?.warn?.('%s check failed: %s', label, error?.message || String(error)))
+  }
+
   /** Queue one notification while respecting MAX's 2 messages/second limit. */
   function send(kind, text, { dedupeKey, priority } = {}) {
     const decision = decide(kind)
@@ -114,84 +138,94 @@ export function createObserver({ client, config, logger, target, policy, runtime
   }
 
   function onSessionEvent(session, event) {
-    if (!event || typeof event.type !== 'string') return
-    const data = event.data ?? {}
-    if (event.type === 'assistant/message') {
-      noteUsage(data)
-      return
-    }
-    if (event.type !== 'todo/write') return
-    if (!config.todoProgress) return
-    if (!isTopLevelSession(session)) return
-    const items = Array.isArray(data.todos) ? data.todos : []
-    const sessionId = String(session?.id ?? '')
-    const title = runtime?.titleFor?.(session)
-    todos.set(sessionId, { title, todos: items })
-    const completed = items.filter((item) => item?.status === 'completed').length
-    const previous = todoProgress.get(sessionId)
-    if (previous && previous.completed === completed) return
-    todoProgress.set(sessionId, { completed })
-    send('todo', formatTodoCard({ title, todos: items }), {
-      dedupeKey: `todo:${sessionId}:${completed}:${items.length}`,
+    guarded('observer failed: %s', () => {
+      if (!event || typeof event.type !== 'string') return
+      const data = event.data ?? {}
+      if (event.type === 'assistant/message') {
+        noteUsage(data)
+        return
+      }
+      if (event.type !== 'todo/write') return
+      if (!config.todoProgress) return
+      if (!isTopLevelSession(session)) return
+      const items = Array.isArray(data.todos) ? data.todos : []
+      const sessionId = String(session?.id ?? '')
+      const title = runtime?.titleFor?.(session)
+      todos.set(sessionId, { title, todos: items })
+      const completed = items.filter((item) => item?.status === 'completed').length
+      const previous = todoProgress.get(sessionId)
+      if (previous && previous.completed === completed) return
+      todoProgress.set(sessionId, { completed })
+      send('todo', formatTodoCard({ title, todos: items }), {
+        dedupeKey: `todo:${sessionId}:${completed}:${items.length}`,
+      })
     })
   }
 
   function onSubagentEnd(info) {
-    if (!config.notifySubagents || disposed) return
-    const excerpt = extractAssistantText({ content: info?.lastAssistantMessage })
-    send(
-      'subagent',
-      formatSubagentCard({
-        childId: info?.id,
-        stopReason: info?.stopReason,
-        excerpt,
-      }),
-      { dedupeKey: info?.id ? `subagent:${info.id}` : undefined },
-    )
+    guarded('subagent notification failed: %s', () => {
+      if (!config.notifySubagents || disposed) return
+      const excerpt = extractAssistantText({ content: info?.lastAssistantMessage })
+      send(
+        'subagent',
+        formatSubagentCard({
+          childId: info?.id,
+          stopReason: info?.stopReason,
+          excerpt,
+        }),
+        { dedupeKey: info?.id ? `subagent:${info.id}` : undefined },
+      )
+    })
   }
 
   function onAgentError(payload) {
-    if (!config.notifyErrors || disposed) return
-    if (!isTopLevelSession(payload?.agent?.session)) return
-    const errorSession = String(payload?.agent?.session?.id ?? '')
-    send(
-      'error',
-      formatErrorCard({
-        title: runtime?.titleFor?.(payload?.agent?.session),
-        turn: payload?.turn,
-        step: payload?.step,
-        error: payload?.error,
-      }),
-      { dedupeKey: `error:${errorSession}:${payload?.turn ?? ''}:${payload?.step ?? ''}`, priority: PRIORITY.critical },
-    )
+    guarded('error notification failed: %s', () => {
+      if (!config.notifyErrors || disposed) return
+      if (!isTopLevelSession(payload?.agent?.session)) return
+      const errorSession = String(payload?.agent?.session?.id ?? '')
+      send(
+        'error',
+        formatErrorCard({
+          title: runtime?.titleFor?.(payload?.agent?.session),
+          turn: payload?.turn,
+          step: payload?.step,
+          error: payload?.error,
+        }),
+        { dedupeKey: `error:${errorSession}:${payload?.turn ?? ''}:${payload?.step ?? ''}`, priority: PRIORITY.critical },
+      )
+    })
   }
 
   function onGoalChanged(payload) {
-    if (!config.notifyGoals || disposed) return
-    const session = payload?.agent?.session
-    if (!isTopLevelSession(session)) return
-    const change = payload?.change ?? {}
-    const operation = change.operation
-    if (operation === 'edit' || operation === 'clear') return
-    const sessionId = String(session?.id ?? '')
-    if (change.goal) goals.set(sessionId, change.goal)
-    else goals.delete(sessionId)
-    send(
-      'goal',
-      formatGoalCard({
-        title: runtime?.titleFor?.(session),
-        goal: change.goal,
-        operation,
-      }),
-      { dedupeKey: `goal:${sessionId}:${operation}:${change.goal?.id ?? ''}` },
-    )
+    guarded('goal notification failed: %s', () => {
+      if (!config.notifyGoals || disposed) return
+      const session = payload?.agent?.session
+      if (!isTopLevelSession(session)) return
+      const change = payload?.change ?? {}
+      const operation = change.operation
+      if (operation === 'edit' || operation === 'clear') return
+      const sessionId = String(session?.id ?? '')
+      if (change.goal) goals.set(sessionId, change.goal)
+      else goals.delete(sessionId)
+      send(
+        'goal',
+        formatGoalCard({
+          title: runtime?.titleFor?.(session),
+          goal: change.goal,
+          operation,
+        }),
+        { dedupeKey: `goal:${sessionId}:${operation}:${change.goal?.id ?? ''}` },
+      )
+    })
   }
 
   function onJobEvent(event) {
-    if (!config.notifyJobs || disposed) return
-    if (event?.type !== 'settled') return
-    if (event.awaited === true && !config.notifyAwaitedJobs) return
-    send('job', formatJobCard({ job: event.job }), { dedupeKey: event.job?.id ? `job:${event.job.id}` : undefined })
+    guarded('job notification failed: %s', () => {
+      if (!config.notifyJobs || disposed) return
+      if (event?.type !== 'settled') return
+      if (event.awaited === true && !config.notifyAwaitedJobs) return
+      send('job', formatJobCard({ job: event.job }), { dedupeKey: event.job?.id ? `job:${event.job.id}` : undefined })
+    })
   }
 
   async function sendDigest() {
@@ -294,22 +328,18 @@ export function createObserver({ client, config, logger, target, policy, runtime
   function start() {
     if (disposed || digestTimer) return
     digestTimer = setInterval(() => {
-      void maybeSendDigest().catch((error) =>
-        logger?.debug?.('digest check failed: %s', error?.message || String(error)),
-      )
+      void runCheck('digest', maybeSendDigest)
     }, 30_000)
     digestTimer.unref?.()
     budgetTimer = setInterval(() => {
-      void checkBudget().catch((error) =>
-        logger?.debug?.('budget check failed: %s', error?.message || String(error)),
-      )
+      void runCheck('budget', checkBudget)
     }, 5 * 60_000)
     budgetTimer.unref?.()
     budgetInitialTimer = setTimeout(() => {
-      void checkBudget().catch(() => {})
+      void runCheck('budget', checkBudget)
     }, 20_000)
     budgetInitialTimer.unref?.()
-    void maybeSendDigest().catch(() => {})
+    void runCheck('digest', maybeSendDigest)
   }
 
   /**

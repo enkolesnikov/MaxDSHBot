@@ -1,45 +1,11 @@
-import test, { after } from 'node:test'
+import test from 'node:test'
 import assert from 'node:assert/strict'
 import { normalizeConfig } from '../index.js'
 import { createInteractions } from '../lib/interactions.mjs'
 import { resolveAutonomyPolicy } from '../lib/autonomy.mjs'
-// Keep the event loop alive on Node 20/22: the plugin uses unref'd approval
-// timers, and the test runner otherwise cancels pending tests.
-const keepAliveTimer = setInterval(() => {}, 1000)
-after(() => clearInterval(keepAliveTimer))
-
-
-const tick = (ms = 10) => new Promise((resolve) => setTimeout(resolve, ms))
+import { awaitSettled, createFakeClient, tick } from './helpers/fakes.mjs'
 
 const silentLogger = { info() {}, warn() {}, debug() {} }
-
-function createFakeClient() {
-  const sent = []
-  const edits = []
-  const answers = []
-  const uploads = []
-  return {
-    sent,
-    edits,
-    answers,
-    uploads,
-    async uploadMedia({ buffer, filename, type }) {
-      uploads.push({ buffer, filename, type })
-      return { token: `file-token-${uploads.length}` }
-    },
-    async sendMessage(params) {
-      sent.push(params)
-      return { message: { body: { mid: `mid-${sent.length}` } } }
-    },
-    async editMessage(params) {
-      edits.push(params)
-      return { success: true }
-    },
-    async answerCallback(callbackId, body) {
-      answers.push({ callbackId, body })
-    },
-  }
-}
 
 function makeInteractions(overrides = {}) {
   const client = createFakeClient()
@@ -216,7 +182,13 @@ test('an unanswered approval is rejected after the timeout', async () => {
   const audit = { entries: [], approve(entry) { this.entries.push(entry) } }
   const { client, interactions } = makeInteractions({ approvalTimeoutMs: 30, audit })
   const startedAt = Date.now()
-  const outcome = await interactions.handleApproval(approvalRequest(), () => new Promise(() => {}))
+  // The plugin unref's its approval timeout (a pending approval must not keep
+  // the host process alive); the test holds the event loop referenced itself
+  // until that unref'd timer fires, instead of the old file-wide keepalive.
+  const outcome = await awaitSettled(
+    interactions.handleApproval(approvalRequest(), () => new Promise(() => {})),
+    { label: 'MAX approval timeout' },
+  )
   assert.equal(outcome, 'rejected')
   assert.ok(Date.now() - startedAt >= 25)
   assert.match(client.edits.at(-1).text, /таймаут/i)
@@ -312,7 +284,7 @@ test('plan review sends the full plan as a file and approves from a button', asy
   assert.equal(client.uploads[0].filename, 'plan.md')
   assert.match(client.sent[0].text, /Review плана/)
   const attachments = client.sent[0].attachments ?? []
-  assert.ok(attachments.some((item) => item.type === 'file' && item.payload?.token === 'file-token-1'))
+  assert.ok(attachments.some((item) => item.type === 'file' && item.payload?.token === 'token-file'))
   const rows = attachments.find((item) => item.type === 'inline_keyboard')?.payload?.buttons ?? []
   assert.equal(rows.length, 2)
 

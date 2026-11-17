@@ -3,12 +3,6 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-// Keep the event loop alive on Node 20/22: the plugin uses unref'd approval
-// timers, and the test runner otherwise cancels pending tests.
-const keepAliveTimer = setInterval(() => {}, 1000)
-after(() => clearInterval(keepAliveTimer))
-
-
 import {
   DEFAULT_VOICE_MAX_BYTES,
   VOICE_PROMPT_LIMIT,
@@ -17,6 +11,7 @@ import {
   voiceConfigured,
   voicePromptText,
 } from '../lib/voice.mjs'
+import { awaitSettled } from './helpers/fakes.mjs'
 
 const dirPromise = mkdtemp(join(tmpdir(), 'dsh-voice-'))
 after(async () => {
@@ -332,13 +327,18 @@ test('transcribeAudio maps an aborted request to a timeout error', async () => {
       )
     })
 
-  const result = await transcribeAudio({
-    filePath,
-    endpoint: 'https://host/v1',
-    apiKey: API_KEY,
-    timeoutMs: 15,
-    fetchImpl,
-  })
+  // `AbortSignal.timeout()` is unref'd: hold the event loop referenced until it
+  // fires, otherwise the Node 20/22 test runner cancels the pending test.
+  const result = await awaitSettled(
+    transcribeAudio({
+      filePath,
+      endpoint: 'https://host/v1',
+      apiKey: API_KEY,
+      timeoutMs: 15,
+      fetchImpl,
+    }),
+    { label: 'STT timeout' },
+  )
   assert.equal(result.ok, false)
   assert.match(result.error, /Таймаут/)
 })

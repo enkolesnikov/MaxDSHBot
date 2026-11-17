@@ -2,37 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { normalizeConfig } from '../index.js'
 import { createProgress } from '../lib/progress.mjs'
-
-const tick = (ms = 10) => new Promise((resolve) => setTimeout(resolve, ms))
-
-function createFakeClient() {
-  const sent = []
-  const edits = []
-  const deleted = []
-  const actions = []
-  return {
-    sent,
-    edits,
-    deleted,
-    actions,
-    async sendMessage(params) {
-      sent.push(params)
-      return { message: { body: { mid: `mid-${sent.length}` } } }
-    },
-    async editMessage(params) {
-      edits.push(params)
-      return { success: true }
-    },
-    async deleteMessage(messageId) {
-      deleted.push(messageId)
-      return { success: true }
-    },
-    async sendAction(chatId, action) {
-      actions.push({ chatId, action })
-      return { success: true }
-    },
-  }
-}
+import { createFakeClient, tick } from './helpers/fakes.mjs'
 
 function makeProgress(overrides = {}, target = { chatId: '123456789' }) {
   const client = createFakeClient()

@@ -1,7 +1,7 @@
 # P2 backlog (аудит 17.11.2026)
 
 Закрыто в 1.8.0: все P1. Закрыто в 1.9.0: пункты ниже, помеченные ✅.
-Остаток — с пометкой ⏳; приоритет сверху вниз.
+Все 28 пунктов P2 закрыты в 1.8–1.10. Файл оставлен как история решений.
 
 ## Дубли и структура
 
@@ -11,8 +11,8 @@
    `interactions`): одна функция, сохранить вариант с `Number.isFinite`.
 3. `formatBytes` ✅ — 2 реализации (`incoming`, `workspace-tools`), разный вывод
    >1 GiB; `folderOf`/`shortCwd`, `clock`/`formatClock` — свести в `lib/format.mjs`.
-4. `preferredWorkspacePath` ⏳ — два хранилища (`index`, `bot`).
-5. `index.js` (1870 строк) ⏳: вынести webhook/route lifecycle и `deliver`
+4. `preferredWorkspacePath` ✅ — два хранилища (`index`, `bot`).
+5. `index.js` (1870 строк) ✅: вынести webhook/route lifecycle и `deliver`
    в `lib/webhook-runtime.mjs` / `lib/deliver.mjs` — только после teardown-тестов.
 
 ## Наблюдаемость
@@ -22,7 +22,7 @@
 7. `lastError` ✅/`lastErrorAt` не очищаются; показывать возраст ошибки.
 8. Дайджест привязан ✅ к точной минуте (`observer.mjs:228`): перейти на
    «не раньше», дедуп через `digest:<day>`.
-9. Сбои digest ⏳/budget/subscription логируются как `debug` — поднять до `warn`.
+9. Сбои digest ✅/budget/subscription логируются как `debug` — поднять до `warn`.
 10. Нестойкие счётчики ✅ outbox персистятся в state — перестать.
 
 ## Кэши и лимиты
@@ -49,20 +49,20 @@
 19. GET настроек ✅ отдаёт не-allowlisted поля (`voiceEndpoint`, `voiceModel`,
     `autonomyEnabled`) — фильтровать по `SETTINGS_KEYS`.
 20. Три парсера ✅ булевых с разной семантикой (`settings`, `config`, `voice`).
-21. Мёртвый код ⏳: `coerceHttpsUrl`, ранг `inherit`, `MAX_MESSAGES_PER_SECOND`,
+21. Мёртвый код ✅: `coerceHttpsUrl`, ранг `inherit`, `MAX_MESSAGES_PER_SECOND`,
     `bundledCaPath`, импорт `extname`.
-22. `recursive mkdir` ⏳ без промежуточных 0700 (`settings`, `incoming`,
+22. `recursive mkdir` ✅ без промежуточных 0700 (`settings`, `incoming`,
     `transport`).
 
 ## Тесты/инфраструктура
 
 23. `createFakeCtx` ✅ без `effect` — teardown-ветка не исполняется; добавить и
     тесты HMR-замены, in-flight после dispose, пропуска минуты дайджеста.
-24. `createFakeClient` ⏳/`tick` продублированы в 6 файлах — вынести в
+24. `createFakeClient` ✅/`tick` продублированы в 6 файлах — вынести в
     `test/helpers/fakes.mjs`.
 25. 21 из 38 ✅ транспортных тестов тихо skip без openssl — либо crypto-сертификат,
     либо fail в CI.
 26. `check` перечисляет ✅ 32 `lib/*.mjs` вручную — заменить на glob.
-27. Keepalive ⏳-интервалы в interactions/voice маскируют unref-таймеры — перейти
+27. Keepalive ✅-интервалы в interactions/voice маскируют unref-таймеры — перейти
     на виртуальные таймеры.
-28. Нет теста «CDN ⏳ без Authorization» и реального cold-start outbox.
+28. Нет теста «CDN ✅ без Authorization» и реального cold-start outbox.

@@ -1,14 +1,28 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import https from 'node:https'
 import { createMaxClient, isTrustedMaxUrl, normalizeMaxApiBaseUrl, splitText, MAX_RESPONSE_BYTES, MAX_TEXT_LIMIT } from '../lib/transport.mjs'
 import { loadTlsCredentials, readBody, sendJson, startHttpsServer } from './helpers/tls-server.mjs'
 
 const TOKEN = 'bot-secret-token'
 const tls = await loadTlsCredentials()
-const skipNoTls = tls ? false : 'openssl is not available for the local HTTPS test server'
+// Extra certificate for the host-mapped CDN contract test: the trusted CDN name
+// is resolved to the same loopback server, so TLS still verifies that hostname.
+const cdnTls = await loadTlsCredentials({ dnsNames: ['cdn.max.ru'] })
+const skipNoTls = tls && cdnTls ? false : 'openssl is not available for the local HTTPS test server'
 
 function tempDir(t) {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-max-transport-'))
@@ -773,6 +787,89 @@ test('downloadToFile follows trusted redirects and writes the file atomically wi
   assert.deepEqual(seen.map((entry) => entry.url), ['/file', '/final'])
   // The API host is the one host that receives the long-lived bot token.
   assert.ok(seen.every((entry) => entry.authorization === TOKEN))
+})
+
+test('downloadToFile sends Authorization to the API host but never to a trusted CDN host', { skip: skipNoTls }, async (t) => {
+  // The bot token is the plugin's only long-lived credential and must go to the
+  // configured API host only; pre-signed MAX CDN URLs (cdn.max.ru) are trusted
+  // for downloads but must be fetched without it.
+  //
+  // A hosts-file entry for cdn.max.ru is not portable in a test suite, and the
+  // transport client exposes no request/lookup seam, so this test redirects only
+  // the DNS step through the documented `https.globalAgent` override (the Agent
+  // `lookup` option). TLS remains a real handshake that must verify cdn.max.ru
+  // against the test CA, and the same loopback server plays both roles.
+  const seen = []
+  const server = await startHttpsServer(async (req, res) => {
+    seen.push({ host: String(req.headers.host ?? ''), url: req.url, authorization: req.headers.authorization })
+    res.writeHead(200, { 'content-type': 'application/octet-stream' })
+    res.end(`payload:${req.url}`)
+  }, cdnTls)
+  t.after(() => server.close())
+
+  const originalAgent = https.globalAgent
+  const dnsAgent = new https.Agent({
+    keepAlive: false,
+    // Modern Node asks for `all: true`; older call sites expect (address, family).
+    lookup: (hostname, options, callback) => {
+      if (options?.all) callback(null, [{ address: '127.0.0.1', family: 4 }])
+      else callback(null, '127.0.0.1', 4)
+    },
+  })
+  https.globalAgent = dnsAgent
+  t.after(() => {
+    https.globalAgent = originalAgent
+    dnsAgent.destroy()
+  })
+
+  // The certificate covers both cdn.max.ru and the loopback API host.
+  const client = testClient(server, { ca: cdnTls.cert, timeoutMs: 3000 })
+  const dir = tempDir(t)
+
+  const cdn = await client.downloadToFile(`https://cdn.max.ru:${server.port}/cdn.png`, join(dir, 'cdn.png'))
+  assert.equal(cdn.bytes, 'payload:/cdn.png'.length)
+  assert.equal(readFileSync(join(dir, 'cdn.png'), 'utf8'), 'payload:/cdn.png')
+
+  // Control: the same route acting as the API host does receive the token.
+  await client.downloadToFile(`${server.url}/api.png`, join(dir, 'api.png'))
+
+  assert.equal(seen.length, 2)
+  assert.equal(seen[0].host, `cdn.max.ru:${server.port}`)
+  assert.equal(seen[0].authorization, undefined, 'a trusted CDN download must not carry the bot token')
+  assert.equal(seen[1].host, `localhost:${server.port}`)
+  assert.equal(seen[1].authorization, TOKEN)
+})
+
+test('downloadToFile creates 0700 intermediate directories and tightens an existing broad destination dir', { skip: skipNoTls }, async (t) => {
+  const payload = Buffer.from('nested-bytes')
+  const server = await startServer(t, async (req, res) => {
+    res.writeHead(200, { 'content-type': 'application/octet-stream' })
+    res.end(payload)
+  })
+  const client = testClient(server)
+  const dir = tempDir(t)
+
+  const deepDest = join(dir, 'level-a', 'level-b', 'level-c', 'deep.bin')
+  const deep = await client.downloadToFile(`${server.url}/deep`, deepDest)
+  assert.equal(deep.path, deepDest)
+  assert.deepEqual(readFileSync(deepDest), payload)
+  for (const path of [
+    join(dir, 'level-a'),
+    join(dir, 'level-a', 'level-b'),
+    join(dir, 'level-a', 'level-b', 'level-c'),
+  ]) {
+    assert.equal(statSync(path).mode & 0o777, 0o700, `${path} must be 0700`)
+  }
+  assert.equal(statSync(deepDest).mode & 0o777, 0o600)
+
+  // A destination directory created earlier with a broader mode is tightened.
+  const broad = join(dir, 'broad-destination')
+  mkdirSync(broad)
+  chmodSync(broad, 0o755)
+  const flatDest = join(broad, 'flat.bin')
+  await client.downloadToFile(`${server.url}/flat`, flatDest)
+  assert.equal(statSync(broad).mode & 0o777, 0o700, 'existing destination directory must be tightened')
+  assert.equal(statSync(flatDest).mode & 0o777, 0o600)
 })
 
 test('downloadToFile surfaces HTTP failures and redirect limits', { skip: skipNoTls }, async (t) => {

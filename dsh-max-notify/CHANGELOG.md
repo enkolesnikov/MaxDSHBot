@@ -4,6 +4,40 @@ All notable changes to `dsh-max-notify` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.0] — 2026-11-18
+
+Закрытие остатка P2: модульная структура и тест-инфраструктура.
+
+### Changed
+
+- **`index.js` 2018 → 1711 строк:** webhook/route lifecycle вынесен в
+  `lib/webhook-runtime.mjs` (342 строки, `createWebhookRuntime`), final-delivery
+  pipeline — в `lib/deliver.mjs` (165 строк, `createDeliver`). Поведение,
+  rc.2-порядок `ctx.inject`, 15-секундный fallback и teardown сохранены.
+- **Одно хранилище workspace:** `preferredWorkspacePath` живёт только в
+  `index.js`; `bot.mjs` читает через `runtime.getPreferredWorkspace()` и пишет
+  через `setPreferredWorkspace()`.
+- **`lib/fs-safe.mjs`:** `ensurePrivateDir()` создаёт все промежуточные каталоги
+  с 0700 (не только лист), `writePrivateFile()` — файл 0600; используются в
+  settings/incoming/transport/audit/heartbeat.
+- **Логи:** сбои digest/budget/notification-хендлеров теперь `warn`, а не
+  `debug`/тихий catch; ожидаемые «сервис отсутствует» остаются debug.
+- **Тесты:** keepalive-хаки удалены (промисы ждутся детерминированно через
+  `awaitSettled`); `createFakeClient`/`tick` мигрированы на общий
+  `test/helpers/fakes.mjs` в interactions/progress/deliverables; CDN-контракт:
+  `downloadToFile` на trusted CDN не шлёт `Authorization`, на API — шлёт.
+- **`webhookRemoveOnStop`:** мёртвая ветка (disposer очищал `active` раньше
+  проверки) исправлена через `everRegistered`; добавлен регрессионный тест.
+- **`lib/audit.mjs`:** каталог 0700 вместо umask.
+- 515 тестов на Node 20/22/24, `REQUIRE_TLS_TESTS=1` без skip.
+
+### Deferred
+
+Нет открытых P2-пунктов; `docs/p2-backlog.md` закрыт. Возможные future-темы:
+cold-start тест с рестартом `dsh-web`, branch protection на GitHub,
+secret_scanning_non_provider_patterns, полная миграция оставшихся тестовых
+фейков (bot/index/observer).
+
 ## [1.9.0] — 2026-11-17
 
 Закрытие P2-техдолга из аудита 17.11.

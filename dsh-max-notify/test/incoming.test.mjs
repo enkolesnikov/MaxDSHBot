@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createIncoming, formatBytes, safeFileName } from '../lib/incoming.mjs'
@@ -113,6 +113,34 @@ test('inboxDir supports %cwd% and relative paths', async () => {
   const { incoming } = makeIncoming({ config: { inboxDir: '%cwd%/custom-inbox' } })
   const result = await incoming.save([fileAttachment()], 'session-1')
   assert.ok(result.dir.includes('custom-inbox'))
+})
+
+test('inbox and its newly created intermediate directories are 0700', async () => {
+  const { incoming } = makeIncoming({ config: { inboxDir: '%cwd%/deep/nested/custom-inbox' } })
+  const result = await incoming.save([fileAttachment()], 'session-1')
+  for (const path of [join(workspace, 'deep'), join(workspace, 'deep', 'nested'), result.dir]) {
+    assert.equal(statSync(path).mode & 0o777, 0o700, `${path} must be 0700`)
+  }
+})
+
+test('inbox tightens a pre-existing wider directory to 0700', async () => {
+  const broad = join(workspace, 'broad-inbox')
+  mkdirSync(broad)
+  chmodSync(broad, 0o755)
+  const { incoming } = makeIncoming({ config: { inboxDir: broad } })
+  const result = await incoming.save([fileAttachment()], 'session-1')
+  assert.equal(result.dir, broad)
+  assert.equal(statSync(broad).mode & 0o777, 0o700, 'existing inbox directory must be tightened')
+})
+
+test('unusable inbox path is reported without throwing', async () => {
+  const blocker = join(workspace, 'inbox-blocker')
+  writeFileSync(blocker, 'not a directory')
+  const { incoming } = makeIncoming({ config: { inboxDir: join(blocker, 'inbox') } })
+  const result = await incoming.save([fileAttachment()], 'session-1')
+  assert.deepEqual(result.saved, [])
+  assert.equal(result.errors.length, 1)
+  assert.match(result.errors[0], /не удалось создать папку/)
 })
 
 test('formatBytes formats sizes', () => {

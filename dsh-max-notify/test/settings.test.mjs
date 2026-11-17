@@ -1,9 +1,25 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import {
+  PRIVATE_DIR_MODE,
+  PRIVATE_FILE_MODE,
+  ensurePrivateDir,
+  writePrivateFile,
+} from '../lib/fs-safe.mjs'
 import {
   SETTINGS_DEFAULTS,
   SETTINGS_JSON_PATH,
@@ -22,6 +38,108 @@ function tempDir(t) {
   t.after(() => rmSync(directory, { recursive: true, force: true }))
   return directory
 }
+
+// ---------------------------------------------------------------------------
+// lib/fs-safe.mjs — private directories/files
+// ---------------------------------------------------------------------------
+
+/** Numeric permission bits of a path (independent of the file type bits). */
+function modeOf(path) {
+  return statSync(path).mode & 0o777
+}
+
+test('ensurePrivateDir creates every missing component with mode 0700', (t) => {
+  const directory = tempDir(t)
+  const target = join(directory, 'a', 'b', 'c')
+
+  assert.equal(ensurePrivateDir(target), target)
+  for (const path of [join(directory, 'a'), join(directory, 'a', 'b'), target]) {
+    assert.equal(statSync(path).isDirectory(), true, `${path} must be a directory`)
+    assert.equal(modeOf(path), 0o700, `${path} must be 0700`)
+  }
+})
+
+test('ensurePrivateDir tightens an existing broader directory and is idempotent', (t) => {
+  const directory = tempDir(t)
+  const target = join(directory, 'inbox')
+  mkdirSync(target, { mode: 0o777 })
+  chmodSync(target, 0o777) // umask cannot hide the broad mode we want to fix
+
+  assert.equal(ensurePrivateDir(target), target)
+  assert.equal(modeOf(target), 0o700)
+
+  assert.equal(ensurePrivateDir(target), target)
+  assert.equal(modeOf(target), 0o700, 'a second call must not fail or widen the mode')
+})
+
+test('ensurePrivateDir leaves pre-existing ancestors above the target untouched', (t) => {
+  const directory = tempDir(t)
+  const ancestor = join(directory, 'project')
+  mkdirSync(ancestor)
+  chmodSync(ancestor, 0o755)
+
+  ensurePrivateDir(join(ancestor, 'data', 'inbox'))
+  assert.equal(modeOf(join(ancestor, 'data')), 0o700)
+  assert.equal(modeOf(join(ancestor, 'data', 'inbox')), 0o700)
+  // The chain may contain /tmp, a home directory or a repository checkout:
+  // chmodding pre-existing parents while saving plugin data would be destructive.
+  assert.equal(modeOf(ancestor), 0o755, 'pre-existing parent must keep its mode')
+})
+
+test('ensurePrivateDir applies exact 0700 even under an aggressive umask', (t) => {
+  const directory = tempDir(t)
+  const previous = process.umask(0o777)
+  let target
+  try {
+    target = ensurePrivateDir(join(directory, 'umask', 'deep', 'leaf'))
+  } finally {
+    process.umask(previous)
+  }
+  for (const path of [join(directory, 'umask'), join(directory, 'umask', 'deep'), target]) {
+    assert.equal(modeOf(path), 0o700, `${path} must be chmodded after mkdir`)
+  }
+})
+
+test('ensurePrivateDir validates paths and refuses non-directory components', (t) => {
+  const directory = tempDir(t)
+  for (const invalid of ['', '   ', undefined, null, 42, {}]) {
+    assert.throws(() => ensurePrivateDir(invalid), TypeError)
+  }
+
+  const blocker = join(directory, 'blocker')
+  writeFileSync(blocker, 'not a directory')
+  const before = modeOf(blocker)
+  for (const target of [blocker, join(blocker, 'nested')]) {
+    assert.throws(
+      () => ensurePrivateDir(target),
+      (error) => error.code === 'ENOTDIR' || /not a directory/.test(error.message),
+      `ensurePrivateDir(${target}) must fail`,
+    )
+  }
+  assert.equal(modeOf(blocker), before, 'the regular file must never be chmodded')
+})
+
+test('writePrivateFile creates a 0700 parent and a 0600 file', (t) => {
+  const directory = tempDir(t)
+  const file = join(directory, 'nested', 'deeper', 'snapshot.json')
+
+  assert.equal(PRIVATE_DIR_MODE, 0o700)
+  assert.equal(PRIVATE_FILE_MODE, 0o600)
+  assert.equal(writePrivateFile(file, '{"ok":true}\n'), file)
+  assert.equal(readFileSync(file, 'utf8'), '{"ok":true}\n')
+  assert.equal(modeOf(file), 0o600)
+  for (const path of [join(directory, 'nested'), join(directory, 'nested', 'deeper')]) {
+    assert.equal(modeOf(path), 0o700, `${path} must be 0700`)
+  }
+
+  // An existing file created by an older release with 0644 is tightened too.
+  chmodSync(file, 0o644)
+  writePrivateFile(file, 'again')
+  assert.equal(readFileSync(file, 'utf8'), 'again')
+  assert.equal(modeOf(file), 0o600)
+
+  assert.throws(() => writePrivateFile('', 'x'), TypeError)
+})
 
 function fakeRequest({ method = 'GET', url = '/', body, headers = {} } = {}) {
   const req = new EventEmitter()
@@ -331,6 +449,34 @@ test('saveSettings rejects invalid values without touching the existing file', (
   assert.throws(() => saveSettings(file, { tableMaxFiles: 99 }), /invalid settings/)
   assert.throws(() => saveSettings(file, null), /invalid settings/)
   assert.deepEqual(loadSettings(file), { mode: 'all' })
+})
+
+test('saveSettings creates every missing overlay directory with 0700', (t) => {
+  const directory = tempDir(t)
+  const file = join(directory, 'home', 'dsh', 'max-notify', 'config.json')
+
+  saveSettings(file, { mode: 'mute' })
+  for (const path of [
+    join(directory, 'home'),
+    join(directory, 'home', 'dsh'),
+    join(directory, 'home', 'dsh', 'max-notify'),
+  ]) {
+    assert.equal(statSync(path).mode & 0o777, 0o700, `${path} must be 0700`)
+  }
+  assert.equal(statSync(file).mode & 0o777, 0o600)
+})
+
+test('saveSettings tightens a pre-existing wider overlay directory', (t) => {
+  const directory = tempDir(t)
+  const overlay = join(directory, 'max-notify')
+  mkdirSync(overlay)
+  chmodSync(overlay, 0o755)
+  const file = join(overlay, 'config.json')
+
+  saveSettings(file, { notify: false })
+  assert.equal(statSync(overlay).mode & 0o777, 0o700, 'overlay directory must be tightened')
+  assert.equal(statSync(file).mode & 0o777, 0o600)
+  assert.deepEqual(loadSettings(file), { notify: false })
 })
 
 test('legacy createSettingsApi stays compatible with the DSH client integration', async (t) => {

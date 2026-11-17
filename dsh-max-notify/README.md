@@ -77,17 +77,23 @@ Published on npm: https://www.npmjs.com/package/dsh-max-notify
   budget alerts (80/100 by default) fire once per period and survive reloads.
   `costMeterFile`, `budgetAlertEnabled`, `budgetAlertThresholds` configure it.
 
+## Tech-debt 1.10
+
+- Full P2 closure: index 2018→1711, webhook-runtime/deliver/fs-safe modules,
+  single workspace store, 0700 dirs, warn logs, shared test fakes, CDN test.
+- 515 tests on Node 20/22/24.
+
 ## Tech-debt 1.9
 
 - P2 audit 17.11: dedupe, LRU caches, observability, limiter, transport,
   config validation, full dryRun, teardown tests, CI TLS requirement.
-- 490 tests on Node 20/22/24.
+- 515 tests on Node 20/22/24.
 
 ## Tech-debt 1.8
 
 - P1 audit 17.11: webhook byte caps + redaction, deliverable path boundary,
   strict autonomy matching, outbox race, lifecycle/HMR, CI leak guard.
-- 490 tests on Node 20/22/24.
+- 515 tests on Node 20/22/24.
 
 ## Tech-debt 1.7
 
@@ -175,7 +181,7 @@ for per-run `new` sessions, the title plus a recent delivery receipt.
 | `lib/autonomy.mjs` | schedule autonomy policies/matching |
 | `lib/settings.mjs` | GUI settings validation/overlay/API |
 | `client/client.js` | hand-written settings page bundle |
-| `test/*.test.mjs` | `node --test` (490 unit tests) |
+| `test/*.test.mjs` | `node --test` (515 unit tests) |
 
 ## Config
 

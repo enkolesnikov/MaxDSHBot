@@ -18,7 +18,7 @@
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/enkolesnikov/MaxDSHBot?style=flat-square"/></a>
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img alt="DSH" src="https://img.shields.io/badge/DSH-0.2.x-6C5CE7?style=flat-square"/></a>
   <a href="https://max.ru"><img alt="MAX" src="https://img.shields.io/badge/MAX-messenger-8B5CF6?style=flat-square"/></a>
-  <img alt="Tests" src="https://img.shields.io/badge/tests-490%20passed-2ecc71?style=flat-square"/>
+  <img alt="Tests" src="https://img.shields.io/badge/tests-515%20passed-2ecc71?style=flat-square"/>
   <a href="https://nodejs.org"><img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A520-339933?style=flat-square&logo=nodedotjs&logoColor=white"/></a>
   <img alt="Runtime dependencies" src="https://img.shields.io/badge/runtime%20deps-0-brightgreen?style=flat-square"/>
   <a href="https://github.com/enkolesnikov/MaxDSHBot/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/enkolesnikov/MaxDSHBot?style=flat-square"/></a>
@@ -183,17 +183,23 @@ MAX будет сам присылать обновления на публич�
 long polling и пишет warning в лог. Официальная документация MAX:
 [webhooks](https://dev.max.ru/docs-api/methods/POST/subscriptions).
 
+## Техдолг 1.10
+
+- P2 закрыт полностью: `index.js` 2018→1711, модули webhook-runtime/deliver/fs-safe,
+  единое хранилище workspace, 0700-каталоги, warn-логи, тест-фейки, CDN-тест.
+- 515 тестов на Node 20/22/24.
+
 ## Техдолг 1.9
 
 - P2 аудита 17.11: дедупликация, LRU-кэши, наблюдаемость, лимитер,
   транспорт, конфиг/валидация, dryRun, teardown-тесты, CI TLS-контроль.
-- 490 тестов на Node 20/22/24.
+- 515 тестов на Node 20/22/24.
 
 ## Техдолг 1.8
 
 - P1 аудита 17.11: webhook-лимиты и redaction, граница путей deliverables,
   строгий матчинг автономии, гонка outbox, lifecycle/HMR, CI-guard утечек.
-- 490 тестов на Node 20/22/24.
+- 515 тестов на Node 20/22/24.
 
 ## Техдолг 1.7
 
@@ -201,7 +207,7 @@ long polling и пишет warning в лог. Официальная докум�
 - Удалена мёртвая HTML-страница настроек (~360 строк).
 - State/outbox: future-schema guard, fsync, corrupt-бэкапы, 0600/0700.
 - CI: Node 20/22/24, actions pinned by SHA; транспортные контрактные тесты
-  (38) на локальном HTTPS; всего 490 тестов.
+  (38) на локальном HTTPS; всего 515 тестов.
 
 ## Аудит 1.6: rc.2, безопасность, надёжность
 
@@ -392,7 +398,7 @@ long polling и пишет warning в лог. Официальная докум�
 | `client/client.js` | клиентская страница настроек (без сборки) |
 | `lib/observer.mjs`, `lib/policy.mjs` | события, дайджест, режимы, алерты бюджета |
 | `certs/ca-chain.pem` | Russian Trusted Sub CA + Root CA |
-| `test/` | 490 тестов (`node --test`) |
+| `test/` | 515 тестов (`node --test`) |
 | `tools/` | `pair.mjs`, `send-test.mjs`, `smoke.mjs`, `webhook.mjs` |
 
 </details>
@@ -416,7 +422,7 @@ long polling и пишет warning в лог. Официальная докум�
 ## Проверка
 
 ```bash
-cd dsh-max-notify && npm test          # 490 unit tests
+cd dsh-max-notify && npm test          # 515 unit tests
 npm run check                          # синтаксис всех модулей
 node tools/smoke.mjs --env ../.env     # read-only: GET /me, state, outbox
 node tools/send-test.mjs "проверка"    # реальная отправка

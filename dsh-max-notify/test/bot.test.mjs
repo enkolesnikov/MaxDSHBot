@@ -142,7 +142,7 @@ function makeBot(overrides = {}) {
   const bot = createBot({
     client,
     config: config(overrides.config),
-    logger: { info() {}, warn() {}, debug() {} },
+    logger: overrides.logger ?? { info() {}, warn() {}, debug() {} },
     state,
     interactions: overrides.interactions,
     runtime,
@@ -618,7 +618,12 @@ function v07Runtime(extra = {}) {
       { id: 'w2', path: '/work/lib', title: 'lib' },
     ],
     createWorkspace: async (path) => ({ ok: true, path, title: path.split('/').pop() }),
-    setPreferredWorkspace: (path) => calls.pinned.push({ preferred: path }),
+    // Single store owned by the runtime: the bot reads it lazily, never copies.
+    setPreferredWorkspace: (path) => {
+      calls.preferredWorkspace = path
+      calls.pinned.push({ preferred: path })
+    },
+    getPreferredWorkspace: () => calls.preferredWorkspace,
     getApprovalPolicy: async () => ({ ok: true, policy: 'ask', override: false }),
     setApprovalPolicy: async (sessionId, policy) => {
       calls.selected.push({ policySet: policy })
@@ -715,10 +720,82 @@ test('/workspace lists folders, selects one and adds a new one', async () => {
   const { bot, client } = makeBot({ runtime })
   await bot.handleUpdate(messageUpdate({ text: '/workspace' }))
   assert.match(client.sent[0].text, /Рабочие папки/)
+  assert.doesNotMatch(client.sent[0].text, /▶️/)
   await bot.handleUpdate(messageUpdate({ text: '/workspace 2' }))
   assert.deepEqual(calls.pinned.at(-1), { preferred: '/work/lib' })
+  assert.match(client.sent[1].text, /\/work\/lib/)
+  // The active marker comes from the runtime getter, not from a bot-local copy.
+  await bot.handleUpdate(messageUpdate({ text: '/workspace list' }))
+  const libLine = client.sent[2].text.split('\n').find((line) => line.includes('/work/lib'))
+  const appLine = client.sent[2].text.split('\n').find((line) => line.includes('/work/app'))
+  assert.match(libLine, / ▶️$/)
+  assert.doesNotMatch(appLine, /▶️/)
   await bot.handleUpdate(messageUpdate({ text: '/workspace add /work/new' }))
-  assert.match(client.sent[2].text, /\/work\/new/)
+  assert.match(client.sent[3].text, /\/work\/new/)
+})
+
+test('/workspace reads the runtime getter on every render and tolerates a throwing getter', async () => {
+  // A runtime that ignores the setter proves the list reflects the getter only.
+  const ignoring = v07Runtime()
+  ignoring.runtime.getPreferredWorkspace = () => undefined
+  ignoring.runtime.setPreferredWorkspace = () => {}
+  const first = makeBot({ runtime: ignoring.runtime })
+  await first.bot.handleUpdate(messageUpdate({ text: '/workspace 2' }))
+  assert.match(first.client.sent[0].text, /\/work\/lib/)
+  await first.bot.handleUpdate(messageUpdate({ text: '/workspace' }))
+  assert.doesNotMatch(first.client.sent[1].text, /▶️/)
+
+  // A throwing getter must not break `/workspace`.
+  const broken = v07Runtime()
+  broken.runtime.getPreferredWorkspace = () => {
+    throw new Error('boom')
+  }
+  const second = makeBot({ runtime: broken.runtime })
+  await second.bot.handleUpdate(messageUpdate({ text: '/workspace' }))
+  assert.match(second.client.sent[0].text, /Рабочие папки/)
+
+  // The marker follows the runtime value between renders.
+  const dynamic = v07Runtime()
+  let path = '/work/app'
+  dynamic.runtime.getPreferredWorkspace = () => path
+  const third = makeBot({ runtime: dynamic.runtime })
+  await third.bot.handleUpdate(messageUpdate({ text: '/workspace' }))
+  assert.match(third.client.sent[0].text, /\/work\/app` ▶️/)
+  path = '/work/lib'
+  await third.bot.handleUpdate(messageUpdate({ text: '/workspace' }))
+  assert.match(third.client.sent[1].text, /\/work\/lib` ▶️/)
+})
+
+test('/workspace works with a partial runtime fake without workspace getter/setter', async () => {
+  const { runtime } = v07Runtime()
+  delete runtime.getPreferredWorkspace
+  delete runtime.setPreferredWorkspace
+  delete runtime.createWorkspace
+  const { bot, client } = makeBot({ runtime })
+  await bot.handleUpdate(messageUpdate({ text: '/workspace' }))
+  assert.match(client.sent[0].text, /Рабочие папки/)
+  assert.doesNotMatch(client.sent[0].text, /▶️/)
+  await bot.handleUpdate(messageUpdate({ text: '/workspace 1' }))
+  assert.match(client.sent[1].text, /\/work\/app/)
+  await bot.handleUpdate(messageUpdate({ text: '/workspace' }))
+  assert.match(client.sent[2].text, /Рабочие папки/)
+})
+
+test('a failed command-menu registration stays at debug (non-critical capability)', async () => {
+  const logs = []
+  const logger = {
+    info: (...args) => logs.push(['info', ...args]),
+    warn: (...args) => logs.push(['warn', ...args]),
+    debug: (...args) => logs.push(['debug', ...args]),
+  }
+  const { bot, client } = makeBot({ logger })
+  client.setCommands = async () => {
+    throw new Error('setCommands is not supported')
+  }
+  await bot.registerCommands()
+  assert.deepEqual(logs.map(([level]) => level), ['debug'])
+  assert.match(String(logs[0][1]), /cannot register MAX bot commands/)
+  assert.equal(client.commands.length, 0)
 })
 
 test('/approve requires a confirmation before changing the policy', async () => {

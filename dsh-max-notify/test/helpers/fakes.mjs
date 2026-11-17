@@ -30,6 +30,50 @@ export async function waitFor(predicate, { timeoutMs = 2000, intervalMs = 10, la
 }
 
 /**
+ * Await `promise` while keeping the event loop referenced until it settles.
+ *
+ * The plugin deliberately calls `unref()` on its approval timeout timer (a
+ * forgotten approval card must not keep the host process alive), and
+ * `AbortSignal.timeout()` is unref'd by Node as well. On Node 20/22 a test that
+ * awaits a promise settling only through such a timer lets the event loop drain,
+ * and the test runner cancels the still-pending test
+ * (`Promise resolution is still pending but the event loop has already resolved`).
+ * Polling with referenced `tick()` timers keeps the test process alive for the
+ * exact window the test needs, instead of a file-wide keepalive hack.
+ *
+ * @template T
+ * @param {Promise<T>|T} promise
+ * @param {{timeoutMs?: number, intervalMs?: number, label?: string}} [options]
+ * @returns {Promise<T>}
+ */
+export async function awaitSettled(promise, { timeoutMs = 5000, intervalMs = 10, label = 'promise' } = {}) {
+  let state = 'pending'
+  let value
+  let failure
+  const tracked = Promise.resolve(promise).then(
+    (result) => {
+      value = result
+      state = 'fulfilled'
+    },
+    (error) => {
+      failure = error
+      state = 'rejected'
+    },
+  )
+  const deadline = Date.now() + timeoutMs
+  while (state === 'pending') {
+    if (Date.now() >= deadline) throw new Error(`timed out after ${timeoutMs}ms waiting for ${label} to settle`)
+    await tick(intervalMs)
+  }
+  await tracked
+  if (state === 'rejected') throw failure
+  return value
+}
+
+/** Default `uploadTypeFor`: image extensions are images, everything else is a file. */
+const defaultUploadTypeFor = (filePath) => (/\.(png|jpe?g|gif|webp)$/i.test(String(filePath)) ? 'image' : 'file')
+
+/**
  * Minimal Cordis-like context.
  *
  * `effect(fn)` runs `fn` immediately and remembers the disposer it returns,
@@ -88,8 +132,21 @@ export function createFakeCtx({ services = {} } = {}) {
 }
 
 /**
- * MAX transport double. Every method resolves; sends/uploads are recorded.
- * Pass `overrides` to replace individual methods (e.g. a failing `getChat`).
+ * MAX transport double. Every method resolves; sends/uploads/edits/answers are
+ * recorded in the arrays below so each test can assert in its own vocabulary.
+ *
+ * Recording arrays:
+ *  - `sent` (alias `sends`): params of every `sendMessage`/`sendText`/`sendWithAttachments`;
+ *  - `uploads`: params of every `uploadMedia`;
+ *  - `edits`: params of every `editMessage`;
+ *  - `answers`: `{callbackId, body}` of every `answerCallback`;
+ *  - `deleted`: message ids passed to `deleteMessage`;
+ *  - `actions`: `{chatId, action}` of every positional `sendAction(chatId, action)`;
+ *  - `calls`: flat `[name, ...args]` log for the remaining endpoints.
+ *
+ * Pass `overrides` to replace individual methods (e.g. a failing `uploadMedia`);
+ * because those overrides are copied onto the returned client, replacing a method
+ * later (`client.uploadMedia = ...`) keeps working as well.
  *
  * @param {Record<string, unknown>} [overrides]
  */
@@ -97,11 +154,20 @@ export function createFakeClient(overrides = {}) {
   const sent = []
   const uploads = []
   const calls = []
-  const record = (name, args) => calls.push([name, ...args])
+  const edits = []
+  const answers = []
+  const deleted = []
+  const actions = []
+  const record = (name, ...args) => calls.push([name, ...args])
   const client = {
     sent,
+    sends: sent,
     uploads,
     calls,
+    edits,
+    answers,
+    deleted,
+    actions,
     getMe: async () => {
       record('getMe')
       return { user_id: 7001, username: 'fake_bot', name: 'Fake Bot' }
@@ -134,26 +200,33 @@ export function createFakeClient(overrides = {}) {
     sendText: async (params) => client.sendMessage(params),
     sendWithAttachments: async (params) => client.sendMessage(params),
     editMessage: async (params) => {
+      edits.push(params)
       record('editMessage', params)
       return { ok: true }
     },
     deleteMessage: async (messageId) => {
+      deleted.push(messageId)
       record('deleteMessage', messageId)
       return { ok: true }
     },
     answerCallback: async (callbackId, payload) => {
+      answers.push({ callbackId, body: payload })
       record('answerCallback', callbackId, payload)
       return { ok: true }
     },
-    sendAction: async (params) => {
-      record('sendAction', params)
+    sendAction: async (chatId, action) => {
+      actions.push({ chatId, action })
+      record('sendAction', chatId, action)
       return { ok: true }
     },
-    uploadMedia: async (params) => {
+    uploadMedia: async (params = {}) => {
       uploads.push(params)
-      return { token: `tok-${uploads.length}` }
+      const type =
+        params.type ??
+        defaultUploadTypeFor(params.filePath ?? params.filename ?? '')
+      return { token: `token-${type}`, type, name: params.filename }
     },
-    uploadTypeFor: (filePath) => (/\.(png|jpe?g|gif|webp)$/i.test(String(filePath)) ? 'image' : 'file'),
+    uploadTypeFor: defaultUploadTypeFor,
     ...overrides,
   }
   return client

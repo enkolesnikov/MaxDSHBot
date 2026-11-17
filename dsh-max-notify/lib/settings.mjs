@@ -9,13 +9,15 @@
  * (see index.js `connection.requestRejection`); this module never sees secrets.
  * Only the allowlisted, non-secret preferences in SETTINGS_KEYS are editable.
  * The overlay lives outside the repository (for example
- * `$DSH_HOME/max-notify/config.json`), is written atomically and always gets
- * mode 0600. Secrets (bot token, API keys) never pass through this module.
+ * `$DSH_HOME/max-notify/config.json`), is written atomically, always gets mode
+ * 0600 and its directory is forced to 0700 (see `lib/fs-safe.mjs`). Secrets (bot
+ * token, API keys) never pass through this module.
  */
-import { chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, readFileSync, renameSync, unlinkSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { ensurePrivateDir, writePrivateFile } from './fs-safe.mjs'
 import { SETTINGS_DEFAULTS, SETTINGS_KEYS, coerceValue } from './settings-validate.mjs'
 
 // The rule table and validators live in the pure `settings-validate.mjs` module
@@ -94,11 +96,12 @@ export function saveSettings(file, values) {
   const sanitized = sanitizeSettingsPatch(values)
   if (!sanitized.ok) throw new Error(`invalid settings: ${sanitized.errors.join('; ')}`)
   const directory = dirname(file)
-  mkdirSync(directory, { recursive: true, mode: 0o700 })
+  // Every missing ancestor and the overlay directory itself become 0700, even
+  // when created by an older release with a broader mode.
+  ensurePrivateDir(directory)
   const tmp = `${file}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`
   try {
-    writeFileSync(tmp, `${JSON.stringify(sanitized.values, null, 2)}\n`, { mode: 0o600 })
-    chmodSync(tmp, 0o600)
+    writePrivateFile(tmp, `${JSON.stringify(sanitized.values, null, 2)}\n`)
     renameSync(tmp, file)
     chmodSync(file, 0o600)
   } catch (error) {
