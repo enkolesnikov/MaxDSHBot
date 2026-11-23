@@ -14,7 +14,15 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import https from 'node:https'
-import { createMaxClient, isTrustedMaxUrl, normalizeMaxApiBaseUrl, splitText, MAX_RESPONSE_BYTES, MAX_TEXT_LIMIT } from '../lib/transport.mjs'
+import {
+  createMaxClient,
+  isTrustedMaxUrl,
+  normalizeMaxApiBaseUrl,
+  splitText,
+  MAX_RESPONSE_BYTES,
+  MAX_TEXT_LIMIT,
+  MAX_UPLOAD_FILENAME_CHARS,
+} from '../lib/transport.mjs'
 import { loadTlsCredentials, readBody, sendJson, startHttpsServer } from './helpers/tls-server.mjs'
 
 const TOKEN = 'bot-secret-token'
@@ -374,6 +382,45 @@ test('sendMessage surfaces MAX HTTP errors with status, code and body', { skip: 
   })
 })
 
+test('200 responses with success:false are rejected as MAX API errors and not retried', { skip: skipNoTls }, async (t) => {
+  let hits = 0
+  const server = await startServer(t, async (req, res) => {
+    hits += 1
+    await readBody(req)
+    sendJson(res, 200, { success: false, code: 'message.not.found', message: 'no such message' })
+  })
+  const client = testClient(server, { maxRetries: 2 })
+  const calls = [
+    () => client.editMessage({ messageId: 1, text: 'edited' }),
+    () => client.deleteMessage(1),
+    () => client.answerCallback('cb1', { notification: 'ok' }),
+    () => client.subscribeWebhook({ url: 'https://example.test/hook' }),
+  ]
+  for (const call of calls) {
+    await assert.rejects(call, (error) => {
+      assert.equal(error.name, 'MaxApiError')
+      assert.equal(error.status, 200)
+      assert.equal(error.code, 'message.not.found')
+      assert.equal(error.message, 'MAX API 200 message.not.found: no such message')
+      assert.deepEqual(error.response, { success: false, code: 'message.not.found', message: 'no such message' })
+      return true
+    })
+  }
+  assert.equal(hits, calls.length, 'a 200 error envelope must not be retried')
+})
+
+test('200 responses with success:true still resolve normally', { skip: skipNoTls }, async (t) => {
+  const server = await startServer(t, async (req, res) => {
+    await readBody(req)
+    sendJson(res, 200, { success: true })
+  })
+  const client = testClient(server)
+  assert.deepEqual(await client.editMessage({ messageId: 1, text: 'edited' }), { success: true })
+  assert.deepEqual(await client.deleteMessage(1), { success: true })
+  assert.deepEqual(await client.answerCallback('cb1'), { success: true })
+  assert.deepEqual(await client.subscribeWebhook({ url: 'https://example.test/hook' }), { success: true })
+})
+
 test('429 Retry-After seconds are parsed into retryAfterMs', { skip: skipNoTls }, async (t) => {
   const server = await startServer(t, async (req, res) => {
     await readBody(req)
@@ -704,6 +751,100 @@ test('uploadMedia reports missing upload URL and missing attachment token', { sk
   await assert.rejects(() => client.uploadMedia({ buffer: Buffer.from('x'), filename: 'a.png' }), /MAX upload returned no attachment token/)
 })
 
+test('upload POSTs reject 200 success:false envelopes but keep plain bodies untouched', { skip: skipNoTls }, async (t) => {
+  let target = 'error'
+  const server = await startServer(t, async (req, res) => {
+    await readBody(req)
+    if (req.url === '/uploads?type=image') {
+      sendJson(res, 200, { url: `${server.url}/upload-target`, token: 'created-token' })
+      return
+    }
+    if (req.url === '/upload-target') {
+      if (target === 'error') {
+        sendJson(res, 200, { success: false, code: 'upload.failed', message: 'bad media' })
+        return
+      }
+      res.writeHead(200, { 'content-type': 'text/plain' })
+      res.end('1')
+      return
+    }
+    res.statusCode = 404
+    res.end('unexpected path')
+  })
+  const client = testClient(server, { maxRetries: 0 })
+
+  await assert.rejects(
+    () => client.uploadMedia({ buffer: Buffer.from('x'), filename: 'a.png' }),
+    (error) => {
+      assert.equal(error.name, 'MaxApiError')
+      assert.equal(error.status, 200)
+      assert.equal(error.code, 'upload.failed')
+      assert.equal(error.message, 'MAX API 200 upload.failed: bad media')
+      return true
+    },
+  )
+
+  // A plain non-JSON-object body is a normal upload answer.
+  target = 'plain'
+  const result = await client.uploadMedia({ buffer: Buffer.from('x'), filename: 'a.png' })
+  assert.equal(result.token, 'created-token')
+})
+
+test('uploadMedia truncates filenames above 200 chars but keeps the extension', { skip: skipNoTls }, async (t) => {
+  const multiparts = []
+  const server = await startServer(t, async (req, res) => {
+    const body = await readBody(req)
+    if (typeof req.url === 'string' && req.url.startsWith('/uploads?')) {
+      sendJson(res, 200, { url: `${server.url}/upload-target` })
+      return
+    }
+    if (req.url === '/upload-target') {
+      multiparts.push(body.toString('utf8'))
+      sendJson(res, 200, { token: 'uploaded-token' })
+      return
+    }
+    res.statusCode = 404
+    res.end('unexpected path')
+  })
+  const client = testClient(server)
+  const filenameFrom = (multipart) => /name="data"; filename="([^"]*)"/.exec(multipart)?.[1]
+
+  // Control: exactly 200 chars is already within the limit and stays untouched.
+  const exact = `${'c'.repeat(MAX_UPLOAD_FILENAME_CHARS - 4)}.png`
+  assert.equal(exact.length, MAX_UPLOAD_FILENAME_CHARS)
+  const control = await client.uploadMedia({ buffer: Buffer.from('a'), filename: exact })
+  assert.equal(control.name, exact)
+
+  // Long explicit name supplied with a buffer.
+  const ascii = await client.uploadMedia({ buffer: Buffer.from('b'), filename: `${'d'.repeat(250)}.png` })
+  assert.equal(ascii.name.length, MAX_UPLOAD_FILENAME_CHARS)
+  assert.ok(ascii.name.endsWith('.png'), 'the extension must survive truncation')
+  assert.match(ascii.name, /^d+\.png$/)
+
+  // Long file path basename (the inferred name).
+  const dir = tempDir(t)
+  const longFileName = `${'e'.repeat(240)}.txt`
+  const longFilePath = join(dir, longFileName)
+  writeFileSync(longFilePath, 'TEXT-BYTES')
+  const fromPath = await client.uploadMedia({ filePath: longFilePath })
+  assert.equal(fromPath.name.length, MAX_UPLOAD_FILENAME_CHARS)
+  assert.ok(fromPath.name.endsWith('.txt'))
+  assert.equal(fromPath.type, 'file')
+
+  // Surrogate pairs must never be cut in half (the cap is code points).
+  const emoji = await client.uploadMedia({ buffer: Buffer.from('c'), filename: `${'😀'.repeat(210)}.png` })
+  assert.equal(Array.from(emoji.name).length, MAX_UPLOAD_FILENAME_CHARS)
+  assert.ok(emoji.name.endsWith('.png'))
+  assert.ok(!emoji.name.includes('\uFFFD'), 'no surrogate pair may be split')
+
+  const sentNames = multiparts.map(filenameFrom)
+  assert.equal(sentNames.length, 4)
+  assert.deepEqual(sentNames, [control.name, ascii.name, fromPath.name, emoji.name])
+  for (const name of sentNames) {
+    assert.ok(Array.from(name).length <= MAX_UPLOAD_FILENAME_CHARS, `multipart filename exceeds the cap: ${name}`)
+  }
+})
+
 // ---------------------------------------------------------------------------
 // downloadToFile (host guard, redirects, limits, atomic write)
 // ---------------------------------------------------------------------------
@@ -965,6 +1106,38 @@ test('client endpoints build the documented paths, queries and bodies', { skip: 
     secret: 's3cret',
     update_types: ['message_created'],
   })
+})
+
+test('getMessage and getVideo request the documented single-segment paths', { skip: skipNoTls }, async (t) => {
+  const seen = []
+  const server = await startServer(t, async (req, res) => {
+    seen.push({ method: req.method, url: req.url, authorization: req.headers.authorization })
+    await readBody(req)
+    sendJson(res, 200, { ok: true })
+  })
+  const client = testClient(server)
+
+  assert.deepEqual(await client.getMessage('m 1/2'), { ok: true })
+  assert.deepEqual(await client.getVideo('v 1/2'), { ok: true })
+  assert.deepEqual(await client.getMessage(42), { ok: true })
+  assert.deepEqual(await client.getVideo('video-token'), { ok: true })
+  assert.deepEqual(
+    seen.map((entry) => `${entry.method} ${entry.url}`),
+    [
+      'GET /messages/m%201%2F2',
+      'GET /videos/v%201%2F2',
+      'GET /messages/42',
+      'GET /videos/video-token',
+    ],
+  )
+  assert.ok(seen.every((entry) => entry.authorization === TOKEN))
+
+  assert.throws(() => client.getMessage(), /messageId is required/)
+  assert.throws(() => client.getMessage(null), /messageId is required/)
+  assert.throws(() => client.getMessage(''), /messageId is required/)
+  assert.throws(() => client.getVideo(), /videoToken is required/)
+  assert.throws(() => client.getVideo(null), /videoToken is required/)
+  assert.throws(() => client.getVideo(''), /videoToken is required/)
 })
 
 test('sendText chunks long text into sequential sendMessage calls', { skip: skipNoTls }, async (t) => {

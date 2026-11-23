@@ -4,6 +4,33 @@ All notable changes to `dsh-max-notify` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0] — 2026-11-24
+
+Приведение транспорта к изменениям MAX Bot API 2026 — разбор с датами и
+ссылками: [docs/max-api-2026.md](../docs/max-api-2026.md).
+
+### Added
+
+- **`getMessage(messageId)`** — `GET /messages/{messageId}`: получение одного
+  сообщения по id.
+- **`getVideo(videoToken)`** — `GET /videos/{videoToken}`: URL воспроизведения
+  и метаданные видео-вложения.
+- **`bot_admin_permissions_changed`:** изменение прав бота-администратора в
+  канале/чате теперь пишется в лог уровнем `warn` с `chat_id` и сводкой прав.
+  Health получает `lastAdminPermissionsAt` / `lastAdminPermissionsEvent`.
+  Событие доставляется только через webhook, поэтому в список типов long
+  polling оно не добавлено.
+
+### Fixed
+
+- **HTTP 200 + `success: false`** теперь считается ошибкой (`MaxApiError` с
+  `code` и `message`), а не успехом. Покрыты `PUT /messages`, `DELETE
+  /messages`, `POST`/`DELETE /subscriptions`, `POST`/`DELETE
+  /chats/{chatId}/members`, `DELETE /chats/{chatId}/pin`,
+  `POST /chats/{chatId}/actions`.
+- **Имя загружаемого файла** обрезается до 200 символов (лимит MAX) с
+  сохранением расширения — и для явного `filename`, и для имени из пути.
+
 ## [1.10.0] — 2026-11-18
 
 Закрытие остатка P2: модульная структура и тест-инфраструктура.

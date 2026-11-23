@@ -25,6 +25,8 @@ import { classifyUploadType } from './workspace-tools.mjs'
 export const MAX_API_BASE = 'https://platform-api2.max.ru'
 export const MAX_TEXT_LIMIT = 4000
 export const MAX_MESSAGES_PER_SECOND = 2
+/** MAX rejects upload filenames longer than this many characters. */
+export const MAX_UPLOAD_FILENAME_CHARS = 200
 /** Hard cap for JSON responses (API/upload endpoints return tiny payloads). */
 export const MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
@@ -212,6 +214,17 @@ function httpError(status, raw, json, retryAfterMs) {
   return error
 }
 
+/**
+ * MAX can answer a mutating request with HTTP 200 and a JSON error envelope
+ * `{ success: false, code, message }` (PUT/DELETE /messages, subscriptions,
+ * members, pin, actions, ...). Any JSON object with `success === false` must be
+ * treated as a failure even though the status is 2xx. Plain non-object bodies
+ * (e.g. the upload endpoint's `1`) are not error envelopes.
+ */
+function isMaxErrorBody(json) {
+  return Boolean(json) && typeof json === 'object' && !Array.isArray(json) && json.success === false
+}
+
 function parseRetryAfter(header) {
   if (!header) return undefined
   const seconds = Number(header)
@@ -347,6 +360,11 @@ export function createMaxClient(options = {}) {
               json = undefined
             }
             if (res.statusCode >= 200 && res.statusCode < 300) {
+              // A 200 with `{success:false}` is a MAX error, not a result.
+              if (isMaxErrorBody(json)) {
+                reject(httpError(res.statusCode, raw, json, parseRetryAfter(res.headers['retry-after'])))
+                return
+              }
               resolve(json)
               return
             }
@@ -398,6 +416,31 @@ export function createMaxClient(options = {}) {
   function getChat(chatId) {
     if (chatId === undefined || chatId === null) throw new Error('chatId is required')
     return withRetry(() => request({ method: 'GET', path: `chats/${encodeURIComponent(String(chatId))}` }))
+  }
+
+  /**
+   * GET /messages/{messageId} — fetch one message by its `mid`.
+   *
+   * Signature mirrors `deleteMessage(messageId)`: a single positional id
+   * (string or number), encoded as one path segment.
+   */
+  function getMessage(messageId) {
+    if (!messageId) throw new Error('messageId is required')
+    return withRetry(() =>
+      request({ method: 'GET', path: `messages/${encodeURIComponent(String(messageId))}` }),
+    )
+  }
+
+  /**
+   * GET /videos/{videoToken} — video attachment metadata by its upload token.
+   *
+   * A single positional token (string), encoded as one path segment.
+   */
+  function getVideo(videoToken) {
+    if (!videoToken) throw new Error('videoToken is required')
+    return withRetry(() =>
+      request({ method: 'GET', path: `videos/${encodeURIComponent(String(videoToken))}` }),
+    )
   }
 
   /** GET /updates — long polling for incoming updates (used by the pairing helper). */
@@ -560,6 +603,12 @@ export function createMaxClient(options = {}) {
               json = undefined
             }
             if (res.statusCode >= 200 && res.statusCode < 300) {
+              // Upload endpoints usually answer with a plain JSON token, but a
+              // `{success:false}` envelope is still a MAX-side failure.
+              if (isMaxErrorBody(json)) {
+                reject(httpError(res.statusCode, raw, json, parseRetryAfter(res.headers['retry-after'])))
+                return
+              }
               resolve(json ?? {})
               return
             }
@@ -592,13 +641,35 @@ export function createMaxClient(options = {}) {
   }
 
   /**
+   * MAX rejects uploads whose multipart `filename=` is longer than 200 chars.
+   * Truncate to the limit while keeping the extension, iterating code points
+   * (`Array.from`) so a truncated name never ends in half a surrogate pair.
+   * Names at or below the limit are returned unchanged.
+   */
+  function truncateUploadFilename(name, limit = MAX_UPLOAD_FILENAME_CHARS) {
+    const value = String(name ?? '')
+    if (value.length <= limit) return value
+    const chars = Array.from(value)
+    if (chars.length <= limit) return value
+    const extension = extname(value)
+    const extensionChars = Array.from(extension)
+    if (extensionChars.length === 0 || extensionChars.length >= limit) {
+      return chars.slice(0, limit).join('')
+    }
+    return chars.slice(0, limit - extensionChars.length).join('') + extension
+  }
+
+  /**
    * Upload a local file to MAX and return its attachment token.
    * `POST /uploads?type=` → upload URL → multipart `data` → `{ token }`.
    */
   async function uploadMedia({ filePath, type, filename, buffer }) {
     if (!filePath && !buffer) throw new Error('filePath or buffer is required')
     const bytes = buffer ?? readFileSync(filePath)
-    const name = filename ?? (filePath ? basename(filePath) : 'file.bin')
+    // MAX caps multipart filenames at 200 chars: truncate the inferred,
+    // explicit or buffer-supplied name once, and use it everywhere (the
+    // multipart `filename=` field and the returned `name`).
+    const name = truncateUploadFilename(filename ?? (filePath ? basename(filePath) : 'file.bin'))
     const uploadType = type ?? uploadTypeFor(filePath ?? name)
     const created = await withRetry(() =>
       request({ method: 'POST', path: 'uploads', query: { type: uploadType } }),
@@ -773,6 +844,8 @@ export function createMaxClient(options = {}) {
     subscribeWebhook,
     unsubscribeWebhook,
     getChat,
+    getMessage,
+    getVideo,
     sendMessage,
     sendText,
     editMessage,

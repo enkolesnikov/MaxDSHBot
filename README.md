@@ -18,7 +18,7 @@
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/enkolesnikov/MaxDSHBot?style=flat-square"/></a>
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img alt="DSH" src="https://img.shields.io/badge/DSH-0.2.x-6C5CE7?style=flat-square"/></a>
   <a href="https://max.ru"><img alt="MAX" src="https://img.shields.io/badge/MAX-messenger-8B5CF6?style=flat-square"/></a>
-  <img alt="Tests" src="https://img.shields.io/badge/tests-515%20passed-2ecc71?style=flat-square"/>
+  <img alt="Tests" src="https://img.shields.io/badge/tests-531%20passed-2ecc71?style=flat-square"/>
   <a href="https://nodejs.org"><img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A520-339933?style=flat-square&logo=nodedotjs&logoColor=white"/></a>
   <img alt="Runtime dependencies" src="https://img.shields.io/badge/runtime%20deps-0-brightgreen?style=flat-square"/>
   <a href="https://github.com/enkolesnikov/MaxDSHBot/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/enkolesnikov/MaxDSHBot?style=flat-square"/></a>
@@ -183,23 +183,45 @@ MAX будет сам присылать обновления на публич�
 long polling и пишет warning в лог. Официальная документация MAX:
 [webhooks](https://dev.max.ru/docs-api/methods/POST/subscriptions).
 
+## MAX API 2026
+
+Платформа MAX заметно изменилась в 2026: домен `platform-api2.max.ru` и
+сертификат Минцифры (19.07.2026), токен только в заголовке `Authorization`,
+удалённый `GET /chats` (июнь 2026), HTTPS-only webhook без самоподписанных
+сертификатов (25.05.2026), ошибки `HTTP 200` с `success: false` и полем `code`
+(ноябрь 2026), лимиты загрузок и resumable upload, `PATCH /me/commands`,
+Comments API, `description` в `PATCH /chats/{id}`, `disable_link_preview` в
+`POST /answers`, 30 rps, OpenAPI-схема и официальный MAX Agent Skill.
+
+Полный разбор с датами, ссылками и таблицами «что плагин уже делает» / «что
+осознанно не используется» — [docs/max-api-2026.md](docs/max-api-2026.md).
+
+В v1.11 клиент транспорта получил `getMessage(messageId)` (`GET /messages/{messageId}`)
+и `getVideo(videoToken)` (`GET /videos/{videoToken}`); имя загружаемого файла обрезается
+до 200 символов с сохранением расширения.
+
+## MAX API 2026 (1.11)
+
+- `success:false` при HTTP 200 — ошибка; `getMessage`/`getVideo`; имя файла ≤200;
+  `bot_admin_permissions_changed` warn + health. Разбор — [docs/max-api-2026.md](docs/max-api-2026.md).
+
 ## Техдолг 1.10
 
 - P2 закрыт полностью: `index.js` 2018→1711, модули webhook-runtime/deliver/fs-safe,
   единое хранилище workspace, 0700-каталоги, warn-логи, тест-фейки, CDN-тест.
-- 515 тестов на Node 20/22/24.
+- 531 тест на Node 20/22/24.
 
 ## Техдолг 1.9
 
 - P2 аудита 17.11: дедупликация, LRU-кэши, наблюдаемость, лимитер,
   транспорт, конфиг/валидация, dryRun, teardown-тесты, CI TLS-контроль.
-- 515 тестов на Node 20/22/24.
+- 531 тест на Node 20/22/24.
 
 ## Техдолг 1.8
 
 - P1 аудита 17.11: webhook-лимиты и redaction, граница путей deliverables,
   строгий матчинг автономии, гонка outbox, lifecycle/HMR, CI-guard утечек.
-- 515 тестов на Node 20/22/24.
+- 531 тест на Node 20/22/24.
 
 ## Техдолг 1.7
 
@@ -207,7 +229,7 @@ long polling и пишет warning в лог. Официальная докум�
 - Удалена мёртвая HTML-страница настроек (~360 строк).
 - State/outbox: future-schema guard, fsync, corrupt-бэкапы, 0600/0700.
 - CI: Node 20/22/24, actions pinned by SHA; транспортные контрактные тесты
-  (38) на локальном HTTPS; всего 515 тестов.
+  (38) на локальном HTTPS; всего 531 тест.
 
 ## Аудит 1.6: rc.2, безопасность, надёжность
 
@@ -398,7 +420,7 @@ long polling и пишет warning в лог. Официальная докум�
 | `client/client.js` | клиентская страница настроек (без сборки) |
 | `lib/observer.mjs`, `lib/policy.mjs` | события, дайджест, режимы, алерты бюджета |
 | `certs/ca-chain.pem` | Russian Trusted Sub CA + Root CA |
-| `test/` | 515 тестов (`node --test`) |
+| `test/` | 531 тест (`node --test`) |
 | `tools/` | `pair.mjs`, `send-test.mjs`, `smoke.mjs`, `webhook.mjs` |
 
 </details>
@@ -422,7 +444,7 @@ long polling и пишет warning в лог. Официальная докум�
 ## Проверка
 
 ```bash
-cd dsh-max-notify && npm test          # 515 unit tests
+cd dsh-max-notify && npm test          # 531 unit tests
 npm run check                          # синтаксис всех модулей
 node tools/smoke.mjs --env ../.env     # read-only: GET /me, state, outbox
 node tools/send-test.mjs "проверка"    # реальная отправка
@@ -436,6 +458,8 @@ TLS-цепочка проверена `openssl verify` (leaf → Russian Trusted
 - [ROADMAP.md](ROADMAP.md) — план 0.9 → 1.0.
 - [CHANGELOG.md](dsh-max-notify/CHANGELOG.md) — история версий.
 - [SECURITY.md](SECURITY.md) — секреты, allowlist, аудит.
+- [docs/max-api-2026.md](docs/max-api-2026.md) — изменения MAX Bot API в 2026
+  и покрытие их плагином.
 - [research/](research/) — устройство DSH-плагинов, MAX Bot API, каталог фич.
 - [dsh-max-notify/README.md](dsh-max-notify/README.md) — справка по пакету (EN).
 

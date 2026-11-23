@@ -50,8 +50,79 @@ const COMMANDS = [
   { name: 'health', description: 'Состояние плагина и очередь' },
 ]
 
+// `bot_admin_permissions_changed` is intentionally absent: MAX returns it via
+// Webhook only (not available to long polling), and the webhook subscription
+// defaults (config.webhookUpdateTypes) already include it.
 const UPDATE_TYPES = 'message_created,message_callback,bot_started,bot_added,bot_removed'
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/** Upper bound of the admin-permissions summary written to logs/health. */
+const ADMIN_PERMISSIONS_SUMMARY_MAX = 200
+
+/**
+ * Deterministic FNV-1a (32 bit) hex digest, used as a dedupe-key fallback when
+ * MAX omits `timestamp`. Short, stable across processes and cheap.
+ */
+function fnv1aHex(value) {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0')
+}
+
+/**
+ * Stable short fingerprint of an update payload. Only used for events without
+ * `timestamp`; degrades instead of throwing on circular/non-serializable data.
+ */
+function updateFingerprint(update) {
+  let json
+  try {
+    json = JSON.stringify(update)
+  } catch {
+    json = undefined
+  }
+  if (typeof json !== 'string') {
+    try {
+      json = `${update?.update_type ?? ''}:${update?.chat_id ?? ''}`
+    } catch {
+      json = 'unserializable'
+    }
+  }
+  return fnv1aHex(json)
+}
+
+/**
+ * Short, safe description of `update.permissions` / `update.admin_permissions`
+ * (MAX sends an array of permission strings). Hostile payloads — circular
+ * references, throwing getters, BigInt — degrade to a fixed marker so a
+ * malformed webhook event can never break the handler.
+ */
+function adminPermissionsSummary(update) {
+  let raw
+  try {
+    raw = update?.permissions ?? update?.admin_permissions
+  } catch {
+    return 'unavailable'
+  }
+  if (raw === undefined) return 'not reported'
+  if (raw === null) return 'null'
+  if (typeof raw === 'string') {
+    const text = raw.trim()
+    return text === '' ? 'empty' : text.slice(0, ADMIN_PERMISSIONS_SUMMARY_MAX)
+  }
+  let json
+  try {
+    json = JSON.stringify(raw)
+  } catch {
+    return 'unserializable'
+  }
+  if (typeof json !== 'string') return 'unserializable'
+  return json.length > ADMIN_PERMISSIONS_SUMMARY_MAX
+    ? `${json.slice(0, ADMIN_PERMISSIONS_SUMMARY_MAX - 1)}…`
+    : json
+}
 
 export function createBot({
   client,
@@ -1034,6 +1105,21 @@ export function createBot({
       case 'bot_removed':
         logger?.warn?.('bot removed from MAX chat %s', update.chat_id)
         return
+      case 'bot_admin_permissions_changed': {
+        // Webhook-only event: the bot gained or lost admin rights in a channel
+        // or group chat. Never throw on a malformed payload.
+        const chatId = update.chat_id ?? update.message?.recipient?.chat_id
+        const summary = adminPermissionsSummary(update)
+        logger?.warn?.('bot admin permissions changed in MAX chat %s: %s', chatId, summary)
+        if (typeof runtime?.healthUpdate === 'function') {
+          try {
+            runtime.healthUpdate({ lastAdminPermissionsAt: Date.now(), lastAdminPermissionsEvent: summary })
+          } catch (error) {
+            logger?.debug?.('cannot record admin permissions health update: %s', error?.message || String(error))
+          }
+        }
+        return
+      }
       default:
         return
     }
@@ -1069,6 +1155,13 @@ export function createBot({
       case 'bot_added':
       case 'bot_removed':
         return `${type}:${chatId}:${update?.timestamp ?? ''}`
+      case 'bot_admin_permissions_changed': {
+        // Webhook events normally carry `timestamp`; without it a deterministic
+        // payload fingerprint keeps redelivery idempotent instead of dropping
+        // the event or inventing a fresh key per delivery.
+        const stamp = update?.timestamp ?? updateFingerprint(update)
+        return `admin-perms:${chatId}:${stamp}`
+      }
       default:
         return undefined
     }

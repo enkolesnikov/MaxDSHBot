@@ -1,6 +1,6 @@
 # Дорожная карта `dsh-max-notify`
 
-Текущая версия: **1.10.0** (P2 закрыт полностью). План рассчитан на
+Текущая версия: **1.11.0** (MAX API 2026). План рассчитан на
 DSH 0.2.x (проверено на 0.2.2-rc.2, Node 24.22+).
 
 Цель: из «уведомлятора + пульта» сделать надёжный продукт: доставка без
@@ -26,6 +26,7 @@ DSH 0.2.x (проверено на 0.2.2-rc.2, Node 24.22+).
 | **1.8** | P1 аудита | webhook caps/redaction, path boundary, autonomy identity, outbox race, lifecycle, CI guard | ✅ реализовано |
 | **1.9** | P2 аудита | дедупликация, LRU, наблюдаемость, лимитер/транспорт/конфиг, dryRun, teardown | ✅ реализовано |
 | **1.10** | P2 финал | webhook-runtime/deliver/fs-safe, workspace store, 0700, warn-логи, CDN-тест | ✅ реализовано |
+| **1.11** | MAX API 2026 | success:false, getMessage/getVideo, filename cap, admin-perms event | ✅ реализовано |
 | 1.8+ | Backlog | полный распил `index.js`, observability, автопилот, Mini App, proxy, каталог | backlog |
 
 ## 0.6 — сделано

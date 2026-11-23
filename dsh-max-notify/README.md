@@ -77,23 +77,47 @@ Published on npm: https://www.npmjs.com/package/dsh-max-notify
   budget alerts (80/100 by default) fire once per period and survive reloads.
   `costMeterFile`, `budgetAlertEnabled`, `budgetAlertThresholds` configure it.
 
+## MAX API 2026
+
+MAX changed a lot in 2026: `platform-api2.max.ru` plus the Russian Trusted
+(Минцифры) CA since 2026-07-19, the token only in the `Authorization` header,
+`GET /chats` removed (June 2026), HTTPS-only webhooks without self-signed
+certificates (2026-05-25), HTTP 200 responses carrying `success: false` and a
+`code` field (November 2026), upload limits with a resumable mode,
+`PATCH /me/commands`, the comments API, `description` in `PATCH /chats/{id}`,
+`disable_link_preview` on `POST /answers`, 30 rps, the OpenAPI schema and the
+official MAX Agent Skill.
+
+Full dated summary with links — in Russian, together with what this plugin
+already does and what it intentionally does not use:
+[docs/max-api-2026.md](../docs/max-api-2026.md).
+
+As of v1.11 the transport exposes `getMessage(messageId)` (`GET /messages/{messageId}`)
+and `getVideo(videoToken)` (`GET /videos/{videoToken}`); uploaded file names are capped at
+200 characters with the extension kept.
+
+## MAX API 2026 (1.11)
+
+- HTTP 200 `success:false` is now an error; `getMessage`/`getVideo`; upload
+  filename capped at 200; `bot_admin_permissions_changed` warn + health.
+
 ## Tech-debt 1.10
 
 - Full P2 closure: index 2018→1711, webhook-runtime/deliver/fs-safe modules,
   single workspace store, 0700 dirs, warn logs, shared test fakes, CDN test.
-- 515 tests on Node 20/22/24.
+- 531 tests on Node 20/22/24.
 
 ## Tech-debt 1.9
 
 - P2 audit 17.11: dedupe, LRU caches, observability, limiter, transport,
   config validation, full dryRun, teardown tests, CI TLS requirement.
-- 515 tests on Node 20/22/24.
+- 531 tests on Node 20/22/24.
 
 ## Tech-debt 1.8
 
 - P1 audit 17.11: webhook byte caps + redaction, deliverable path boundary,
   strict autonomy matching, outbox race, lifecycle/HMR, CI leak guard.
-- 515 tests on Node 20/22/24.
+- 531 tests on Node 20/22/24.
 
 ## Tech-debt 1.7
 
@@ -181,7 +205,7 @@ for per-run `new` sessions, the title plus a recent delivery receipt.
 | `lib/autonomy.mjs` | schedule autonomy policies/matching |
 | `lib/settings.mjs` | GUI settings validation/overlay/API |
 | `client/client.js` | hand-written settings page bundle |
-| `test/*.test.mjs` | `node --test` (515 unit tests) |
+| `test/*.test.mjs` | `node --test` (531 unit tests) |
 
 ## Config
 

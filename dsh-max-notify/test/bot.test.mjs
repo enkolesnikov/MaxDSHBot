@@ -458,6 +458,206 @@ test('a failed handler keeps the marker and redelivers unhandled updates', async
   assert.deepEqual(calls.prompts.map((entry) => entry.text), ['первый', 'второй'])
 })
 
+function adminPermissionsUpdate({ chatId = 555, timestamp = 1_700_000_000_000, permissions, ...rest } = {}) {
+  return {
+    update_type: 'bot_admin_permissions_changed',
+    timestamp,
+    chat_id: chatId,
+    user_id: 111,
+    bot_id: 222,
+    is_channel: true,
+    is_admin: false,
+    ...(permissions === undefined ? { permissions: ['read_all_messages', 'write'] } : { permissions }),
+    ...rest,
+  }
+}
+
+test('bot_admin_permissions_changed logs a warn with the chat id and permissions summary', async () => {
+  const logs = []
+  const patches = []
+  const logger = {
+    info: (...args) => logs.push(['info', ...args]),
+    warn: (...args) => logs.push(['warn', ...args]),
+    debug: (...args) => logs.push(['debug', ...args]),
+  }
+  const { bot, client } = makeBot({ logger, runtime: { healthUpdate: (patch) => patches.push(patch) } })
+
+  await bot.handleUpdate({ ...adminPermissionsUpdate(), permissions: ['read_all_messages', 'delete'] })
+
+  assert.equal(logs.length, 1)
+  assert.equal(logs[0][0], 'warn')
+  assert.equal(logs[0][1], 'bot admin permissions changed in MAX chat %s: %s')
+  assert.equal(logs[0][2], 555)
+  assert.equal(logs[0][3], '["read_all_messages","delete"]')
+  // The event must not produce any user-facing message.
+  assert.equal(client.sent.length, 0)
+})
+
+test('admin permissions health hook receives the timestamped event summary', async () => {
+  const patches = []
+  const { runtime } = runtimeStub()
+  const bot = createBot({
+    client: createFakeClient(),
+    config: config(),
+    logger: { info() {}, warn() {}, debug() {} },
+    state: createMemoryState(),
+    runtime: { ...runtime, healthUpdate: (patch) => patches.push(patch) },
+  })
+  const before = Date.now()
+  await bot.handleUpdate(adminPermissionsUpdate({ permissions: ['write'] }))
+  assert.equal(patches.length, 1)
+  assert.ok(patches[0].lastAdminPermissionsAt >= before)
+  assert.ok(patches[0].lastAdminPermissionsAt <= Date.now())
+  assert.equal(patches[0].lastAdminPermissionsEvent, '["write"]')
+})
+
+test('admin permissions event is a no-op without a health hook', async () => {
+  // The default runtime stub has no healthUpdate bridge: optional call, no throw.
+  const { bot } = makeBot()
+  await bot.handleUpdate(adminPermissionsUpdate())
+})
+
+test('the real health module records the admin permissions event', async () => {
+  const health = createHealth({ version: 'test' })
+  const { runtime } = runtimeStub()
+  const bot = createBot({
+    client: createFakeClient(),
+    config: config(),
+    logger: { info() {}, warn() {}, debug() {} },
+    state: createMemoryState(),
+    health,
+    runtime: { ...runtime, healthUpdate: (patch) => health.update(patch) },
+  })
+  await bot.handleUpdate(adminPermissionsUpdate({ permissions: ['pin_message'] }))
+  const snapshot = health.snapshot()
+  assert.ok(snapshot.lastAdminPermissionsAt > 0)
+  assert.equal(snapshot.lastAdminPermissionsEvent, '["pin_message"]')
+})
+
+test('admin permissions summary falls back to update.admin_permissions', async () => {
+  const logs = []
+  const logger = { info() {}, warn: (...args) => logs.push(args), debug() {} }
+  const { bot } = makeBot({ logger })
+  await bot.handleUpdate({
+    update_type: 'bot_admin_permissions_changed',
+    timestamp: 42,
+    chat_id: 777,
+    admin_permissions: { read_all_messages: true, edit: false },
+  })
+  assert.equal(logs[0][1], 777)
+  assert.match(logs[0][2], /read_all_messages/)
+  assert.ok(logs[0][2].length <= 200)
+})
+
+test('a malformed admin permissions payload never throws (handler or dedupe key)', async () => {
+  const logs = []
+  const logger = { info() {}, warn: (...args) => logs.push(args), debug() {} }
+  const { bot } = makeBot({
+    logger,
+    runtime: {
+      // A broken health bridge must not break update processing either.
+      healthUpdate: () => {
+        throw new Error('health bridge down')
+      },
+    },
+  })
+
+  const circular = { read_all_messages: true }
+  circular.self = circular
+  await bot.handleUpdate({ update_type: 'bot_admin_permissions_changed', timestamp: 1, chat_id: 42, permissions: circular })
+  assert.equal(logs[0][1], 42)
+  assert.equal(logs[0][2], 'unserializable')
+
+  // BigInt cannot be JSON.stringify'd; the summary degrades instead of throwing.
+  await bot.handleUpdate({ update_type: 'bot_admin_permissions_changed', timestamp: 2, chat_id: 42, permissions: 1n })
+  assert.equal(logs[1][2], 'unserializable')
+
+  // Huge permission lists are truncated to a compact log line.
+  const many = Array.from({ length: 100 }, (_, index) => `permission_${index}`)
+  await bot.handleUpdate({ update_type: 'bot_admin_permissions_changed', timestamp: 3, chat_id: 42, permissions: many })
+  assert.ok(logs[2][2].length <= 200)
+  assert.match(logs[2][2], /permission_0/)
+
+  // Dedupe key computation is equally defensive and deterministic for such payloads.
+  const broken = { update_type: 'bot_admin_permissions_changed', chat_id: 42, permissions: circular }
+  assert.equal(bot.updateKey(broken), bot.updateKey({ ...broken }))
+  assert.match(bot.updateKey(broken), /^admin-perms:42:[0-9a-f]{8}$/)
+})
+
+test('updateKey is stable and timestamp-scoped for admin permission events', () => {
+  const { bot } = makeBot()
+  const event = adminPermissionsUpdate({ chatId: 777, timestamp: 1000 })
+  assert.equal(bot.updateKey(event), 'admin-perms:777:1000')
+  assert.equal(bot.updateKey({ ...event }), 'admin-perms:777:1000')
+  assert.equal(bot.updateKey({ ...event, timestamp: 1001 }), 'admin-perms:777:1001')
+  assert.equal(bot.updateKey({ ...event, chat_id: 888 }), 'admin-perms:888:1000')
+})
+
+test('admin permission events without timestamp get deterministic, payload-scoped keys', () => {
+  const { bot } = makeBot()
+  const event = {
+    update_type: 'bot_admin_permissions_changed',
+    chat_id: 9,
+    permissions: ['write'],
+  }
+  const first = bot.updateKey(event)
+  const redelivery = bot.updateKey({ ...event, permissions: ['write'] })
+  const changed = bot.updateKey({ ...event, permissions: ['write', 'pin_message'] })
+  assert.match(first, /^admin-perms:9:[0-9a-f]{8}$/)
+  assert.equal(first, redelivery)
+  assert.notEqual(first, changed)
+  assert.match(changed, /^admin-perms:9:[0-9a-f]{8}$/)
+})
+
+test('a redelivered admin permission event is deduped before logging twice', async () => {
+  const logs = []
+  const patches = []
+  const logger = { info() {}, warn: (...args) => logs.push(args), debug() {} }
+  const { bot } = makeBot({ logger, runtime: { healthUpdate: (patch) => patches.push(patch) } })
+  const event = adminPermissionsUpdate({ timestamp: 5000, permissions: [] })
+  assert.equal(await bot.applyUpdate(event), true)
+  assert.equal(await bot.applyUpdate({ ...event }), false)
+  assert.equal(logs.length, 1)
+  assert.equal(patches.length, 1)
+})
+
+test('long polling does not request the webhook-only admin permission event', async () => {
+  const client = createFakeClient()
+  const requestedTypes = []
+  client.getUpdates = async (params) => {
+    requestedTypes.push(params.types)
+    return { updates: [], marker: 1 }
+  }
+  const { runtime } = runtimeStub()
+  const bot = createBot({
+    client,
+    config: config(),
+    logger: { info() {}, warn() {}, debug() {} },
+    state: createMemoryState(),
+    runtime,
+  })
+  await bot.pollOnce()
+  assert.equal(requestedTypes.length, 1)
+  assert.doesNotMatch(requestedTypes[0], /bot_admin_permissions_changed/)
+})
+
+test('bot_added and bot_removed keep their log behavior without update.user', async () => {
+  const logs = []
+  const logger = {
+    info: (...args) => logs.push(['info', ...args]),
+    warn: (...args) => logs.push(['warn', ...args]),
+    debug() {},
+  }
+  const { bot, client } = makeBot({ logger })
+  await bot.handleUpdate({ update_type: 'bot_added', timestamp: 1, chat_id: 321 })
+  await bot.handleUpdate({ update_type: 'bot_removed', timestamp: 2, chat_id: 321 })
+  assert.deepEqual(logs, [
+    ['info', 'bot added to MAX chat %s', 321],
+    ['warn', 'bot removed from MAX chat %s', 321],
+  ])
+  assert.equal(client.sent.length, 0)
+})
+
 test('/health, /version and /ping answer with runtime data', async () => {
   const health = {
     snapshot: () => ({
