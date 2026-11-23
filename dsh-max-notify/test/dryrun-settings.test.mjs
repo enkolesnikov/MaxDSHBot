@@ -75,3 +75,29 @@ test('settings GET exposes only GUI-allowed keys', async () => {
   assert.equal('mode' in body.values, true)
   await dispose()
 })
+
+test('settings route relies on webServer admission (no rc.2 requestRejection re-check)', async () => {
+  const routes = []
+  const services = {
+    webServer: { register: (route) => { routes.push(route); return () => {} } },
+    connection: {}, // rc.2: requestRejection removed
+  }
+  const emitter = new EventEmitter()
+  const ctx = {
+    ...services,
+    logger: () => ({ info() {}, warn() {}, error() {}, debug() {} }),
+    get: (name) => services[name],
+    inject: (deps, callback) => callback(services),
+    on: (event, handler) => { emitter.on(event, handler); return () => emitter.off(event, handler) },
+    effect: (factory) => { factory() },
+  }
+  apply(ctx, { botToken: 't', chatId: '123456789', allowedUserIds: ['123456789'], dryRun: true, notifyOnStart: false }, { createClient: () => fakeClient() })
+  const route = routes.find((r) => r.path === '/max-notify/settings.json')
+  assert.ok(route, 'settings route registered')
+  assert.equal(route.auth, 'required', 'route must be admitted by the host')
+  let body
+  const res = { setHeader() {}, end(payload) { body = JSON.parse(payload) } }
+  await route.handler({ method: 'GET', headers: {} }, res, { principal: 'admitted' })
+  assert.equal(body.ok, true)
+  assert.equal('voiceEndpoint' in body.values, false)
+})

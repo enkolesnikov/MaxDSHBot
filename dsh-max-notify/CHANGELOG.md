@@ -4,6 +4,17 @@ All notable changes to `dsh-max-notify` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.1] — 2026-11-24
+
+### Fixed
+
+- **Settings API возвращал 403 для валидной сессии** после DSH 0.2.2-rc.2:
+  `connection.requestRejection` удалён в rc.2, а плагин использовал его как
+  проверку доступа и fail-closed отвечал 403. Теперь маршрут
+  `/max-notify/settings.json` объявляет `auth: 'required'` и полагается на
+  admission веб-сервера; повторная проверка в handler удалена.
+  Добавлен регрессионный тест на отсутствие `requestRejection`.
+
 ## [1.11.0] — 2026-11-24
 
 Приведение транспорта к изменениям MAX Bot API 2026 — разбор с датами и

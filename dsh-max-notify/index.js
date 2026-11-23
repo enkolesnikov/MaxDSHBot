@@ -1313,6 +1313,11 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       logger.debug('settings page disabled: webServer is unavailable')
       return
     }
+    // DSH 0.2.2-rc.2 removed `connection.requestRejection`: admission is owned
+    // by the webServer route itself (`auth: 'required'` is the default). The
+    // handler only runs for already-admitted requests, so it must not re-check
+    // auth (doing so denied every valid session with 403).
+    const requireAdmission = connection?.requestRejection === undefined
     const api = createSettingsApi({
       file: settingsFilePath,
       getValues: settingsValues,
@@ -1325,20 +1330,9 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       const disposeRoute = registerRoute(webServer, {
         kind: 'exact',
         path: '/max-notify/settings.json',
-        handler: async (req, res) => {
-          let rejection
-          try {
-            rejection = connection?.requestRejection ? await connection.requestRejection(req) : 403
-          } catch {
-            rejection = 403
-          }
-          if (rejection !== undefined && rejection !== null) {
-            res.statusCode = rejection
-            res.end(rejection === 401 ? 'unauthorized' : 'forbidden')
-            return
-          }
-          await api(req, res)
-        },
+        // Explicit admission policy: the host authenticates before the handler.
+        auth: requireAdmission ? 'required' : undefined,
+        handler: api,
       }, logger)
       settingsRouteDispose = () => {
         try {

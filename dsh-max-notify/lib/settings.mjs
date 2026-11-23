@@ -6,7 +6,7 @@
  *   POST /max-notify/settings.json  → validated overlay saved to JSON
  *
  * Authentication is handled by the host before `createSettingsApi` is called
- * (see index.js `connection.requestRejection`); this module never sees secrets.
+ * (see the webServer route registration in index.js); this module never sees secrets.
  * Only the allowlisted, non-secret preferences in SETTINGS_KEYS are editable.
  * The overlay lives outside the repository (for example
  * `$DSH_HOME/max-notify/config.json`), is written atomically, always gets mode
@@ -189,7 +189,8 @@ function readBody(req, limit) {
 /**
  * JSON-only handler for the DSH client page. Authentication is expected to
  * happen before it is called: the host wraps it with
- * `connection.requestRejection`, so the handler itself performs no token check.
+ * the webServer admission layer (`auth: 'required'`), so the handler itself
+ * performs no token check.
  */
 export function createSettingsApi({ file, getValues, getStatus, getVersion, logger, onSave } = {}) {
   const snapshot = async (getter) => (typeof getter === 'function' ? await getter() : undefined)
