@@ -301,6 +301,14 @@ export function normalizeConfig(raw = {}) {
     webhookQueueBytesMax: asInteger(merged.webhookQueueBytesMax, DEFAULTS.webhookQueueBytesMax, 64 * 1024, 256 * 1024 * 1024),
   }
 
+  // The per-entry cap must never exceed the whole-queue budget: a queue byte
+  // cap smaller than the entry cap could never hold even one accepted update.
+  // Normalization is pure, so this is a silent clamp (no logger here); an
+  // explicit smaller `webhookEntryBytesMax` (the HTTP body cap) is preserved.
+  if (config.webhookEntryBytesMax > config.webhookQueueBytesMax) {
+    config.webhookEntryBytesMax = config.webhookQueueBytesMax
+  }
+
   const format = typeof config.format === 'string' ? config.format.trim().toLowerCase() : ''
   config.format = format === 'markdown' || format === 'html' ? format : undefined
   const channel = (value) => (value === 'max' || value === 'gui' || value === 'both' ? value : 'both')

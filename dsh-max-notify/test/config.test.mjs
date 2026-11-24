@@ -114,3 +114,24 @@ test('insecureVoiceEndpoint is an explicit opt-in and defaults to false', () => 
   assert.equal(normalizeConfig({ ...base, insecureVoiceEndpoint: '0' }).insecureVoiceEndpoint, false)
   assert.equal(normalizeConfig({ ...base, insecureVoiceEndpoint: 'nope' }).insecureVoiceEndpoint, false)
 })
+
+test('webhook entry byte cap is clamped to the queue byte cap, defaults unchanged', () => {
+  // Public defaults stay 64KiB entry / 8MiB queue.
+  assert.equal(DEFAULTS.webhookEntryBytesMax, 64 * 1024)
+  assert.equal(DEFAULTS.webhookQueueBytesMax, 8 * 1024 * 1024)
+
+  // An entry cap above the queue budget is clamped down to it.
+  const clamped = normalizeConfig({ ...base, webhookEntryBytesMax: 1024 * 1024, webhookQueueBytesMax: 64 * 1024 })
+  assert.equal(clamped.webhookQueueBytesMax, 64 * 1024)
+  assert.equal(clamped.webhookEntryBytesMax, 64 * 1024)
+
+  // A deliberately smaller HTTP body cap is preserved (it may be stricter).
+  const smaller = normalizeConfig({ ...base, webhookEntryBytesMax: 32 * 1024 })
+  assert.equal(smaller.webhookEntryBytesMax, 32 * 1024)
+  assert.equal(smaller.webhookQueueBytesMax, DEFAULTS.webhookQueueBytesMax)
+
+  // Defaults are not drifting through normalization.
+  const defaults = normalizeConfig({ ...base })
+  assert.equal(defaults.webhookEntryBytesMax, DEFAULTS.webhookEntryBytesMax)
+  assert.equal(defaults.webhookQueueBytesMax, DEFAULTS.webhookQueueBytesMax)
+})

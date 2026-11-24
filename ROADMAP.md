@@ -1,7 +1,8 @@
 # Дорожная карта `dsh-max-notify`
 
-Текущая версия: **1.11.0** (MAX API 2026). План рассчитан на
-DSH 0.2.x (проверено на 0.2.2-rc.2, Node 24.22+).
+Текущая версия: **1.11.1** (hotfix settings API; MAX API 2026 — в 1.11.0).
+План рассчитан на DSH 0.2.x: проверено на **0.2.3-alpha.2** (Node 24.22+),
+`engines.dsh` — `>=0.2.2-rc.1 <0.3.0-0`.
 
 Цель: из «уведомлятора + пульта» сделать надёжный продукт: доставка без
 потерь/дублей, approvals без зависаний, безопасные дефолты, полное управление
@@ -27,6 +28,8 @@ DSH 0.2.x (проверено на 0.2.2-rc.2, Node 24.22+).
 | **1.9** | P2 аудита | дедупликация, LRU, наблюдаемость, лимитер/транспорт/конфиг, dryRun, teardown | ✅ реализовано |
 | **1.10** | P2 финал | webhook-runtime/deliver/fs-safe, workspace store, 0700, warn-логи, CDN-тест | ✅ реализовано |
 | **1.11** | MAX API 2026 | success:false, getMessage/getVideo, filename cap, admin-perms event | ✅ реализовано |
+| **1.12** | Техдолг 24.11 | auth admission, polling poison, webhook resubscribe, outbox eviction, transport/state hardening | ✅ реализовано |
+| **1.11.1** | Hotfix | settings API: отказ от `connection.requestRejection` (удалён в DSH 0.2.3-alpha.1), `auth: 'required'`, регрессионный тест; 532 теста | ✅ реализовано |
 | 1.8+ | Backlog | полный распил `index.js`, observability, автопилот, Mini App, proxy, каталог | backlog |
 
 ## 0.6 — сделано

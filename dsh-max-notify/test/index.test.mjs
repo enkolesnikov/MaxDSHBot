@@ -4,11 +4,13 @@ import { EventEmitter } from 'node:events'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { format } from 'node:util'
 
 // Keep test state away from the live plugin state file.
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'dsh-max-notify-test-home-'))
 
 const { apply, normalizeConfig, isTopLevelSession } = await import('../index.js')
+const { isTopLevelSession: isTopLevelSessionFromLib } = await import('../lib/session-kind.mjs')
 
 // Isolate durable state/outbox per test: a queued item from one test must not
 // be retried by another test's plugin instance.
@@ -121,6 +123,10 @@ test('isTopLevelSession filters subagent children', () => {
   assert.equal(isTopLevelSession(session(undefined, { origin: 'subagent' })), false)
   assert.equal(isTopLevelSession(session(undefined, { delegationDepth: 2 })), false)
   assert.equal(isTopLevelSession(session(undefined, { delegationDepth: 0 })), true)
+})
+
+test('isTopLevelSession is re-exported from the shared session-kind module', () => {
+  assert.equal(isTopLevelSession, isTopLevelSessionFromLib)
 })
 
 test('forwards exactly one message per completed turn with the last assistant text', async () => {
@@ -343,6 +349,56 @@ test('userId target must be in allowedUserIds', async () => {
   await tick()
   assert.equal(denied.client.sent.length, 0)
   assert.ok(denied.fake.logs.some(([, ...args]) => args.some((a) => String(a).includes('not in allowedUserIds'))))
+})
+
+test('null chatId/userId are treated as absent by the startup guard', () => {
+  const { ctx, logs, listenerCount } = createFakeCtx()
+  assert.doesNotThrow(() => apply(ctx, { botToken: 't', chatId: null, userId: null }))
+  assert.equal(listenerCount('session/event'), 0)
+  assert.ok(logs.some(([level, message]) => level === 'warn' && String(message).includes('no MAX target')))
+})
+
+test('null chatId falls back to userId and never leaks into the send params', async () => {
+  const { ctx, emit } = createFakeCtx()
+  const client = createFakeClient()
+  apply(ctx, { botToken: 't', chatId: null, userId: '777' }, { createClient: () => client })
+  const s = session('session-null-chat')
+
+  emit('session/event', s, evt('turn/start', { turn: 1 }))
+  emit('session/event', s, assistantEvent(1, 1, 'userId fallback'))
+  emit('session/event', s, evt('turn/end', { turn: 1, reason: { kind: 'completed' } }))
+  await tick(60)
+
+  assert.equal(client.sent.length, 1)
+  assert.equal(client.sent[0].userId, '777')
+  assert.equal(client.sent[0].chatId, undefined)
+})
+
+test('startup log carries all nine format arguments (transport, cost-meter, digest)', () => {
+  const { ctx, logs } = createFakeCtx()
+  apply(ctx, {
+    botToken: 't',
+    chatId: '42',
+    digestEnabled: true,
+    digestTime: '09:15',
+  })
+
+  const entry = logs.find(
+    ([level, message]) => level === 'info' && String(message).includes('forwarding each agent reply to MAX'),
+  )
+  assert.ok(entry, 'startup log expected')
+  const [, message, ...args] = entry
+  // Regression for "6 placeholders, 9 args": every argument must be consumed.
+  assert.equal((String(message).match(/%s/g) ?? []).length, args.length)
+  assert.equal(args.length, 9)
+
+  const text = format(String(message), ...args)
+  assert.match(text, /^forwarding each agent reply to MAX chat 42 as markdown/)
+  assert.match(text, /; remote control off/)
+  assert.match(text, /; outbox on/)
+  assert.match(text, /; cost-meter on/)
+  assert.match(text, /; long polling/)
+  assert.match(text, /; digest at 09:15/)
 })
 
 test('chat verification failure blocks sending (fail closed)', async () => {
@@ -879,4 +935,51 @@ test('webhook secrets shorter than 32 chars are rejected at normalization', () =
   })
   assert.equal(strong.webhookSecret, '0123456789abcdef0123456789abcdef')
   assert.equal(strong.webhookSecretInvalid, false)
+})
+
+test('title cache is LRU-bounded (500) and drops entries on session/disposed', async () => {
+  const titles = new Map()
+  const services = {
+    sessionTitle: {
+      get: (session) => (titles.has(String(session?.id)) ? { title: titles.get(String(session?.id)) } : undefined),
+    },
+  }
+  const { ctx, emit } = createFakeCtx({ services })
+  const client = createFakeClient()
+  apply(ctx, { botToken: 't', chatId: '1', allowedChatIds: ['1'] }, { createClient: () => client })
+
+  // Keep the GUI side of the approval race pending: we only care about the
+  // title cache side effects of the MAX card (no answer is needed here).
+  const never = () => new Promise(() => {})
+  const approval = (id) => emit('approval/request', { toolName: 'bash', agent: { session: { id, header: {} } } }, never)
+
+  for (let index = 0; index < 501; index += 1) {
+    titles.set(`s${index}`, `title-${index}`)
+    approval(`s${index}`)
+  }
+  // The cards are sent from microtasks; poll instead of guessing one delay.
+  for (let attempt = 0; attempt < 200 && client.sent.length < 501; attempt += 1) await tick(10)
+  assert.equal(client.sent.length, 501)
+  assert.match(client.sent[0].text, /🗂 title-0/)
+  assert.match(client.sent[500].text, /🗂 title-500/)
+
+  // The oldest title was evicted: the sessionTitle service no longer knows it,
+  // so the card must come out without a title line.
+  titles.delete('s0')
+  approval('s0')
+  await tick(40)
+  assert.doesNotMatch(client.sent.at(-1).text, /🗂/)
+  assert.match(client.sent.at(-1).text, /Разрешить/)
+
+  // A recently used title is still cached after the service goes silent.
+  titles.delete('s500')
+  approval('s500')
+  await tick(40)
+  assert.match(client.sent.at(-1).text, /🗂 title-500/)
+
+  // session/disposed drops that session's entry as well.
+  emit('session/disposed', { id: 's500', header: {} })
+  approval('s500')
+  await tick(40)
+  assert.doesNotMatch(client.sent.at(-1).text, /🗂/)
 })

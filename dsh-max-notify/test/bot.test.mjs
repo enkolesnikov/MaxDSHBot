@@ -272,6 +272,39 @@ test('callbacks from a non-allowlisted user are rejected', async () => {
   assert.equal(calls.prompts.length, 0)
 })
 
+test('a failing callback handler answers with an error notification and does not throw', async () => {
+  const logs = []
+  const { bot, client } = makeBot({
+    logger: { info() {}, warn: (...args) => logs.push(args), debug() {} },
+    interactions: {
+      handleCallback: async () => {
+        throw new Error('callback failed')
+      },
+    },
+  })
+  const callbackUpdate = (callbackId) => ({
+    update_type: 'message_callback',
+    callback: { callback_id: callbackId, payload: '{"t":"approve"}', user: { user_id: 987654321 } },
+    message: { recipient: { chat_id: 123456789 } },
+  })
+
+  // The handler throws: the catch path must dismiss the MAX spinner.
+  await bot.handleUpdate(callbackUpdate('cb-boom'))
+  assert.deepEqual(client.callbacks, [
+    { callbackId: 'cb-boom', body: { notification: 'Ошибка обработки' } },
+  ])
+  assert.equal(logs.length, 1)
+  assert.equal(logs[0][0], 'cannot handle MAX callback: %s')
+  assert.equal(logs[0][1], 'callback failed')
+
+  // A failing answerCallback itself must not escape either (best effort).
+  client.answerCallback = async () => {
+    throw new Error('answer failed')
+  }
+  await bot.handleUpdate(callbackUpdate('cb-boom-2'))
+  assert.equal(client.callbacks.length, 1)
+})
+
 test('pollOnce primes the marker first and then processes new updates', async () => {
   const client = createFakeClient()
   const state = createMemoryState()
@@ -431,14 +464,14 @@ test('a redelivered batch does not duplicate prompts (update dedupe)', async () 
   assert.deepEqual(calls.prompts, [{ sessionId: 'session-aaaaaaaa', text: 'только один раз' }])
 })
 
-test('a failed handler keeps the marker and redelivers unhandled updates', async () => {
+test('a failed handler does not abort the batch and is retried on redelivery', async () => {
   const client = createFakeClient()
   const state = createMemoryState()
   let failures = 1
   const { runtime, calls } = runtimeStub()
   const originalPrompt = runtime.promptSession
   runtime.promptSession = async (sessionId, text) => {
-    if (failures > 0) {
+    if (text === 'первый' && failures > 0) {
       failures -= 1
       throw new Error('prompt failed')
     }
@@ -450,12 +483,112 @@ test('a failed handler keeps the marker and redelivers unhandled updates', async
   const bot = createBot({ client, config: config(), logger: { info() {}, warn() {}, debug() {} }, state, runtime })
 
   await bot.pollOnce()
-  await assert.rejects(bot.pollOnce(), /prompt failed/)
-  assert.equal(state.marker, 20)
-  const retry = await bot.pollOnce()
-  assert.equal(retry.handled, 2)
+  // A poison update must not abort the rest of the batch (previously the whole
+  // batch was retried forever and the marker never advanced).
+  const first = await bot.pollOnce()
+  assert.deepEqual(first, { primed: false, count: 2, handled: 1 })
   assert.equal(state.marker, 21)
-  assert.deepEqual(calls.prompts.map((entry) => entry.text), ['первый', 'второй'])
+  assert.deepEqual(calls.prompts.map((entry) => entry.text), ['второй'])
+
+  // Redelivery: the failed update is retried, the successful one stays deduped.
+  const retry = await bot.pollOnce()
+  assert.equal(retry.handled, 1)
+  assert.equal(state.marker, 21)
+  assert.deepEqual(calls.prompts.map((entry) => entry.text), ['второй', 'первый'])
+})
+
+test('a poison update that throws twice succeeds on the third attempt', async () => {
+  const client = createFakeClient()
+  const state = createMemoryState()
+  const logs = []
+  const logger = { info() {}, warn: (...args) => logs.push(args), debug() {} }
+  const { runtime, calls } = runtimeStub()
+  let failures = 2
+  const originalPrompt = runtime.promptSession
+  runtime.promptSession = async (sessionId, text) => {
+    if (text === 'яд' && failures > 0) {
+      failures -= 1
+      throw new Error('poison update')
+    }
+    return originalPrompt(sessionId, text)
+  }
+  const poison = messageUpdate({ text: 'яд' })
+  const healthy = messageUpdate({ text: 'здоровый' })
+  client.getUpdates = async (params) =>
+    params.marker === undefined ? { updates: [], marker: 30 } : { updates: [poison, healthy], marker: 31 }
+  const bot = createBot({ client, config: config(), logger, state, runtime })
+
+  await bot.pollOnce()
+  // Attempt 1: poison fails, the healthy update is still processed.
+  const first = await bot.pollOnce()
+  assert.deepEqual(first, { primed: false, count: 2, handled: 1 })
+  assert.equal(state.marker, 31)
+  assert.deepEqual(calls.prompts.map((entry) => entry.text), ['здоровый'])
+
+  // Attempt 2: poison fails again, the batch is not aborted and the marker moves.
+  const second = await bot.pollOnce()
+  assert.deepEqual(second, { primed: false, count: 2, handled: 0 })
+  assert.equal(state.marker, 31)
+  assert.deepEqual(calls.prompts.map((entry) => entry.text), ['здоровый'])
+
+  // Attempt 3: the update recovers and is processed exactly once.
+  const third = await bot.pollOnce()
+  assert.deepEqual(third, { primed: false, count: 2, handled: 1 })
+  assert.equal(state.marker, 31)
+  assert.deepEqual(calls.prompts.map((entry) => entry.text), ['здоровый', 'яд'])
+
+  // Two retry warnings with the update type/chat and no "skipping" line.
+  const retryWarns = logs.filter((entry) => /cannot handle MAX update/.test(String(entry[0])))
+  assert.equal(retryWarns.length, 2)
+  assert.deepEqual(retryWarns[0].slice(1), ['message_created', 123456789, 1, 3, 'poison update'])
+  assert.deepEqual(retryWarns[1].slice(1), ['message_created', 123456789, 2, 3, 'poison update'])
+  assert.equal(logs.filter((entry) => /skipping MAX update/.test(String(entry[0]))).length, 0)
+})
+
+test('a permanently failing update is skipped after three failures and does not block others', async () => {
+  const client = createFakeClient()
+  const state = createMemoryState()
+  const warnLogs = []
+  const debugLogs = []
+  const logger = { info() {}, warn: (...args) => warnLogs.push(args), debug: (...args) => debugLogs.push(args) }
+  const { runtime, calls } = runtimeStub()
+  const originalPrompt = runtime.promptSession
+  runtime.promptSession = async (sessionId, text) => {
+    if (text === 'яд') throw new Error('permanent poison')
+    return originalPrompt(sessionId, text)
+  }
+  const poison = messageUpdate({ text: 'яд' })
+  const healthy = messageUpdate({ text: 'здоровый' })
+  let nextMarker = 40
+  client.getUpdates = async (params) => {
+    if (params.marker === undefined) return { updates: [], marker: nextMarker++ }
+    return { updates: [poison, healthy], marker: nextMarker++ }
+  }
+  const bot = createBot({ client, config: config(), logger, state, runtime })
+
+  await bot.pollOnce()
+  // Failures 1 and 2: the poison update is retried, the healthy one is not duplicated.
+  assert.deepEqual(await bot.pollOnce(), { primed: false, count: 2, handled: 1 })
+  assert.equal(state.marker, 41)
+  assert.deepEqual(await bot.pollOnce(), { primed: false, count: 2, handled: 0 })
+  assert.equal(state.marker, 42)
+  // Failure 3: the update is given up; the marker still advances.
+  assert.deepEqual(await bot.pollOnce(), { primed: false, count: 2, handled: 0 })
+  assert.equal(state.marker, 43)
+  assert.deepEqual(calls.prompts.map((entry) => entry.text), ['здоровый'])
+
+  // A redelivery after the give-up is skipped without another handler call and
+  // the batch still advances the marker.
+  assert.deepEqual(await bot.pollOnce(), { primed: false, count: 2, handled: 0 })
+  assert.equal(state.marker, 44)
+  assert.deepEqual(calls.prompts.map((entry) => entry.text), ['здоровый'])
+
+  // Two retry warnings, one give-up warning, then only debug skips.
+  assert.equal(warnLogs.length, 3)
+  assert.deepEqual(warnLogs[0].slice(1), ['message_created', 123456789, 1, 3, 'permanent poison'])
+  assert.deepEqual(warnLogs[1].slice(1), ['message_created', 123456789, 2, 3, 'permanent poison'])
+  assert.deepEqual(warnLogs[2].slice(1), ['message_created', 123456789, 3, 'permanent poison'])
+  assert.equal(debugLogs.filter((entry) => /still failing, skipped/.test(String(entry[0]))).length, 1)
 })
 
 function adminPermissionsUpdate({ chatId = 555, timestamp = 1_700_000_000_000, permissions, ...rest } = {}) {

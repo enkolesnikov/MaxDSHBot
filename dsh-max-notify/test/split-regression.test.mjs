@@ -13,7 +13,15 @@
  *     send/upload/outbox call;
  *  3. the preferred `/new` workspace lives in a single store: `/workspace N`
  *     writes it through the bot runtime and `/new` reads it back through the
- *     runtime getter used by createSession.
+ *     runtime getter used by createSession;
+ *  4. the retry timer re-subscribes when the startup subscribe failed (MAX API
+ *     down), serialized through the in-flight guard and backoff;
+ *  5. a queue-cap eviction is surfaced as a warning, an audit `drop` record and
+ *     the `webhookDroppedTotal` health counter;
+ *  6. dispose / route teardown clear `webhookActive`, `webhookSubscribed` and
+ *     fall the transport label back to polling (honest `/health`);
+ *  7. an HMR overlap disposes the old runtime without unsubscribing the MAX URL
+ *     that a newer live runtime still owns (process-wide live-runtime registry).
  *
  * Everything is faked: no network, no live DSH host, no real MAX bot.
  */
@@ -93,7 +101,14 @@ function webhookResponse(onEnd) {
 }
 
 /** Fresh webhook runtime over a real durable state file and a fake webServer. */
-function createWebhookHarness({ stateFile, bot }) {
+function createWebhookHarness({
+  stateFile,
+  bot,
+  client = createFakeClient(),
+  config: configOverrides = {},
+  runtimeOptions = {},
+  webServer = createFakeWebServer(),
+} = {}) {
   const logger = silentLogger()
   const health = createHealth({ version: 'test' })
   const audit = { writes: [], write(entry) { this.writes.push(entry) } }
@@ -106,8 +121,8 @@ function createWebhookHarness({ stateFile, bot }) {
     webhookSecret: WEBHOOK_SECRET,
     webhookAutoSubscribe: false,
     stateFile,
+    ...configOverrides,
   })
-  const webServer = createFakeWebServer()
   const fake = createFakeCtx()
   const runtime = createWebhookRuntime({
     state,
@@ -116,15 +131,25 @@ function createWebhookHarness({ stateFile, bot }) {
     audit,
     bot,
     config,
-    client: createFakeClient(),
+    client,
     getService: () => webServer,
     isDisposed: () => false,
     redactUpdate: () => '[redacted update]',
     context: fake.ctx,
     writeHeartbeat: () => {},
     clearFallbackTimer: () => {},
+    ...runtimeOptions,
   })
-  return { runtime, state, health, audit, logger, config, webServer, fake, stateFile }
+  return { runtime, state, health, audit, logger, config, webServer, fake, stateFile, client }
+}
+
+/** Bot double with no subscription side effects; enough for lifecycle tests. */
+function plainBot() {
+  return {
+    updateKey: () => undefined,
+    applyUpdate: async () => {},
+    stopPolling: () => {},
+  }
 }
 
 /**
@@ -430,5 +455,218 @@ test('webhookRemoveOnStop unsubscribes even though the route disposer clears act
     assert.deepEqual(unsubscribed, ['https://example.test/max/webhook'])
   } finally {
     await fake.disposeEffects()
+  }
+})
+
+test('retry timer re-subscribes after failed startup subscribes (in-flight guarded, backing off)', async () => {
+  const stateFile = join(TEST_HOME, 'resubscribe-state.json')
+  const FAILURES = 3
+  let attempts = 0
+  let concurrent = 0
+  let maxConcurrent = 0
+  const client = createFakeClient({
+    // MAX API "down" for the first attempts: the startup subscribe fails, the
+    // retry timer must call it again (with growing delays) until it succeeds.
+    subscribeWebhook: async () => {
+      attempts += 1
+      concurrent += 1
+      maxConcurrent = Math.max(maxConcurrent, concurrent)
+      try {
+        await tick(40)
+        if (attempts <= FAILURES) throw new Error('MAX API is down')
+        return { ok: true }
+      } finally {
+        concurrent -= 1
+      }
+    },
+  })
+  const harness = createWebhookHarness({
+    stateFile,
+    bot: plainBot(),
+    client,
+    config: {
+      webhookAutoSubscribe: true,
+      webhookPublicUrl: 'https://example.test/max/webhook',
+    },
+    runtimeOptions: { retryIntervalMs: 15 },
+  })
+  const { runtime, state, health, logger, fake, webServer } = harness
+  try {
+    assert.equal(runtime.registerWebhook(webServer, fake.ctx), true)
+    await waitFor(() => attempts >= 1, { label: 'first (failing) subscribe attempt' })
+    assert.equal(runtime.subscribed, false, 'the failed first attempt must not claim a subscription')
+    await waitFor(() => runtime.subscribed === true, { label: 'resubscribe by the retry timer' })
+    assert.equal(attempts, FAILURES + 1, 'the retry timer must keep retrying until the MAX API answers')
+    assert.equal(maxConcurrent, 1, 'the in-flight guard must serialize subscribe calls')
+    // Exponential-ish backoff: double the delay after every failure (15 → 30 → 60).
+    const delays = logger.logs
+      .filter(([level, message]) => level === 'debug' && String(message).includes('subscription retry in'))
+      .map(([, , delay]) => delay)
+    assert.deepEqual(delays, [15, 30, 60], 'the resubscribe backoff must double per failure')
+    // A confirmed subscription stops the retries.
+    await tick(60)
+    assert.equal(attempts, FAILURES + 1, 'no further subscribe calls after a confirmed subscription')
+    const snapshot = health.snapshot()
+    assert.equal(snapshot.webhookActive, true)
+    assert.equal(snapshot.webhookSubscribed, true)
+    assert.equal(snapshot.webhookSubscriptionError, undefined)
+  } finally {
+    runtime.dispose()
+    await fake.disposeEffects()
+    state.dispose()
+  }
+})
+
+test('queue overflow is visible: warn, audit drop and health counter', async () => {
+  const stateFile = join(TEST_HOME, 'overflow-state.json')
+  const gated = createGatedBot()
+  const harness = createWebhookHarness({
+    stateFile,
+    bot: gated.bot,
+    config: {
+      // A 64 KiB queue holding two ~40 KiB updates forces the oldest one out.
+      webhookQueueBytesMax: 64 * 1024,
+      webhookEntryBytesMax: 64 * 1024,
+    },
+  })
+  gated.bindState(harness.state)
+  const { runtime, state, health, audit, logger, fake, webServer } = harness
+  try {
+    assert.equal(runtime.registerWebhook(webServer, fake.ctx), true)
+    const bigUpdate = (n) => ({ update_type: 'message_created', text: `${n}`.padEnd(40_000, 'x') })
+    await runtime.acceptWebhookUpdate(bigUpdate(1))
+    // The drain is parked on the first update, so the second push must evict it.
+    await waitFor(() => gated.applied.length === 1, { label: 'first update parked in the drain' })
+    await runtime.acceptWebhookUpdate(bigUpdate(2))
+
+    const drops = audit.writes.filter((entry) => entry.kind === 'webhook' && entry.action === 'drop')
+    assert.equal(drops.length, 1, 'a queue-cap eviction must be audited')
+    assert.equal(drops[0].reason, 'queue-cap')
+    assert.equal(drops[0].dropped, 1)
+    assert.ok(Number.isFinite(drops[0].bytes) && drops[0].bytes > 0, 'the audit drop must carry queue bytes')
+
+    const snapshot = health.snapshot()
+    assert.equal(snapshot.webhookDroppedTotal, 1, '/health must count dropped webhook updates')
+    assert.ok(Number.isFinite(snapshot.webhookLastDropAt))
+    const warned = logger.logs.filter(([level, message]) => level === 'warn' && String(message).includes('queue cap'))
+    assert.equal(warned.length, 1, 'a queue-cap eviction must be logged as a warning')
+  } finally {
+    gated.release()
+    await tick(40)
+    runtime.dispose()
+    await fake.disposeEffects()
+    state.dispose()
+  }
+})
+
+test('/health stops claiming a webhook after dispose or route teardown', async () => {
+  const bot = plainBot()
+  // Path 1: the plugin disposer calls runtime.dispose().
+  const disposedHarness = createWebhookHarness({
+    stateFile: join(TEST_HOME, 'health-dispose-state.json'),
+    bot,
+    config: {
+      webhookAutoSubscribe: true,
+      webhookPublicUrl: 'https://example.test/max/webhook',
+    },
+  })
+  const disposed = disposedHarness.runtime
+  try {
+    assert.equal(disposed.registerWebhook(disposedHarness.webServer, disposedHarness.fake.ctx), true)
+    await waitFor(() => disposed.subscribed === true, { label: 'subscription before dispose' })
+    const before = disposedHarness.health.snapshot()
+    assert.equal(before.transport, 'webhook')
+    assert.equal(before.webhookActive, true)
+    assert.equal(before.webhookSubscribed, true)
+
+    disposed.dispose()
+    const after = disposedHarness.health.snapshot()
+    assert.equal(disposed.active, false)
+    assert.equal(disposed.subscribed, false)
+    assert.equal(after.transport, 'polling', 'without a route the honest transport label is polling')
+    assert.equal(after.webhookActive, false, '/health must not claim a webhook after dispose')
+    assert.equal(after.webhookSubscribed, false, 'a stale subscription claim must be cleared')
+  } finally {
+    disposed.dispose()
+    await disposedHarness.fake.disposeEffects()
+    disposedHarness.state.dispose()
+  }
+
+  // Path 2: the Cordis effect disposer runs routeDispose directly (HMR/service
+  // unload) without the plugin-level dispose() call.
+  const teardownHarness = createWebhookHarness({
+    stateFile: join(TEST_HOME, 'health-route-state.json'),
+    bot,
+    config: {
+      webhookAutoSubscribe: true,
+      webhookPublicUrl: 'https://example.test/max/webhook',
+    },
+  })
+  try {
+    assert.equal(teardownHarness.runtime.registerWebhook(teardownHarness.webServer, teardownHarness.fake.ctx), true)
+    await waitFor(() => teardownHarness.runtime.subscribed === true, { label: 'subscription before route teardown' })
+    await teardownHarness.fake.disposeEffects()
+    const snapshot = teardownHarness.health.snapshot()
+    assert.equal(teardownHarness.runtime.active, false)
+    assert.equal(teardownHarness.runtime.subscribed, false)
+    assert.equal(snapshot.transport, 'polling')
+    assert.equal(snapshot.webhookActive, false)
+    assert.equal(snapshot.webhookSubscribed, false)
+  } finally {
+    teardownHarness.runtime.dispose()
+    await teardownHarness.fake.disposeEffects()
+    teardownHarness.state.dispose()
+  }
+})
+
+test('disposing an old runtime does not unsubscribe while a newer generation owns the route', async () => {
+  const url = 'https://example.test/max/webhook'
+  const unsubscribed = []
+  const client = createFakeClient({
+    unsubscribeWebhook: async (url_) => {
+      unsubscribed.push(url_)
+      return { ok: true }
+    },
+  })
+  const bot = plainBot()
+  const webServer = createFakeWebServer()
+  const config = {
+    webhookAutoSubscribe: false,
+    webhookRemoveOnStop: true,
+    webhookPublicUrl: url,
+  }
+  const oldGen = createWebhookHarness({
+    stateFile: join(TEST_HOME, 'hmr-old-state.json'),
+    bot,
+    client,
+    webServer,
+    config,
+  })
+  const newGen = createWebhookHarness({
+    stateFile: join(TEST_HOME, 'hmr-new-state.json'),
+    bot,
+    client,
+    webServer,
+    config,
+  })
+  try {
+    assert.equal(oldGen.runtime.registerWebhook(webServer, oldGen.fake.ctx), true)
+    assert.equal(newGen.runtime.registerWebhook(webServer, newGen.fake.ctx), true, 'the newer generation replaces the route')
+    oldGen.runtime.dispose()
+    await tick(30)
+    assert.deepEqual(unsubscribed, [], 'the old generation must not remove the subscription a newer one owns')
+    assert.equal(webServer.exact.has('/max/webhook'), true, 'the newer route must survive the old teardown')
+    assert.equal(newGen.runtime.active, true)
+
+    newGen.runtime.dispose()
+    await waitFor(() => unsubscribed.length === 1, { label: 'unsubscribe after the last runtime stops' })
+    assert.deepEqual(unsubscribed, [url])
+  } finally {
+    oldGen.runtime.dispose()
+    newGen.runtime.dispose()
+    await oldGen.fake.disposeEffects()
+    await newGen.fake.disposeEffects()
+    oldGen.state.dispose()
+    newGen.state.dispose()
   }
 })

@@ -17,16 +17,16 @@
 | Webhook secret | принимался любой | 32–256 `[A-Za-z0-9_-]`, иначе fallback polling |
 | GUI | voice endpoint/TTS можно было перенаправить через overlay | ключи убраны из overlay; endpoint только в приватном профиле |
 | Файлы | state/outbox/heartbeat/inbox 0644 | 0600/0700, corrupt-файлы в `.corrupt-*` |
-| Outbox | pending/delivered дубли | skip pending/delivered, dedupe
+| Outbox | pending/delivered дубли | skip pending/delivered, dedupe |
 | Lifecycle | `bot.stop()` ставил disposed до `start()` | `stopPolling()` отдельно |
 | CI/гигиена | refs/original с chat id, личные каталоги, CI write token | refs удалены, `.gitignore`, `permissions: contents: read`, concurrency/timeout |
-| UX/тесты | 358 тестов; `uploadTypeFor`/allowlist/rc.2/secret покрыты | +5 тестов |
+| UX/тесты | было 353 теста | 358 тестов (+5): `uploadTypeFor`/allowlist/rc.2/secret покрыты |
 
 ## Отложено (1.7)
 
 1. Распил `index.js` (2051 строка): `lib/config.mjs` первым, затем forwarding/
    final-delivery/host-фасад/events/lifecycle.
-2. Удаление мёртвой standalone HTML-страницы настроек (~300 строк, только тесты).
+2. Удаление мёртвой standalone HTML-страницы настроек (~360 строк, только тесты).
 3. Единый `target/send-params` и `formatMoney/formatCost` хелперы.
 4. State schema migration/fsync/queue-by-bytes; full async shutdown.
 5. Полный контрактный тест клиента с локальным HTTPS-сервером и Node 20 CI.
@@ -35,11 +35,18 @@
 
 ## Проверки
 
-- `npm test`: 435/435 (1.8.0).
-- 1.6.1: `lib/config.mjs` вынесен из `index.js` (324 строки), поведение без изменений.
-- 1.7.0: `lib/forwarding.mjs`, dead settings removed, state/outbox durability, CI 20/22/24, transport 38.
-- 1.8.0: закрыты P1 аудита 17.11 — webhook caps/redaction, deliverables path boundary, autonomy identity, outbox race, lifecycle/HMR, CI sensitive guard; 531 тест. Остаток P2 — `docs/p2-backlog.md`.
-- `npm run check`: OK; `npm pack --dry-run`: 45 файлов.
+- `npm test` (текущее дерево, 1.11.1): **568/568** на Node 20/22/24.
+- 1.6.0: 358 тестов (было 353, +5); 1.6.1: `lib/config.mjs` вынесен из
+  `index.js` (324 строки), поведение без изменений.
+- 1.7.0: `lib/forwarding.mjs`, dead settings removed, state/outbox durability,
+  CI 20/22/24, 38 транспортных контрактных тестов; всего 400 тестов.
+- 1.8.0: закрыты P1 аудита 17.11 — webhook caps/redaction, deliverables path
+  boundary, autonomy identity, outbox race, lifecycle/HMR, CI sensitive guard;
+  435 тестов. Остаток P2 — `docs/p2-backlog.md`.
+- 1.9.0: P2 закрыт (дедуп, LRU, наблюдаемость, лимитер, dryRun, teardown) —
+  490 тестов. 1.10.0: webhook-runtime/deliver/fs-safe, workspace store —
+  515 тестов. 1.11.1: 568 тестов.
+- `npm run check`: OK; `npm pack --dry-run`: 55 файлов (1.11.1).
 - Live hot-reload: `transport=webhook`, `webhookActive=true`, `webhookSubscribed=true`,
   `/max/webhook` → 401 без секрета, `/max-notify/settings.json` → 401 без cookie.
 - История/оффлайн: старые SHA 422/404; свежий клон — 0 sensitive-совпадений.

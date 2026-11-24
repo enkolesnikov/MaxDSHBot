@@ -20,6 +20,9 @@
  * granularity (same-second rewrite) can leave `mtimeMs` untouched while the
  * payload length changes. An unchanged ledger is served from the parsed
  * snapshot without any synchronous read/parse, however stale the snapshot is.
+ * Parse failures (corrupt/incomplete JSON) are cached the same way, so a broken
+ * ledger is not re-read up to 8 MiB on every snapshot; the read is retried as
+ * soon as `mtimeMs` or `size` changes.
  */
 import { readFileSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -232,11 +235,18 @@ export function createCostMeter({ file, logger, now = () => Date.now(), cacheMs 
       return cache
     } catch (error) {
       logger?.debug?.('cannot read cost-meter ledger %s: %s', path, error?.message || String(error))
-      return {
+      // Cache the failure for this exact file version: a broken 8 MiB ledger must
+      // not be re-read and re-parsed on every snapshot. Any change of size or
+      // mtime retries the read.
+      cache = {
         available: false,
         reason: `cannot read ledger: ${error?.message || String(error)}`,
         ledgerFile: path,
       }
+      cacheAt = at
+      cacheMtime = stats.mtimeMs
+      cacheSize = stats.size
+      return cache
     }
   }
 

@@ -92,7 +92,7 @@ export function createObserver({ client, config, logger, target, policy, runtime
       return
     }
     if (outbox) {
-      outbox.enqueue({
+      const queued = outbox.enqueue({
         dedupeKey,
         kind,
         priority: priority ?? (kind === 'error' ? PRIORITY.critical : PRIORITY.normal),
@@ -104,6 +104,9 @@ export function createObserver({ client, config, logger, target, policy, runtime
           disableLinkPreview: true,
         },
       })
+      if (queued === false) {
+        logger?.warn?.('MAX notification %s was not queued (duplicate or queue cap)', kind)
+      }
       void outbox.flush().catch((error) => logger?.warn?.('outbox flush failed: %s', error?.message || String(error)))
       return
     }

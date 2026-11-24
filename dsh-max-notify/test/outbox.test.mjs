@@ -11,6 +11,7 @@ const freshFile = () => join(workspace, `outbox-${++fileCounter}.json`)
 const freshDir = () => mkdtempSync(join(workspace, 'case-'))
 
 const silent = { warn() {}, debug() {}, info() {} }
+const tick = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms))
 
 /** Logger that keeps the raw warn() argument list of every call. */
 function collectingLogger() {
@@ -454,4 +455,68 @@ test('repeated outbox saves keep the file valid and leave no tmp files', () => {
   assert.equal(saved.version, OUTBOX_SCHEMA_VERSION)
   assert.equal(saved.pending.length, 25)
   outbox.dispose()
+})
+
+test('size cap evicts the oldest low-priority item, never the newest one', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'outbox-cap-'))
+  const file = join(dir, 'outbox.json')
+  const calls = []
+  const box = createOutbox({
+    file,
+    maxItems: 2,
+    ttlHours: 48,
+    send: async (call, params) => { calls.push(params.text); return {} },
+    logger: { warn() {}, debug() {} },
+  })
+  assert.equal(box.enqueue({ params: { text: 'old', chatId: '1' }, priority: 0 }), true)
+  await tick(1)
+  assert.equal(box.enqueue({ params: { text: 'old2', chatId: '1' }, priority: 0 }), true)
+  await tick(1)
+  assert.equal(box.enqueue({ params: { text: 'new', chatId: '1' }, priority: 0 }), true)
+  const pendingTexts = box.snapshot().pending
+  assert.equal(pendingTexts, 2)
+  await box.flush(10)
+  assert.deepEqual(calls, ['old2', 'new'])
+  box.dispose()
+})
+
+test('enqueue reports false when the item itself is evicted by the cap', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'outbox-cap2-'))
+  const file = join(dir, 'outbox.json')
+  const box = createOutbox({ file, maxItems: 1, send: async () => ({}), logger: { warn() {}, debug() {} } })
+  assert.equal(box.enqueue({ params: { text: 'keep' }, priority: 10 }), true)
+  assert.equal(box.enqueue({ params: { text: 'drop' }, priority: 0 }), false)
+  box.dispose()
+})
+
+test('deliverNow marks a failed direct send as lost when the queue cannot keep it', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'outbox-cap3-'))
+  const file = join(dir, 'outbox.json')
+  const box = createOutbox({
+    file,
+    maxItems: 1,
+    send: async () => { throw new Error('network down') },
+    logger: { warn() {}, debug() {} },
+  })
+  box.enqueue({ params: { text: 'keep' }, priority: 10 })
+  const result = await box.deliverNow({ text: 'new' }, { dedupeKey: 'k1' })
+  assert.equal(result.queued, false)
+  assert.equal(result.lost, true)
+  box.dispose()
+})
+
+test('a present but unparseable version is preserved and blocks persistence', () => {
+  const dir = freshDir()
+  const file = join(dir, 'outbox.json')
+  writeFileSync(file, JSON.stringify({ version: 'v3', pending: [{ id: 'x', call: 'sendMessage', params: { text: 'keep' } }], delivered: [] }))
+  const warns = []
+  const box = createOutbox({ file, send: async () => ({}), logger: { warn: (...a) => warns.push(a), debug() {} } })
+  const before = readFileSync(file, 'utf8')
+  // The item may live in memory for this run, but persistence stays disabled.
+  box.enqueue({ params: { text: 'new' } })
+  box.dispose()
+  assert.equal(readFileSync(file, 'utf8'), before, 'the foreign file must not be overwritten')
+  assert.ok(warns.some((args) => String(args[0]).includes('invalid')))
+  const backups = readdirSync(dir).filter((name) => name.includes('.future-'))
+  assert.equal(backups.length, 1)
 })

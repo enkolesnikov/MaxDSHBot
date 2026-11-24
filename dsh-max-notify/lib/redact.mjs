@@ -77,6 +77,45 @@ export function redact(value) {
 }
 
 /**
+ * Recursively redact every string inside a JSON-ish value (objects and arrays).
+ *
+ * Used where structured payloads are persisted or exposed — dead-letter webhook
+ * `update` bodies in the audit log and nested `extra` objects in /health — so a
+ * secret that leaked into a nested error/message field never survives just
+ * because it was not a top-level string.
+ *
+ * Plain objects and arrays are copied, never mutated; other object types (Date,
+ * Map, class instances) are returned as-is. Depth is capped so a deeply nested
+ * hostile payload cannot overflow the call stack; beyond the cap the value is
+ * replaced with a harmless placeholder. Cycles are replaced as well.
+ */
+export const DEEP_REDACT_MAX_DEPTH = 32
+
+function isPlainObject(value) {
+  const proto = Object.getPrototypeOf(value)
+  return proto === Object.prototype || proto === null
+}
+
+export function redactDeep(value, depth = 0, seen = new WeakSet()) {
+  if (typeof value === 'string') return redact(value)
+  if (value === null || typeof value !== 'object') return value
+  if (depth >= DEEP_REDACT_MAX_DEPTH) return '<deep>'
+  if (seen.has(value)) return '<cycle>'
+  if (Array.isArray(value)) {
+    seen.add(value)
+    const copy = value.map((item) => redactDeep(item, depth + 1, seen))
+    seen.delete(value)
+    return copy
+  }
+  if (!isPlainObject(value)) return value
+  seen.add(value)
+  const copy = {}
+  for (const [key, item] of Object.entries(value)) copy[key] = redactDeep(item, depth + 1, seen)
+  seen.delete(value)
+  return copy
+}
+
+/**
  * Wrap a printf-style logger so every string argument is redacted.
  *
  * `secrets` (optional) accepts a single string, an array of strings, or an

@@ -3,7 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/dsh-max-notify)](https://www.npmjs.com/package/dsh-max-notify)
 [![npm downloads](https://img.shields.io/npm/dm/dsh-max-notify)](https://www.npmjs.com/package/dsh-max-notify)
 [![CI](https://github.com/enkolesnikov/MaxDSHBot/actions/workflows/ci.yml/badge.svg)](https://github.com/enkolesnikov/MaxDSHBot/actions/workflows/ci.yml)
-[![license](https://img.shields.io/github/license/enkolesnikov/MaxDSHBot)](LICENSE)
+[![license](https://img.shields.io/github/license/enkolesnikov/MaxDSHBot)](https://github.com/enkolesnikov/MaxDSHBot/blob/main/LICENSE)
 
 DSH (DeepSeek Harness) plugin: forward **the last assistant message of every
 agent turn** to **MAX messenger** (max.ru) through a bot — and drive the agent
@@ -90,42 +90,44 @@ official MAX Agent Skill.
 
 Full dated summary with links — in Russian, together with what this plugin
 already does and what it intentionally does not use:
-[docs/max-api-2026.md](../docs/max-api-2026.md).
+[docs/max-api-2026.md](https://github.com/enkolesnikov/MaxDSHBot/blob/main/docs/max-api-2026.md).
 
-As of v1.11 the transport exposes `getMessage(messageId)` (`GET /messages/{messageId}`)
-and `getVideo(videoToken)` (`GET /videos/{videoToken}`); uploaded file names are capped at
-200 characters with the extension kept.
+What v1.11 changed in the client:
 
-## MAX API 2026 (1.11)
-
-- HTTP 200 `success:false` is now an error; `getMessage`/`getVideo`; upload
-  filename capped at 200; `bot_admin_permissions_changed` warn + health.
+- HTTP 200 with `success: false` is now an error (`MaxApiError` with `code` and
+  `message`) instead of a success.
+- New client methods `getMessage(messageId)` (`GET /messages/{messageId}`) and
+  `getVideo(videoToken)` (`GET /videos/{videoToken}`).
+- Uploaded file names are capped at 200 characters with the extension kept.
+- `bot_admin_permissions_changed` (webhook-only) is logged as `warn` and exposed
+  through health.
 
 ## Tech-debt 1.10
 
-- Full P2 closure: index 2018→1711, webhook-runtime/deliver/fs-safe modules,
-  single workspace store, 0700 dirs, warn logs, shared test fakes, CDN test.
-- 531 tests on Node 20/22/24.
+- Full P2 closure: index 2018→1711 lines (as of 1.10; 1705 in 1.11.1),
+  webhook-runtime/deliver/fs-safe modules, single workspace store, 0700 dirs,
+  warn logs, shared test fakes, CDN test.
+- 568 tests on Node 20/22/24 (current tree; 515 at 1.10).
 
 ## Tech-debt 1.9
 
 - P2 audit 17.11: dedupe, LRU caches, observability, limiter, transport,
   config validation, full dryRun, teardown tests, CI TLS requirement.
-- 531 tests on Node 20/22/24.
+- 568 tests on Node 20/22/24 (current tree; 490 at 1.9).
 
 ## Tech-debt 1.8
 
 - P1 audit 17.11: webhook byte caps + redaction, deliverable path boundary,
   strict autonomy matching, outbox race, lifecycle/HMR, CI leak guard.
-- 531 tests on Node 20/22/24.
+- 568 tests on Node 20/22/24 (current tree; 435 at 1.8).
 
 ## Tech-debt 1.7
 
 - `index.js` 2051 → 1870 lines: config/forwarding modules extracted.
 - Dead standalone HTML settings page removed (~360 lines).
 - State/outbox future-schema guard, fsync, corrupt backups, 0600/0700.
-- CI Node 20/22/24 with SHA-pinned actions; 38 transport contract tests, 400+
-  total.
+- CI Node 20/22/24 with SHA-pinned actions; 38 transport contract tests, 400
+  total at 1.7.
 
 ## Audit 1.6: rc.2 and hardening
 
@@ -153,7 +155,8 @@ and `getVideo(videoToken)` (`GET /videos/{videoToken}`); uploaded file names are
   approvals/questions and budget alerts stay on.
 - Approval cards hide call IDs; results are one line; GUI answers edit the card
   instead of adding a new one; digest is a four-part briefing.
-- Advanced commands are hidden from the menu but still work; see `docs/ux.md`.
+- Advanced commands are hidden from the menu but still work; see
+  [docs/ux.md](https://github.com/enkolesnikov/MaxDSHBot/blob/main/docs/ux.md).
 
 ## Autonomous schedules (v1.3)
 
@@ -178,34 +181,38 @@ for per-run `new` sessions, the title plus a recent delivery receipt.
 
 ## Package layout
 
+Everything below except the two **repo only** rows is included in the npm
+tarball (`npm pack`, 55 files).
+
 | File | Role |
 |---|---|
-| `index.js` | cordis plugin: `name`, `inject`, `apply(ctx, config)` |
-| `lib/transport.mjs` | MAX Bot API client over `node:https` with bundled CA |
-| `lib/extract.mjs` | visible assistant text / reason helpers |
-| `lib/format.mjs` | MAX message header + body |
+| `index.js` | cordis plugin: config wiring, lifecycle, sessions, final dedupe |
+| `lib/transport.mjs` | MAX Bot API client over `node:https` with bundled CA and `success:false` envelope errors |
+| `lib/bot.mjs` | long polling, command router, MAX menu, update routing |
+| `lib/interactions.mjs` | approvals/questions, plan review, MAX↔GUI race |
+| `lib/deliver.mjs`, `lib/deliverables.mjs`, `lib/forwarding.mjs` | final-delivery pipeline, `present` files, image forwarding |
+| `lib/outbox.mjs`, `lib/limits.mjs`, `lib/lru.mjs` | durable outbox, global limiter, bounded caches |
+| `lib/state.mjs`, `lib/health.mjs`, `lib/audit.mjs`, `lib/redact.mjs`, `lib/fs-safe.mjs` | `state.json`, health/heartbeat, JSONL audit, secret redaction, 0600/0700 writes |
+| `lib/webhook.mjs`, `lib/webhook-runtime.mjs` | webhook handler + route lifecycle and MAX subscription |
+| `lib/progress.mjs`, `lib/cards.mjs`, `lib/format.mjs`, `lib/extract.mjs` | live progress card, message cards, header/body formatting, final-text extraction |
+| `lib/cost-meter.mjs`, `lib/policy.mjs`, `lib/observer.mjs` | cost ledger adapter, notification policy/quiet hours, events/digest/budget alerts |
+| `lib/tables.mjs`, `lib/images.mjs`, `lib/media.mjs`, `lib/incoming.mjs` | Markdown tables → CSV/MD, outgoing image collection, native incoming images, incoming files |
+| `lib/voice.mjs`, `lib/tts.mjs` | optional STT and TTS |
+| `lib/settings.mjs`, `lib/settings-validate.mjs` | GUI settings API/overlay and shared validators |
+| `lib/config.mjs` | `DEFAULTS` + `normalizeConfig` |
+| `lib/autonomy.mjs`, `lib/schedules.mjs` | schedule autonomy policies, `/schedules` helpers |
+| `lib/workspace-tools.mjs`, `lib/sessions.mjs`, `lib/session-kind.mjs`, `lib/target.mjs`, `lib/create-session.mjs` | git diff/safe file send, archived-session filtering, top-level filter, target query, `/new` directory resolution |
+| `client/client.js` | hand-written settings page bundle (no build step) |
 | `certs/ca-chain.pem` | Russian Trusted Sub CA + Root CA (PEM) |
 | `cordis.patch.yml` | bundle patch: inserts the `max-notify` row + config |
-| `install.sh` | `dsh plugin --profile <name> add link:<this dir>` |
+| `icon.svg`, `locale/*.json`, `package.json` | icon, locale strings, package manifest |
 | `tools/pair.mjs` | long-poll `GET /updates` to discover `chat_id` |
 | `tools/send-test.mjs` | manual send test |
-| `lib/limits.mjs` | global outbound scheduler (per-chat + global token buckets) |
-| `lib/outbox.mjs` | durable outbound queue with retry, TTL and dedupe keys |
-| `lib/health.mjs` | health snapshot for `/health` and heartbeat files |
-| `lib/audit.mjs` | metadata-only JSONL audit of approvals/commands (0600) |
-| `lib/redact.mjs` | token/credential redaction for log sinks |
-| `lib/cost-meter.mjs` | read-only dsh-cost-meter ledger adapter (cost/budget) |
-| `lib/webhook.mjs` | webhook handler, secret verification, MAX subscription |
-| `lib/tables.mjs` | Markdown tables → CSV/Markdown |
-| `lib/schedules.mjs` | `/schedules` helpers |
-| `lib/media.mjs` | incoming images → native image parts |
-| `lib/voice.mjs` | optional STT transcription |
-| `lib/tts.mjs` | TTS synthesis, speakable text, endpoint/key |
-| `lib/workspace-tools.mjs` | git diff and safe file send |
-| `lib/autonomy.mjs` | schedule autonomy policies/matching |
-| `lib/settings.mjs` | GUI settings validation/overlay/API |
-| `client/client.js` | hand-written settings page bundle |
-| `test/*.test.mjs` | `node --test` (531 unit tests) |
+| `tools/smoke.mjs` | read-only check: `GET /me`, state, outbox |
+| `tools/webhook.mjs` | `status` / `subscribe` / `unsubscribe` CLI |
+| `README.md`, `CHANGELOG.md`, `LICENSE` | docs and MIT license |
+| `install.sh` | **repo only** (not in the npm tarball): `dsh plugin --profile <p> add link:<dir>` |
+| `test/*.test.mjs` | **repo only** (not shipped): `node --test`, 568 tests |
 
 ## Config
 
@@ -346,6 +353,8 @@ bundle's `cordis.patch.yml` inserts the `max-notify` row. Set the private config
 override (see the root README).
 
 ### From a local checkout
+
+`install.sh` ships only in the git checkout, not in the npm tarball:
 
 ```bash
 ./install.sh                 # profile web

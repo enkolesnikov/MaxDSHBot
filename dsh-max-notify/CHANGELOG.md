@@ -4,21 +4,96 @@ All notable changes to `dsh-max-notify` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.0] — 2026-11-24
+
+Техдолг-аудит 24.11: три read-only аудита и шесть параллельных фиксов.
+
+### Fixed
+
+- **Settings API на всех поддерживаемых DSH:** маршрут всегда объявляет
+  `auth: 'required'` (адмиссия 0.2.3+), а на rc.x с `requestRejection`
+  дополнительно выполняется ручная fail-closed проверка. Закрыт обход
+  аутентификации в legacy-ветке и сохранена работа на обеих версиях.
+- **Polling больше не залипает на poison-апдейте:** ошибка одного update не
+  рвёт батч; попытки считаются по ключу (LRU 500), после 3 неудач апдейт
+  пропускается с warn, маркер батча двигается. Тред-офф: транзиентная ошибка
+  больше не переотправляется целиком (см. «Известные ограничения»).
+- **Webhook-подписка повторяется после неудачного старта:** тик retry-таймера
+  переподписывает при `active && webhookAutoSubscribe && !subscribed`, с
+  in-flight guard и бэкоффом до 5 минут; сброс при успехе.
+- **Переполнение очереди outbox:** вытесняется самый старый
+  низкоприоритетный элемент (раньше — самый новый при равном приоритете);
+  `enqueue()` честно возвращает `false`, если элемент вытеснен, а
+  `deliverNow()` отдаёт `{queued:false, lost:true}`; observer логирует
+  непоставленное уведомление.
+- **Webhook-очередь:** вытеснение по count/byte-cap теперь видно (warn, audit,
+  `webhookDroppedTotal`, `webhookLastDropAt`); `dispose`/`routeDispose` честно
+  сбрасывают `transport/webhookActive`; teardown старой HMR-генерации не
+  снимает подписку живой (реестр рантаймов).
+- **Транспорт:** `Retry-After` ограничен 60 с (warn при усечении); 2xx с
+  непустым не-JSON телом на write-методах — `max.bad.response` вместо
+  ложного успеха (пустое тело и GET разрешены); `"`/CR/LF/NUL в имени файла
+  вычищаются перед multipart.
+- **Персистентность:** present-but-invalid `schemaVersion`/`version` блокирует
+  запись с `.future-*` бэкапом (state и outbox); очередь webhook обрезается
+  по count/byte при загрузке и в `setWebhookQueue`; `entryBytesMax` клампится
+  к `queueBytesMax`.
+- **Redaction:** dead-letter `update`/`error` редактируются, audit ротируется
+  после 5 МиБ; health рекурсивно редактирует вложенные строки; секреты из
+  `*File` регистрируются после чтения; файл токена с правами шире 0600 даёт
+  warn.
+- **Cost-meter:** битый ledger кэшируется по mtime+size и не перечитывается
+  на каждый snapshot.
+- **Index:** `titleCache` → LRU 500 с очисткой на `session/disposed`;
+  `isTopLevelSession` из общего модуля; `null` chatId/userId трактуются как
+  отсутствующие; стартовый лог печатает все части (было 6 `%s` на 9 args);
+  убраны мёртвые импорты; комментарии teardown/requestRejection приведены к
+  фактам (удалён в DSH 0.2.3-alpha.1, установлен 0.2.3-alpha.2).
+
+### Docs / package
+
+- README/ROADMAP/SECURITY/CHANGELOG выровнены: 568 тестов, 13 команд,
+  webhook body 64 КиБ, DSH 0.2.3-alpha.2, отсутствие ложных claim'ов про
+  members/pin; `LICENSE` добавлен в npm-пакет; `check` покрывает `tools/*.mjs`;
+  битые ссылки на docs заменены на абсолютные GitHub URL.
+- Новый разбор остатка: [docs/tech-debt-2026-11-24.md](https://github.com/enkolesnikov/MaxDSHBot/blob/main/docs/tech-debt-2026-11-24.md).
+
+### Known limitations
+
+- Polling: после ошибки батч считается обработанным (маркер двигается), поэтому
+  временный сбой MAX может потерять один апдейт — компенсируется dedupe/redelivery.
+- Очередь webhook: при переполнении между `shift` и сменой head возможна потеря
+  второго апдейта — видимость есть, логика drain ждёт отдельной задачи.
+- Структурный долг (`index.js`/`bot.mjs` монолиты, три очереди отправки,
+  `settings` overlay без unknown-keys, `fs-safe` symlink-политика, лимит тела
+  voice) — в docs/tech-debt-2026-11-24.md.
+
+### Tests
+
+568 тестов на Node 20/22/24, `REQUIRE_TLS_TESTS=1` — 0 skip.
+
 ## [1.11.1] — 2026-11-24
 
 ### Fixed
 
-- **Settings API возвращал 403 для валидной сессии** после DSH 0.2.2-rc.2:
-  `connection.requestRejection` удалён в rc.2, а плагин использовал его как
-  проверку доступа и fail-closed отвечал 403. Теперь маршрут
+- **Settings API возвращал 403 для валидной сессии** после обновления DSH:
+  `connection.requestRejection` удалён в **DSH 0.2.3-alpha.1** (а не в
+  0.2.2-rc.2, как предполагалось), плагин же использовал его как проверку
+  доступа и fail-closed отвечал 403. Теперь маршрут
   `/max-notify/settings.json` объявляет `auth: 'required'` и полагается на
   admission веб-сервера; повторная проверка в handler удалена.
+  Проверено на текущем рантайме **0.2.3-alpha.2**; `engines.dsh` не менялся.
   Добавлен регрессионный тест на отсутствие `requestRejection`.
+
+### Tests
+
+532 теста на Node 20/22/24 (`node --test`); живая проверка: `/max-notify/settings.json`
+отдаёт 200 с cookie и 401 без.
 
 ## [1.11.0] — 2026-11-24
 
 Приведение транспорта к изменениям MAX Bot API 2026 — разбор с датами и
-ссылками: [docs/max-api-2026.md](../docs/max-api-2026.md).
+ссылками: [docs/max-api-2026.md](https://github.com/enkolesnikov/MaxDSHBot/blob/main/docs/max-api-2026.md).
 
 ### Added
 
@@ -35,10 +110,12 @@ All notable changes to `dsh-max-notify` are documented here. The format follows
 ### Fixed
 
 - **HTTP 200 + `success: false`** теперь считается ошибкой (`MaxApiError` с
-  `code` и `message`), а не успехом. Покрыты `PUT /messages`, `DELETE
-  /messages`, `POST`/`DELETE /subscriptions`, `POST`/`DELETE
-  /chats/{chatId}/members`, `DELETE /chats/{chatId}/pin`,
-  `POST /chats/{chatId}/actions`.
+  `code` и `message`), а не успехом. Проверка общая для всех JSON-ответов
+  клиента: `PUT`/`DELETE /messages`, `POST /answers`, `POST`/`DELETE
+  /subscriptions`, `POST /chats/{chatId}/actions`. Методы управления
+  участниками (`.../members`) и закреплёнными сообщениями чата (`.../pin`)
+  плагин не вызывает — они в API тоже отдают такие конверты, но в клиенте
+  их нет (см. [docs/max-api-2026.md](https://github.com/enkolesnikov/MaxDSHBot/blob/main/docs/max-api-2026.md)).
 - **Имя загружаемого файла** обрезается до 200 символов (лимит MAX) с
   сохранением расширения — и для явного `filename`, и для имени из пути.
 

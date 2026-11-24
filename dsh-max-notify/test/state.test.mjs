@@ -376,3 +376,109 @@ test('repeated atomic saves keep the file valid and leave no tmp files', () => {
   assert.equal(JSON.parse(readFileSync(path, 'utf8')).marker, 24)
   state.dispose()
 })
+
+test('a present but unparseable schemaVersion is preserved, backed up and never overwritten', () => {
+  const directory = mkdtempSync(join(workspace, 'invalid-schema-'))
+  const invalidFile = join(directory, 'state.json')
+  const original = `${JSON.stringify({ schemaVersion: 'v3', marker: 5, sessions: { 1: 'session-x' } }, null, 2)}\n`
+  writeFileSync(invalidFile, original)
+  const { calls, logger } = collectingLogger()
+
+  const state = createState({ file: invalidFile, logger })
+  assert.equal(state.persistenceBlocked, true)
+  // The raw marker is exposed instead of being silently treated as absent.
+  assert.equal(state.storedSchemaVersion, 'v3')
+  // An unparseable schema is not interpreted: the plugin runs with empty memory.
+  assert.equal(state.marker, undefined)
+  assert.equal(state.sessionFor(1), undefined)
+
+  state.setMarker(11)
+  assert.equal(state.save(), false)
+  state.dispose()
+
+  assert.equal(readFileSync(invalidFile, 'utf8'), original)
+  const names = readdirSync(directory)
+  assert.equal(names.some((name) => name.includes('.corrupt-')), false)
+  const backups = names.filter((name) => name.includes('.future-'))
+  assert.equal(backups.length, 1)
+  assert.equal(readFileSync(join(directory, backups[0]), 'utf8'), original)
+  assert.equal(modeOf(join(directory, backups[0])), 0o600)
+  assert.ok(calls.some((args) => String(args[0]).includes('invalid schemaVersion') && args.includes('v3')))
+  assert.ok(calls.some((args) => String(args[0]).includes('refusing to overwrite')))
+})
+
+test('non-positive, non-integer and non-numeric schema markers are all blocked', () => {
+  for (const marker of [0, -3, 1.5, true, null]) {
+    const directory = mkdtempSync(join(workspace, `bad-marker-${String(marker).replace(/\W/g, '_')}-`))
+    const path = join(directory, 'state.json')
+    const original = JSON.stringify({ schemaVersion: marker, marker: 7 })
+    writeFileSync(path, original)
+    const state = createState({ file: path, logger: { warn() {} } })
+    assert.equal(state.persistenceBlocked, true, `schemaVersion ${String(marker)} must block persistence`)
+    assert.equal(state.marker, undefined)
+    assert.equal(readFileSync(path, 'utf8'), original)
+    const backups = readdirSync(directory).filter((name) => name.includes('.future-'))
+    assert.equal(backups.length, 1)
+    state.dispose()
+  }
+})
+
+test('loading a state file applies the 200-entry webhook queue cap', () => {
+  const stateFile = join(workspace, 'load-count-cap.json')
+  const entries = Array.from({ length: 250 }, (_, index) => ({ key: `k${index}`, update: { n: index }, at: index }))
+  writeFileSync(stateFile, JSON.stringify({ schemaVersion: 2, webhookQueue: entries }))
+  const { calls, logger } = collectingLogger()
+
+  const state = createState({ file: stateFile, logger })
+  const queue = state.getWebhookQueue()
+  assert.equal(queue.length, 200)
+  assert.equal(queue[0].key, 'k50')
+  assert.equal(queue[queue.length - 1].key, 'k249')
+  assert.equal(state.snapshot().depth, 200)
+  assert.ok(calls.some((args) => String(args[0]).includes('exceeded its caps on load')))
+  state.dispose()
+})
+
+test('loading a state file applies the 8MiB webhook queue byte cap', () => {
+  const stateFile = join(workspace, 'load-bytes-cap.json')
+  const body = 'y'.repeat(60 * 1024) // under the 64KiB per-entry cap
+  const entries = Array.from({ length: 140 }, (_, index) => ({ key: `b${index}`, update: { body }, at: index }))
+  writeFileSync(stateFile, JSON.stringify({ schemaVersion: 2, webhookQueue: entries }))
+
+  const state = createState({ file: stateFile, logger: { warn() {} } })
+  const queue = state.getWebhookQueue()
+  assert.ok(queue.length < 140 && queue.length > 100, `expected a trimmed queue, got ${queue.length}`)
+  assert.ok(state.getWebhookQueueStats().bytes <= 8 * 1024 * 1024)
+  assert.equal(state.snapshot().depth, queue.length)
+  assert.equal(state.snapshot().bytes, state.getWebhookQueueStats().bytes)
+  assert.notEqual(queue[0].key, 'b0')
+  assert.equal(queue[queue.length - 1].key, 'b139')
+  state.dispose()
+})
+
+test('setWebhookQueue enforces the 200-entry count cap and keeps the newest', () => {
+  const stateFile = join(workspace, 'set-count-cap.json')
+  const state = createState({ file: stateFile, logger: { warn() {} } })
+  const queue = Array.from({ length: 250 }, (_, index) => ({ key: `s${index}`, update: { n: index }, at: index }))
+  state.setWebhookQueue(queue)
+  const kept = state.getWebhookQueue()
+  assert.equal(kept.length, 200)
+  assert.equal(kept[0].key, 's50')
+  assert.equal(kept[kept.length - 1].key, 's249')
+  state.dispose()
+})
+
+test('setWebhookQueue enforces the byte cap, drops oldest and filters invalid entries', () => {
+  const stateFile = join(workspace, 'set-bytes-cap.json')
+  const state = createState({ file: stateFile, logger: { warn() {} } })
+  const body = 'z'.repeat(60 * 1024)
+  const queue = Array.from({ length: 20 }, (_, index) => ({ key: `z${index}`, update: { body }, at: index }))
+  queue.push({ key: 'no-update' }, null, { key: 'primitive-update', update: 'nope' })
+  state.setWebhookQueue(queue, 200, 512 * 1024)
+  const kept = state.getWebhookQueue()
+  assert.ok(kept.length >= 7 && kept.length < 20, `expected a trimmed queue, got ${kept.length}`)
+  assert.ok(state.getWebhookQueueStats().bytes <= 512 * 1024)
+  assert.equal(kept[kept.length - 1].key, 'z19')
+  assert.equal(kept.some((entry) => entry.key === 'no-update' || entry.key === 'primitive-update'), false)
+  state.dispose()
+})

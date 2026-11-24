@@ -18,7 +18,7 @@
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/enkolesnikov/MaxDSHBot?style=flat-square"/></a>
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img alt="DSH" src="https://img.shields.io/badge/DSH-0.2.x-6C5CE7?style=flat-square"/></a>
   <a href="https://max.ru"><img alt="MAX" src="https://img.shields.io/badge/MAX-messenger-8B5CF6?style=flat-square"/></a>
-  <img alt="Tests" src="https://img.shields.io/badge/tests-531%20passed-2ecc71?style=flat-square"/>
+  <img alt="Tests" src="https://img.shields.io/badge/tests-568%20passed-2ecc71?style=flat-square"/>
   <a href="https://nodejs.org"><img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A520-339933?style=flat-square&logo=nodedotjs&logoColor=white"/></a>
   <img alt="Runtime dependencies" src="https://img.shields.io/badge/runtime%20deps-0-brightgreen?style=flat-square"/>
   <a href="https://github.com/enkolesnikov/MaxDSHBot/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/enkolesnikov/MaxDSHBot?style=flat-square"/></a>
@@ -48,7 +48,7 @@
 | | Возможность | Что даёт |
 |---|---|---|
 | 💬 | **Ответы агента** | Один MAX-месседж на ход (`turn/end`), чанкинг 4000 символов, картинки и файлы `present` вложениями, входящие файлы из MAX → `max-inbox/` |
-| 🕹 | **Пульт** | Двусторонний чат, 13 команд в меню + скрытые (`/status`, `/model`, `/plan`, `/sessions`, `/budget`…), инлайн-кнопки, live-прогресс |
+| 🕹 | **Пульт** | Двусторонний чат, 13 команд в меню (включая `/brief`) + скрытые (`/plan`, `/workspace`, `/approve`, `/diff`, `/send`, `/say`…), инлайн-кнопки, live-прогресс |
 | 🔐 | **Approvals** | Подтверждения и вопросы из MAX с гонкой MAX↔GUI, таймаутом, «запомнить для инструмента», audit-логом |
 | 👀 | **Наблюдатель** | Subagent/job/goal/error, TODO-прогресс, режимы молчания, тихие часы, ежедневный дайджест |
 | 🛡 | **Надёжность** | Durable outbox, at-least-once polling с дедупом, глобальный лимитер, health/heartbeat, redaction секретов |
@@ -135,22 +135,39 @@ node dsh-max-notify/tools/send-test.mjs "проверка"
 
 ## Команды в MAX
 
+В меню MAX — ровно 13 команд (это же число проверяется тестами):
+
 | Команда | Действие |
 |---|---|
-| `/status`, `/current` | Сессия, модель, папка, стоимость, бюджет |
+| `/help` | Справка; `/help all` — все команды, включая скрытые |
+| `/status` | Сессия, модель, папка, стоимость, бюджет |
+| `/brief` | Брифинг: что работает, что ждёт, деньги, расписания |
 | `/stop` | Остановить текущий ход |
-| `/sessions`, `/use N` | Список сессий и переключение (включая холодные — с заголовками) |
+| `/sessions` | Список сессий (включая холодные — с заголовками) |
+| `/use N` | Переключить активную сессию |
 | `/new [папка]` | Новая сессия (папка создаётся) |
 | `/model [N\|provider/model]` | Каталог моделей и переключение |
+| `/mode [all\|errors\|mute]` | Режим уведомлений |
+| `/mute [30m\|2h]` | Тишина на время |
+| `/budget` (`/cost`) | Стоимость и бюджет из `dsh-cost-meter` |
+| `/schedules` | Список задач, пауза/возобновление |
+| `/health` | Диагностика: polling, outbox, лимитер |
+
+Скрыты из меню, но работают (полный список — `/help all`):
+
+| Команда | Действие |
+|---|---|
+| `/current` | Алиас `/status`; `/unmute` — алиас `/mode all` |
+| `/version`, `/ping` | Версия и round-trip (дублируют `/health`) |
 | `/rename <название>`, `/fork`, `/compact` | Переименовать / ответвить / сжать историю |
 | `/plan`, `/plan off`, `/plan status` | Режим плана; review плана приходит файлом `plan.md` с кнопками |
 | `/search <текст>` | Поиск по содержимому сессий |
-| `/archive`, `/pin`, `/unpin` | Архивировать текущую / закрепить / открепить |
+| `/archive`, `/pin`, `/unpin` | Архивировать текущую / закрепить / открепить (сессию DSH, не сообщение MAX) |
 | `/workspace [N\|add <path>]` | Рабочие папки; папка для следующих `/new` |
 | `/approve` | Политика подтверждений `ask`/`never` (двухшаговое подтверждение) |
-| `/mode`, `/mute`, `/unmute`, `/digest` | Режимы уведомлений, тишина, дайджест |
-| `/budget`, `/cost` | Стоимость и бюджет из `dsh-cost-meter` |
-| `/health`, `/version`, `/ping`, `/help` | Диагностика и справка |
+| `/schedules mode N inherit\|read-only\|auto` | Политика автономности задачи |
+| `/settings`, `/digest` | Снимок настроек, дайджест сейчас |
+| `/say <текст>`, `/diff [--staged]`, `/send <путь>` | TTS, git-diff и отправка файлов |
 
 Текст без `/` уходит агенту как следующее сообщение. Под финальным ответом —
 кнопки «Продолжить», «Стоп», «Открыть GUI» и настраиваемые пресеты.
@@ -193,35 +210,36 @@ long polling и пишет warning в лог. Официальная докум�
 Comments API, `description` в `PATCH /chats/{id}`, `disable_link_preview` в
 `POST /answers`, 30 rps, OpenAPI-схема и официальный MAX Agent Skill.
 
+В v1.11 плагин выровнен по этим изменениям:
+
+- `HTTP 200` + `success:false` — ошибка (`MaxApiError` с `code`/`message`), а не
+  успех; проверка общая для всех JSON-ответов клиента.
+- Клиент получил `getMessage(messageId)` (`GET /messages/{messageId}`) и
+  `getVideo(videoToken)` (`GET /videos/{videoToken}`).
+- Имя загружаемого файла обрезается до 200 символов с сохранением расширения.
+- `bot_admin_permissions_changed` (только webhook) — `warn`-лог и запись в health.
+
 Полный разбор с датами, ссылками и таблицами «что плагин уже делает» / «что
 осознанно не используется» — [docs/max-api-2026.md](docs/max-api-2026.md).
 
-В v1.11 клиент транспорта получил `getMessage(messageId)` (`GET /messages/{messageId}`)
-и `getVideo(videoToken)` (`GET /videos/{videoToken}`); имя загружаемого файла обрезается
-до 200 символов с сохранением расширения.
-
-## MAX API 2026 (1.11)
-
-- `success:false` при HTTP 200 — ошибка; `getMessage`/`getVideo`; имя файла ≤200;
-  `bot_admin_permissions_changed` warn + health. Разбор — [docs/max-api-2026.md](docs/max-api-2026.md).
-
 ## Техдолг 1.10
 
-- P2 закрыт полностью: `index.js` 2018→1711, модули webhook-runtime/deliver/fs-safe,
-  единое хранилище workspace, 0700-каталоги, warn-логи, тест-фейки, CDN-тест.
-- 531 тест на Node 20/22/24.
+- P2 закрыт полностью: `index.js` 2018→1711 строк (на 1.10; в 1.11.1 — 1705),
+  модули webhook-runtime/deliver/fs-safe, единое хранилище workspace,
+  0700-каталоги, warn-логи, тест-фейки, CDN-тест.
+- 568 тестов на Node 20/22/24 (текущее дерево; на 1.10 было 515).
 
 ## Техдолг 1.9
 
 - P2 аудита 17.11: дедупликация, LRU-кэши, наблюдаемость, лимитер,
   транспорт, конфиг/валидация, dryRun, teardown-тесты, CI TLS-контроль.
-- 531 тест на Node 20/22/24.
+- 568 тестов на Node 20/22/24 (текущее дерево; на 1.9 было 490).
 
 ## Техдолг 1.8
 
 - P1 аудита 17.11: webhook-лимиты и redaction, граница путей deliverables,
   строгий матчинг автономии, гонка outbox, lifecycle/HMR, CI-guard утечек.
-- 531 тест на Node 20/22/24.
+- 568 тестов на Node 20/22/24 (текущее дерево; на 1.8 было 435).
 
 ## Техдолг 1.7
 
@@ -229,7 +247,7 @@ Comments API, `description` в `PATCH /chats/{id}`, `disable_link_preview` в
 - Удалена мёртвая HTML-страница настроек (~360 строк).
 - State/outbox: future-schema guard, fsync, corrupt-бэкапы, 0600/0700.
 - CI: Node 20/22/24, actions pinned by SHA; транспортные контрактные тесты
-  (38) на локальном HTTPS; всего 531 тест.
+  (38) на локальном HTTPS; всего 400 тестов на 1.7.
 
 ## Аудит 1.6: rc.2, безопасность, надёжность
 
@@ -420,7 +438,7 @@ Comments API, `description` в `PATCH /chats/{id}`, `disable_link_preview` в
 | `client/client.js` | клиентская страница настроек (без сборки) |
 | `lib/observer.mjs`, `lib/policy.mjs` | события, дайджест, режимы, алерты бюджета |
 | `certs/ca-chain.pem` | Russian Trusted Sub CA + Root CA |
-| `test/` | 531 тест (`node --test`) |
+| `test/` | 568 тестов (`node --test`) |
 | `tools/` | `pair.mjs`, `send-test.mjs`, `smoke.mjs`, `webhook.mjs` |
 
 </details>
@@ -444,7 +462,7 @@ Comments API, `description` в `PATCH /chats/{id}`, `disable_link_preview` в
 ## Проверка
 
 ```bash
-cd dsh-max-notify && npm test          # 531 unit tests
+cd dsh-max-notify && npm test          # 568 unit tests
 npm run check                          # синтаксис всех модулей
 node tools/smoke.mjs --env ../.env     # read-only: GET /me, state, outbox
 node tools/send-test.mjs "проверка"    # реальная отправка
@@ -455,7 +473,7 @@ TLS-цепочка проверена `openssl verify` (leaf → Russian Trusted
 
 ## Документация
 
-- [ROADMAP.md](ROADMAP.md) — план 0.9 → 1.0.
+- [ROADMAP.md](ROADMAP.md) — статус версий 0.6 → 1.11.1 и дальнейшие планы.
 - [CHANGELOG.md](dsh-max-notify/CHANGELOG.md) — история версий.
 - [SECURITY.md](SECURITY.md) — секреты, allowlist, аудит.
 - [docs/max-api-2026.md](docs/max-api-2026.md) — изменения MAX Bot API в 2026

@@ -28,10 +28,10 @@
 
 Использования по audit: `budget` (3), `sessions` (2), `help/use/status/settings/schedules/health` (по 1); остальные в audit не встречались.
 
-### Ядро (12, в меню)
+### Ядро (13, в меню)
 
-`/help`, `/status`, `/stop`, `/sessions`, `/use`, `/new`, `/model`, `/mode`,
-`/mute`, `/budget`, `/schedules`, `/health`.
+`/help`, `/status`, `/brief`, `/stop`, `/sessions`, `/use`, `/new`, `/model`,
+`/mode`, `/mute`, `/budget`, `/schedules`, `/health`.
 
 ### Скрыто из меню, но работает
 
@@ -81,8 +81,9 @@
 
 ## 1.6
 
-400 тестов. Исправлены rc.2-маршруты, allowlist всех каналов, токен-хосты,
-durable webhook queue, файловые права. Аудит техдолга — `docs/audit-1.6.md`.
+400 тестов на момент 1.6 (текущее дерево 1.11.1 — 568). Исправлены rc.2-маршруты,
+allowlist всех каналов, токен-хосты, durable webhook queue, файловые права.
+Аудит техдолга — `docs/audit-1.6.md`.
 
 ## 1.5
 

@@ -1,6 +1,6 @@
 import test, { afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { redact, wrapLogger, registerSecret, clearSecrets } from '../lib/redact.mjs'
+import { redact, redactDeep, wrapLogger, registerSecret, clearSecrets } from '../lib/redact.mjs'
 
 afterEach(() => clearSecrets())
 
@@ -65,4 +65,50 @@ test('wrapLogger registers secrets passed to it', () => {
   const secondSecret = 'another-key-0123456789'
   wrapLogger(logger, { secrets: [secondSecret] }).warn('using %s', secondSecret)
   assert.equal(lines[1][1].includes(secondSecret), false)
+})
+
+// A secret without a secret-like context word: only registration can mask it.
+const NESTED_SECRET = 'Q7w9E2r5T8y1U4i6O3p0A5s8D1f4G7h9'
+
+test('redactDeep masks secrets nested in objects and arrays without mutating input', () => {
+  registerSecret(NESTED_SECRET)
+  const input = {
+    plain: `prefix [${NESTED_SECRET}] suffix`,
+    list: [1, `[${NESTED_SECRET}]`, { deep: `[${NESTED_SECRET}]` }],
+    flag: true,
+    empty: null,
+    count: 7,
+  }
+  const output = redactDeep(input)
+  assert.notEqual(output, input)
+  assert.equal(output.plain.includes(NESTED_SECRET), false)
+  assert.match(output.plain, /<redacted>/)
+  assert.equal(output.list[0], 1)
+  assert.equal(output.list[1].includes(NESTED_SECRET), false)
+  assert.equal(output.list[2].deep.includes(NESTED_SECRET), false)
+  assert.equal(output.flag, true)
+  assert.equal(output.empty, null)
+  assert.equal(output.count, 7)
+  // The input object is copied, not mutated.
+  assert.equal(input.plain.includes(NESTED_SECRET), true)
+  assert.equal(input.list[2].deep.includes(NESTED_SECRET), true)
+})
+
+test('redactDeep handles cycles and caps depth instead of overflowing', () => {
+  registerSecret(NESTED_SECRET)
+  const cyclic = { note: `[${NESTED_SECRET}]` }
+  cyclic.self = cyclic
+  const safeCycle = redactDeep(cyclic)
+  assert.equal(safeCycle.self, '<cycle>')
+  assert.equal(safeCycle.note.includes(NESTED_SECRET), false)
+
+  let deep = 'leaf'
+  for (let index = 0; index < 40; index += 1) deep = { next: deep }
+  let cursor = redactDeep(deep)
+  let steps = 0
+  while (cursor && typeof cursor === 'object' && cursor.next !== undefined && steps < 40) {
+    cursor = cursor.next
+    steps += 1
+  }
+  assert.equal(cursor, '<deep>')
 })

@@ -40,7 +40,7 @@ const DELIVERED_LIMIT = 500
 function storedVersionOf(value) {
   if (value === undefined || value === null || value === '') return undefined
   const version = Number(value)
-  return Number.isFinite(version) ? version : undefined
+  return Number.isFinite(version) ? version : Number.NaN
 }
 
 /**
@@ -225,16 +225,27 @@ export function createOutbox({
 
   if (loaded && typeof loaded === 'object' && !Array.isArray(loaded)) {
     storedVersion = storedVersionOf(loaded.version)
-    if (storedVersion !== undefined && storedVersion > OUTBOX_SCHEMA_VERSION) {
-      // A future release owns this file: preserve it byte-for-byte and disable
-      // persistence instead of silently downgrading/overwriting its queue.
+    const invalidVersion = Number.isNaN(storedVersion)
+    const newerVersion = !invalidVersion && storedVersion !== undefined && storedVersion > OUTBOX_SCHEMA_VERSION
+    if (invalidVersion || newerVersion) {
+      // A future (or corrupt) release owns this file: preserve it byte-for-byte
+      // and disable persistence instead of silently downgrading/overwriting it.
       persistenceBlocked = true
-      logger?.warn?.(
-        'MAX outbox file %s uses version %d but this plugin supports %d; preserving the file, starting empty and disabling persistence until the plugin is upgraded',
-        path,
-        storedVersion,
-        OUTBOX_SCHEMA_VERSION,
-      )
+      if (invalidVersion) {
+        logger?.warn?.(
+          'MAX outbox file %s has an invalid version %s; preserving the file, starting empty and disabling persistence until it is fixed (supported %d)',
+          path,
+          JSON.stringify(loaded.version),
+          OUTBOX_SCHEMA_VERSION,
+        )
+      } else {
+        logger?.warn?.(
+          'MAX outbox file %s uses version %d but this plugin supports %d; preserving the file, starting empty and disabling persistence until the plugin is upgraded',
+          path,
+          storedVersion,
+          OUTBOX_SCHEMA_VERSION,
+        )
+      }
       try {
         const backup = `${path}.future-${Date.now()}`
         copyFileSync(path, backup)
@@ -244,7 +255,7 @@ export function createOutbox({
           // best effort
         }
       } catch (error) {
-        logger?.warn?.('cannot back up newer MAX outbox file %s: %s', path, error?.message || String(error))
+        logger?.warn?.('cannot back up foreign MAX outbox file %s: %s', path, error?.message || String(error))
       }
     } else {
       applyLoadedOutbox(pending, delivered, loaded, logger, now)
@@ -256,9 +267,9 @@ export function createOutbox({
       if (!blockedSaveWarned) {
         blockedSaveWarned = true
         logger?.warn?.(
-          'refusing to overwrite MAX outbox file %s written by a newer version (stored %d, supported %d); persistence stays disabled',
+          'refusing to overwrite MAX outbox file %s with a foreign version (stored %s, supported %d); persistence stays disabled',
           path,
-          storedVersion,
+          String(storedVersion),
           OUTBOX_SCHEMA_VERSION,
         )
       }
@@ -287,11 +298,13 @@ export function createOutbox({
       if (delivered[index].at < cutoff) delivered.splice(index, 1)
     }
     while (delivered.length > DELIVERED_LIMIT) delivered.shift()
-    // Cap pending: drop the lowest-priority oldest entries first.
+    // Cap pending: drop the lowest-priority oldest entries first. Sorting
+    // ascending by priority and createdAt makes index 0 exactly that entry, so
+    // a fresh high-priority message is never evicted by older ones.
     if (pending.length > maxItems) {
-      pending.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0) || a.createdAt - b.createdAt)
+      pending.sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0) || a.createdAt - b.createdAt)
       while (pending.length > maxItems) {
-        const dropped = pending.pop()
+        const dropped = pending.shift()
         stats.dropped += 1
         logger?.warn?.('MAX outbox dropped pending item over size cap (dedupeKey=%s, kind=%s)', dropped.dedupeKey, dropped.kind)
       }
@@ -317,7 +330,7 @@ export function createOutbox({
     if (disposed || !item || !item.params) return false
     const dedupeKey = item.dedupeKey
     if (dedupeKey && (isDelivered(dedupeKey) || isPending(dedupeKey))) return false
-    pending.push({
+    const entry = {
       id: randomUUID(),
       dedupeKey,
       kind: item.kind ?? 'message',
@@ -328,11 +341,14 @@ export function createOutbox({
       attempts: 0,
       nextAt: now(),
       lastError: undefined,
-    })
+    }
+    pending.push(entry)
     stats.enqueued += 1
     prune()
     save()
-    return true
+    // prune() may have evicted this very entry when the queue is over its
+    // caps: report the truth so callers do not assume a lost message is queued.
+    return pending.includes(entry)
   }
 
   async function runItem(item) {
@@ -402,7 +418,9 @@ export function createOutbox({
       return { sent: true, response, mid: response?.message?.body?.mid }
     } catch (error) {
       const queued = enqueue({ dedupeKey, call, params, priority, kind })
-      return { queued, error: error?.message || String(error) }
+      return queued
+        ? { queued, error: error?.message || String(error) }
+        : { queued: false, lost: true, error: error?.message || String(error) }
     } finally {
       if (dedupeKey) inflightKeys.delete(dedupeKey)
     }

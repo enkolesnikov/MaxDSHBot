@@ -13,7 +13,7 @@
  * Error strings are redacted at write time (same filter as the log sinks), so a
  * secret that leaked into an exception message never lands in state or /health.
  */
-import { redact } from './redact.mjs'
+import { redact, redactDeep } from './redact.mjs'
 
 export function createHealth({ version, startedAt = Date.now(), now = () => Date.now() } = {}) {
   const health = {
@@ -34,9 +34,8 @@ export function createHealth({ version, startedAt = Date.now(), now = () => Date
 
   function update(patch) {
     if (!patch || typeof patch !== 'object') return
-    const safe = {}
-    for (const [key, value] of Object.entries(patch)) safe[key] = typeof value === 'string' ? redact(value) : value
-    Object.assign(health, safe)
+    // Deep: a patch may carry a nested object (e.g. `{ webhook: { error } }`).
+    Object.assign(health, redactDeep(patch))
   }
 
   function fail(error, { stopped = false, reason } = {}) {
@@ -66,7 +65,9 @@ export function createHealth({ version, startedAt = Date.now(), now = () => Date
       ...health,
       uptimeMs: Math.max(0, now() - health.startedAt),
       lastErrorAgeMs: health.lastErrorAt === undefined ? undefined : Math.max(0, now() - health.lastErrorAt),
-      ...extra,
+      // Deep redaction: callers copy outbox/limiter snapshots here, and their
+      // nested `lastError` strings may contain credentials.
+      ...redactDeep(extra),
     }
   }
 

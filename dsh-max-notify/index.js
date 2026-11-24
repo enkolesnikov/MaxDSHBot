@@ -19,7 +19,7 @@
  * MAX_CA_FILE, MAX_NOTIFY_DRY_RUN.
  */
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, statSync } from 'node:fs'
 import { writePrivateFile } from './lib/fs-safe.mjs'
 
 import { createMaxClient, splitText, MAX_TEXT_LIMIT } from './lib/transport.mjs'
@@ -50,12 +50,14 @@ import {
 } from './lib/settings.mjs'
 import { readImageParts } from './lib/media.mjs'
 import { transcribeAudio, voiceConfigured, voicePromptText } from './lib/voice.mjs'
-import { shouldSpeak, speakableText, synthesizeSpeech, ttsConfigured } from './lib/tts.mjs'
-import { classifyUploadType, formatBytes, resolveSendFile, runGitDiff } from './lib/workspace-tools.mjs'
+import { shouldSpeak, synthesizeSpeech, ttsConfigured } from './lib/tts.mjs'
+import { formatBytes, resolveSendFile, runGitDiff } from './lib/workspace-tools.mjs'
 import { createIncoming } from './lib/incoming.mjs'
 import { resolveSessionDir } from './lib/create-session.mjs'
 import { archivedIdsOf, filterArchivedSessions } from './lib/sessions.mjs'
 import { createLimiter } from './lib/limits.mjs'
+import { createLruMap } from './lib/lru.mjs'
+import { isTopLevelSession } from './lib/session-kind.mjs'
 import { createOutbox, resolveOutboxFile } from './lib/outbox.mjs'
 import { createHealth } from './lib/health.mjs'
 import { createAudit, resolveAuditFile } from './lib/audit.mjs'
@@ -81,14 +83,9 @@ export const VERSION = (() => {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
-/** True when this session belongs to a top-level agent (subagent children are skipped by default). */
-export function isTopLevelSession(session) {
-  const header = session?.header
-  if (!header) return true
-  if (header.origin === 'subagent') return false
-  const depth = Number(header.delegationDepth ?? 0)
-  return !(Number.isFinite(depth) && depth > 0)
-}
+// Re-exported for backwards compatibility: tests and integrations used to import
+// the predicate from the plugin entry point.
+export { isTopLevelSession }
 
 /** Synthetic success for outbound client methods while `dryRun` is enabled. */
 function dryRunResult(method, params) {
@@ -136,6 +133,18 @@ function createSendQueue({ minIntervalMs, logger, isStopped = () => false }) {
   return enqueue
 }
 
+/** Warn (once) when a token file is readable by group/others. */
+function warnTokenFileMode(path, logger) {
+  try {
+    const mode = statSync(path).mode & 0o777
+    if ((mode & 0o077) !== 0) {
+      logger.warn('token file %s has mode %o; expected 0600', path, mode)
+    }
+  } catch {
+    // unreadable/missing files are reported by the caller
+  }
+}
+
 /** Read a bot token from a plain token file or a `.env`-style file containing MAX_BOT_TOKEN=... */
 export function readTokenFile(path) {
   const text = readFileSync(path, 'utf8')
@@ -157,6 +166,11 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
   const baseConfig = normalizeConfig(rawConfig)
   const settingsFilePath = resolveSettingsFile(baseConfig)
   let config = mergeSettings(baseConfig, loadSettings(settingsFilePath))
+  // YAML `chatId: null` / `userId: null` must behave exactly like an absent key:
+  // normalizeConfig keeps `null` untouched, and the startup guard below only
+  // tests `undefined`, so fold it in before anything reads the target.
+  if (config.chatId === null) config.chatId = undefined
+  if (config.userId === null) config.userId = undefined
   const logger = wrapLogger(ctx.logger('max-notify'), [
     config.botToken,
     config.webhookSecret,
@@ -188,6 +202,14 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     } catch (error) {
       logger.warn('cannot read voiceApiKeyFile %s: %s', config.voiceApiKeyFile, error?.message || String(error))
     }
+  }
+  // Secrets loaded from *File must be registered for redaction too: the logger
+  // was created before these files were read.
+  for (const file of [config.botTokenFile, config.voiceTtsApiKeyFile, config.voiceApiKeyFile]) {
+    if (file) warnTokenFileMode(file, logger)
+  }
+  for (const secret of [config.botToken, config.voiceTtsApiKey, config.voiceApiKey]) {
+    if (secret) registerSecret(secret)
   }
 
   if (!config.enabled) {
@@ -397,7 +419,8 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       return undefined
     }
   }
-  const titleCache = new Map()
+  /** sessionId -> title, bounded like every other long-lived map (LRU, 500). */
+  const titleCache = createLruMap({ max: 500 })
   function titleOf(session) {
     try {
       const title = getService('sessionTitle')?.get?.(session)?.title
@@ -806,10 +829,18 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     preferredWorkspacePath = typeof path === 'string' && path !== '' ? path : undefined
   }
 
+  /**
+   * Normalized send target. `null` is treated like an absent value on both
+   * keys, so a hand-written `chatId: null` can never leak into a MAX request.
+   */
+  function sendTarget() {
+    const chatId = config.chatId ?? undefined
+    return { chatId, userId: chatId === undefined ? config.userId ?? undefined : undefined }
+  }
+
   function targetParams(extra = {}) {
     return {
-      chatId: config.chatId,
-      userId: config.chatId === undefined ? config.userId : undefined,
+      ...sendTarget(),
       format: config.format,
       notify: config.notify,
       disableLinkPreview: config.disableLinkPreview,
@@ -1123,7 +1154,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     resolveCwd: async (sessionId) => (await statusInfo(sessionId))?.cwd,
   })
 
-  const target = { chatId: config.chatId, userId: config.chatId === undefined ? config.userId : undefined }
+  const target = sendTarget()
   const state = createState({ file: resolveStateFile(config), logger, chatId: config.chatId })
   const policy = createPolicy({ config, state, logger })
   const audit = createAudit({ file: resolveAuditFile(config), enabled: config.auditLog, logger })
@@ -1313,11 +1344,11 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
       logger.debug('settings page disabled: webServer is unavailable')
       return
     }
-    // DSH 0.2.2-rc.2 removed `connection.requestRejection`: admission is owned
-    // by the webServer route itself (`auth: 'required'` is the default). The
-    // handler only runs for already-admitted requests, so it must not re-check
-    // auth (doing so denied every valid session with 403).
-    const requireAdmission = connection?.requestRejection === undefined
+    // DSH 0.2.3-alpha.1 removed `connection.requestRejection` (the installed
+    // 0.2.3-alpha.2 no longer has it): admission is owned by the webServer route
+    // itself (`auth: 'required'`). Legacy hosts (rc.x) still expose the hook, so
+    // keep the manual check there and stay backward compatible.
+    const legacyRejection = typeof connection?.requestRejection === 'function'
     const api = createSettingsApi({
       file: settingsFilePath,
       getValues: settingsValues,
@@ -1331,8 +1362,23 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
         kind: 'exact',
         path: '/max-notify/settings.json',
         // Explicit admission policy: the host authenticates before the handler.
-        auth: requireAdmission ? 'required' : undefined,
-        handler: api,
+        auth: 'required',
+        handler: async (req, res, peer) => {
+          if (legacyRejection) {
+            let rejection
+            try {
+              rejection = await connection.requestRejection(req)
+            } catch {
+              rejection = 403
+            }
+            if (rejection !== undefined && rejection !== null) {
+              res.statusCode = rejection
+              res.end(rejection === 401 ? 'unauthorized' : 'forbidden')
+              return
+            }
+          }
+          await api(req, res, peer)
+        },
       }, logger)
       settingsRouteDispose = () => {
         try {
@@ -1520,6 +1566,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
     if (session?.id) {
       pending.delete(session.id)
       pendingToolImages.delete(session.id)
+      titleCache.delete(String(session.id))
       progress.onTurnEnd(session)
       observer.clearSession?.(session.id)
     }
@@ -1639,12 +1686,15 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
         progress.dispose()
         interactions.dispose()
         forwarding?.dispose?.()
-        // Let already queued sends finish before tearing down their dependencies.
+        // Wait for a send that is already in flight. Deferred queue entries are
+        // *not* drained: `isStopped` (disposed) makes every task that has not
+        // started yet return early, so only the running send finishes here.
         try {
           await enqueue.idle()
         } catch (error) {
-          logger.debug('error while draining send queue on stop: %s', error?.message || String(error))
+          logger.debug('error while waiting for the in-flight send on stop: %s', error?.message || String(error))
         }
+        titleCache.clear()
         limiter.stop()
         outbox?.dispose()
         state.dispose()
@@ -1662,7 +1712,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
   const restrictionLabel = allowedLabels.join(', ')
   const restriction = restrictionLabel ? `; only ${restrictionLabel}` : ''
   logger.info(
-    'forwarding each agent reply to MAX %s as %s%s%s%s%s',
+    'forwarding each agent reply to MAX %s as %s%s%s%s%s%s%s%s',
     config.chatId !== undefined ? `chat ${config.chatId}` : `user ${config.userId}`,
     config.format ?? 'plain text',
     config.dryRun ? ' (dry-run)' : '',
@@ -1686,8 +1736,7 @@ export function apply(ctx, rawConfig = {}, deps = {}) {
         // identity is optional
       }
       await client.sendMessage({
-        chatId: config.chatId,
-        userId: config.chatId === undefined ? config.userId : undefined,
+        ...sendTarget(),
         text:
           `🟢 DSH → MAX: плагин dsh-max-notify подключён${bot}. Сюда приходит последнее сообщение агента после каждого хода; можно писать агенту прямо в этот чат, пользоваться /help и /mode.` +
           (config.allowedUserIds.length > 0 || config.allowedChatIds.length > 0

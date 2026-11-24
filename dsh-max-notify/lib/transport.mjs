@@ -29,6 +29,12 @@ export const MAX_MESSAGES_PER_SECOND = 2
 export const MAX_UPLOAD_FILENAME_CHARS = 200
 /** Hard cap for JSON responses (API/upload endpoints return tiny payloads). */
 export const MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+/**
+ * Upper bound for an explicit `Retry-After` delay. MAX (or anything between the
+ * bot and the API) could otherwise ask us to sleep for hours; the exponential
+ * fallback keeps its own, smaller cap (8s).
+ */
+export const MAX_RETRY_AFTER_MS = 60_000
 
 const USER_AGENT = (() => {
   try {
@@ -225,6 +231,21 @@ function isMaxErrorBody(json) {
   return Boolean(json) && typeof json === 'object' && !Array.isArray(json) && json.success === false
 }
 
+/**
+ * A 2xx answer to a mutating request must be JSON or empty: MAX returns a JSON
+ * envelope (or no body at all, e.g. DELETE). A non-empty non-JSON body means
+ * something between the bot and MAX (proxy/CDN/WAF) answered instead, so
+ * resolving `undefined` would silently drop the side effect.
+ */
+function badResponseBody(status, raw) {
+  const error = new Error(`MAX API ${status} max.bad.response: expected a JSON envelope, got a non-JSON body`)
+  error.name = 'MaxApiError'
+  error.status = status
+  error.code = 'max.bad.response'
+  error.response = raw
+  return error
+}
+
 function parseRetryAfter(header) {
   if (!header) return undefined
   const seconds = Number(header)
@@ -252,6 +273,7 @@ function parseRetryAfter(header) {
  * @param {boolean} [options.insecureTls] - disable TLS verification (debug only).
  * @param {number} [options.timeoutMs] - per-request timeout, default 15000.
  * @param {number} [options.maxRetries] - retries for 429/5xx/network errors, default 3.
+ * @param {number} [options.maxRetryAfterMs] - cap for an explicit Retry-After delay, default 60000.
  * @param {number} [options.maxResponseBytes] - reject responses above this size, default 8 MiB.
  * @param {number} [options.minIntervalMs] - min gap between message sends, default 600.
  * @param {(level: string, message: string, extra?: unknown) => void} [options.log] - optional log sink.
@@ -266,6 +288,7 @@ export function createMaxClient(options = {}) {
     insecureTls = false,
     timeoutMs = 15000,
     maxRetries = 3,
+    maxRetryAfterMs = MAX_RETRY_AFTER_MS,
     maxResponseBytes = MAX_RESPONSE_BYTES,
     minIntervalMs = 600,
     log,
@@ -281,6 +304,10 @@ export function createMaxClient(options = {}) {
     Number.isFinite(Number(maxResponseBytes)) && Number(maxResponseBytes) > 0
       ? Math.floor(Number(maxResponseBytes))
       : MAX_RESPONSE_BYTES
+  const retryAfterCapMs =
+    Number.isFinite(Number(maxRetryAfterMs)) && Number(maxRetryAfterMs) >= 0
+      ? Math.floor(Number(maxRetryAfterMs))
+      : MAX_RETRY_AFTER_MS
   // The log sink must never receive token-like material.
   const logSink = typeof log === 'function' ? (level, message) => log(level, redact(String(message))) : undefined
 
@@ -365,6 +392,12 @@ export function createMaxClient(options = {}) {
                 reject(httpError(res.statusCode, raw, json, parseRetryAfter(res.headers['retry-after'])))
                 return
               }
+              // Write methods must answer with JSON (or nothing). GET stays
+              // lenient for text-ish endpoints, and postRaw is untouched.
+              if (json === undefined && method !== 'GET' && raw.trim() !== '') {
+                reject(badResponseBody(res.statusCode, raw))
+                return
+              }
               resolve(json)
               return
             }
@@ -387,6 +420,26 @@ export function createMaxClient(options = {}) {
 
   const RETRIABLE_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE'])
 
+  /**
+   * Delay before the next attempt. An explicit Retry-After is honoured but
+   * clamped to `maxRetryAfterMs` (60s by default) with a warn; without a hint
+   * the exponential backoff stays as-is (500ms * 2^attempt, max 8s).
+   */
+  function resolveRetryDelay(error, attempt) {
+    const explicit = error?.retryAfterMs
+    if (Number.isFinite(explicit)) {
+      if (explicit > retryAfterCapMs) {
+        logSink?.(
+          'warn',
+          `MAX API Retry-After ${explicit}ms exceeds the ${retryAfterCapMs}ms cap; using ${retryAfterCapMs}ms`,
+        )
+        return retryAfterCapMs
+      }
+      return Math.max(0, explicit)
+    }
+    return Math.min(500 * 2 ** attempt, 8000)
+  }
+
   async function withRetry(fn) {
     let attempt = 0
     for (;;) {
@@ -400,7 +453,7 @@ export function createMaxClient(options = {}) {
           (typeof status === 'number' && status >= 500 && status < 600) ||
           RETRIABLE_CODES.has(error?.code)
         if (!retriable || attempt > maxRetries) throw error
-        const delay = error?.retryAfterMs ?? Math.min(500 * 2 ** attempt, 8000)
+        const delay = resolveRetryDelay(error, attempt)
         logSink?.('warn', `MAX API retry ${attempt}/${maxRetries} in ${delay}ms: ${error.message}`)
         await sleep(delay)
       }
@@ -660,6 +713,16 @@ export function createMaxClient(options = {}) {
   }
 
   /**
+   * Multipart `filename=` is a quoted header parameter: a raw CR, LF, quote or
+   * NUL in a file name would break - or inject into - the part header. Replace
+   * those four characters with `_` and keep everything else (Unicode included).
+   * Run after the 200-char truncation, which counts code points.
+   */
+  function sanitizeUploadFilename(name) {
+    return String(name ?? '').replace(/["\r\n\0]/g, '_')
+  }
+
+  /**
    * Upload a local file to MAX and return its attachment token.
    * `POST /uploads?type=` → upload URL → multipart `data` → `{ token }`.
    */
@@ -668,8 +731,9 @@ export function createMaxClient(options = {}) {
     const bytes = buffer ?? readFileSync(filePath)
     // MAX caps multipart filenames at 200 chars: truncate the inferred,
     // explicit or buffer-supplied name once, and use it everywhere (the
-    // multipart `filename=` field and the returned `name`).
+    // returned `name` and, after header sanitisation, the multipart field).
     const name = truncateUploadFilename(filename ?? (filePath ? basename(filePath) : 'file.bin'))
+    const multipartName = sanitizeUploadFilename(name)
     const uploadType = type ?? uploadTypeFor(filePath ?? name)
     const created = await withRetry(() =>
       request({ method: 'POST', path: 'uploads', query: { type: uploadType } }),
@@ -677,7 +741,7 @@ export function createMaxClient(options = {}) {
     if (!created?.url) throw new Error('MAX /uploads returned no upload URL')
     const boundary = `----dshmax${Math.random().toString(16).slice(2)}${Date.now().toString(16)}`
     const head = Buffer.from(
-      `--${boundary}\r\nContent-Disposition: form-data; name="data"; filename="${name.replace(/"/g, '')}"\r\nContent-Type: application/octet-stream\r\n\r\n`,
+      `--${boundary}\r\nContent-Disposition: form-data; name="data"; filename="${multipartName}"\r\nContent-Type: application/octet-stream\r\n\r\n`,
     )
     const tail = Buffer.from(`\r\n--${boundary}--\r\n`)
     const multipart = Buffer.concat([head, bytes, tail])

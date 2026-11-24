@@ -260,3 +260,39 @@ test('an unknown ledger version logs a warning with the expected version', () =>
   meter.snapshot()
   assert.equal(warnings.length, 1)
 })
+
+test('a broken ledger is cached by size+mtime and only re-read when the file changes', () => {
+  const file = freshFile()
+  const mtime = new Date(1_700_000_000_000)
+  writeFileSync(file, '{not json') // 9 bytes
+  utimesSync(file, mtime, mtime)
+  const meter = createCostMeter({ file, now: fakeNow })
+
+  const first = meter.snapshot()
+  assert.equal(first.available, false)
+  assert.match(first.reason, /cannot read ledger/)
+
+  // Same size (9 bytes) and mtime, but valid JSON with an unknown version: a
+  // cached failure must be served without re-parsing the new content.
+  writeFileSync(file, '{"a": 1}\n')
+  utimesSync(file, mtime, mtime)
+  const cached = meter.snapshot()
+  assert.equal(cached.available, false)
+  assert.match(cached.reason, /cannot read ledger/, 'an unchanged mtime+size must not trigger a re-read')
+  assert.equal(cached.reason.includes('unsupported'), false)
+
+  // A newer mtime invalidates the cached failure and retries the parse.
+  const later = new Date(mtime.getTime() + 1000)
+  utimesSync(file, later, later)
+  const retried = meter.snapshot()
+  assert.equal(retried.available, false)
+  assert.match(retried.reason, /unsupported ledger version/)
+
+  // Writing a valid ledger (new mtime) restores the normal snapshot.
+  writeFileSync(file, JSON.stringify(ledger()))
+  const restored = new Date(mtime.getTime() + 2000)
+  utimesSync(file, restored, restored)
+  const recovered = meter.snapshot()
+  assert.equal(recovered.available, true)
+  assert.equal(recovered.today.amount, 5)
+})

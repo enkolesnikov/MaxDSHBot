@@ -101,3 +101,27 @@ test('settings route relies on webServer admission (no rc.2 requestRejection re-
   assert.equal(body.ok, true)
   assert.equal('voiceEndpoint' in body.values, false)
 })
+
+test('legacy hosts with requestRejection still fail closed when it rejects', async () => {
+  const routes = []
+  const services = {
+    webServer: { register: (route) => { routes.push(route); return () => {} } },
+    connection: { requestRejection: async () => 401 },
+  }
+  const emitter = new EventEmitter()
+  const ctx = {
+    ...services,
+    logger: () => ({ info() {}, warn() {}, error() {}, debug() {} }),
+    get: (name) => services[name],
+    inject: (deps, callback) => callback(services),
+    on: (event, handler) => { emitter.on(event, handler); return () => emitter.off(event, handler) },
+    effect: (factory) => { factory() },
+  }
+  apply(ctx, { botToken: 't', chatId: '123456789', allowedUserIds: ['123456789'], dryRun: true, notifyOnStart: false }, { createClient: () => fakeClient() })
+  const route = routes.find((r) => r.path === '/max-notify/settings.json')
+  assert.equal(route.auth, 'required')
+  let status
+  const res = { statusCode: 0, setHeader() {}, end() { status = this.statusCode } }
+  await route.handler({ method: 'GET', headers: {} }, res)
+  assert.equal(status, 401)
+})

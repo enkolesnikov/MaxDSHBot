@@ -14,7 +14,11 @@
  *    rename → directory fsync), so a crash can never leave truncated JSON;
  *  - a newer `schemaVersion` (written by a future release) is never interpreted
  *    or overwritten: it is backed up to `<file>.future-<ts>`, a warning is
- *    logged and persistence stays disabled until the operator upgrades.
+ *    logged and persistence stays disabled until the operator upgrades. A
+ *    `schemaVersion` that is present but not a positive integer ("v3", null…)
+ *    is treated the same way — the file is preserved, never downgraded.
+ *  - the durable webhook queue is capped by BOTH count and bytes on load and
+ *    on every write (defaults 200 entries / 8 MiB, oldest updates dropped).
  */
 import {
   chmodSync,
@@ -36,7 +40,8 @@ export const STATE_SCHEMA_VERSION = 2
 const PROCESSED_LIMIT = 1000
 const PROCESSED_TTL_MS = 7 * 24 * 60 * 60 * 1000
 // P1 webhook caps: one update body and the whole durable queue. Callers may
-// override both via pushWebhookQueue(entry, max, maxBytes, entryMaxBytes).
+// override all three via pushWebhookQueue(entry, max, maxBytes, entryMaxBytes).
+const WEBHOOK_QUEUE_MAX = 200
 const WEBHOOK_ENTRY_BYTES_MAX = 64 * 1024
 const WEBHOOK_QUEUE_BYTES_MAX = 8 * 1024 * 1024
 
@@ -45,11 +50,14 @@ function positiveInt(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? Math.max(1, Math.trunc(parsed)) : fallback
 }
 
-/** Parse a stored schema marker; `undefined` means a legacy file without one. */
+/**
+ * Parse a stored schema marker; only a positive integer is a schema this release
+ * can interpret. `undefined` means the marker is absent (legacy file). Any other
+ * present value ("v3", null, 1.5, true…) is unparseable and must be treated like
+ * a future schema — preserve the file, never overwrite it.
+ */
 function storedSchemaVersionOf(value) {
-  if (value === undefined || value === null || value === '') return undefined
-  const version = Number(value)
-  return Number.isFinite(version) ? version : undefined
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined
 }
 
 /**
@@ -186,6 +194,33 @@ export function createState({ file, logger, chatId } = {}) {
   }
 
   /**
+   * Enforce the BOTH caps on the in-memory queue: keep at most `limit` entries
+   * and drop the oldest tail until the byte budget fits. Shared by load and
+   * `setWebhookQueue` (push has its own incremental accounting). Returns the
+   * number of dropped entries.
+   */
+  function trimWebhookQueue(limit = WEBHOOK_QUEUE_MAX, maxBytes = WEBHOOK_QUEUE_BYTES_MAX) {
+    const countLimit = Math.max(1, Number(limit) || WEBHOOK_QUEUE_MAX)
+    const byteLimit = positiveInt(maxBytes, WEBHOOK_QUEUE_BYTES_MAX)
+    let dropped = 0
+    if (state.webhookQueue.length > countLimit) {
+      dropped += state.webhookQueue.length - countLimit
+      state.webhookQueue.splice(0, state.webhookQueue.length - countLimit)
+    }
+    recalcWebhookQueueBytes()
+    while (state.webhookQueue.length > 0 && webhookQueueBytes > byteLimit) {
+      const removed = state.webhookQueue.shift()
+      webhookQueueBytes -= sizeOfWebhookEntry(removed)
+      dropped += 1
+    }
+    return dropped
+  }
+
+  function validWebhookEntry(entry) {
+    return Boolean(entry) && typeof entry === 'object' && entry.update && typeof entry.update === 'object'
+  }
+
+  /**
    * Result of pushWebhookQueue. It is a Number (depth) for backwards
    * compatibility with existing callers, with extra metrics attached:
    * `.depth`, `.bytes`, `.added`, `.dropped`, `.rejected`, `.reason`.
@@ -227,29 +262,49 @@ export function createState({ file, logger, chatId } = {}) {
     }
   }
 
+  /** Copy a state file this release refuses to own, keeping 0600 on the backup. */
+  function backUpStateFile(label) {
+    try {
+      const backup = `${file}.future-${Date.now()}`
+      copyFileSync(file, backup)
+      try {
+        chmodSync(backup, 0o600)
+      } catch {
+        // best effort
+      }
+    } catch (error) {
+      logger?.warn?.(`cannot back up ${label} MAX state file %s: %s`, file, error?.message || String(error))
+    }
+  }
+
   if (loaded && typeof loaded === 'object' && !Array.isArray(loaded)) {
-    storedSchemaVersion = storedSchemaVersionOf(loaded.schemaVersion)
-    if (storedSchemaVersion !== undefined && storedSchemaVersion > STATE_SCHEMA_VERSION) {
+    const hasSchemaMarker = Object.hasOwn(loaded, 'schemaVersion') && loaded.schemaVersion !== undefined
+    const parsedVersion = hasSchemaMarker ? storedSchemaVersionOf(loaded.schemaVersion) : undefined
+    storedSchemaVersion = parsedVersion
+    if (hasSchemaMarker && parsedVersion === undefined) {
+      // A marker is present but is not a positive integer ("v3", null, 1.5…).
+      // This release cannot know what the file means, so treat it exactly like a
+      // future schema: preserve byte-for-byte, start empty, disable persistence.
+      persistenceBlocked = true
+      // Expose the raw marker for diagnostics instead of pretending it was absent.
+      storedSchemaVersion = loaded.schemaVersion
+      logger?.warn?.(
+        'MAX state file %s has an invalid schemaVersion %s (expected a positive integer); preserving the file, starting empty and disabling persistence until the file is fixed or the plugin is upgraded',
+        file,
+        String(loaded.schemaVersion),
+      )
+      backUpStateFile('unparseable')
+    } else if (parsedVersion !== undefined && parsedVersion > STATE_SCHEMA_VERSION) {
       // A future release owns this file: preserve it byte-for-byte and disable
       // persistence instead of silently downgrading/overwriting unknown fields.
       persistenceBlocked = true
       logger?.warn?.(
         'MAX state file %s uses schemaVersion %d but this plugin supports %d; preserving the file, starting empty and disabling persistence until the plugin is upgraded',
         file,
-        storedSchemaVersion,
+        parsedVersion,
         STATE_SCHEMA_VERSION,
       )
-      try {
-        const backup = `${file}.future-${Date.now()}`
-        copyFileSync(file, backup)
-        try {
-          chmodSync(backup, 0o600)
-        } catch {
-          // best effort
-        }
-      } catch (error) {
-        logger?.warn?.('cannot back up newer MAX state file %s: %s', file, error?.message || String(error))
-      }
+      backUpStateFile('newer')
     }
   }
 
@@ -276,10 +331,20 @@ export function createState({ file, logger, chatId } = {}) {
         state.messageSessions = { ...parsed.messageSessions }
       }
       if (Array.isArray(parsed.webhookQueue)) {
-        state.webhookQueue = parsed.webhookQueue.filter(
-          (entry) => entry && typeof entry === 'object' && entry.update && typeof entry.update === 'object',
-        )
-        recalcWebhookQueueBytes()
+        // Apply BOTH caps on load, not only on push: a state file written by an
+        // older release (or edited by hand) must not start with an oversized
+        // queue. Keep the 200 / 8 MiB defaults and drop the oldest updates.
+        state.webhookQueue = parsed.webhookQueue.filter(validWebhookEntry)
+        const dropped = trimWebhookQueue(WEBHOOK_QUEUE_MAX, WEBHOOK_QUEUE_BYTES_MAX)
+        if (dropped > 0) {
+          logger?.warn?.(
+            'MAX state file %s webhookQueue exceeded its caps on load; dropped %d oldest update(s) (kept %d entries / %d bytes)',
+            file,
+            dropped,
+            state.webhookQueue.length,
+            webhookQueueBytes,
+          )
+        }
       }
       if (parsed.budgetAlerts && typeof parsed.budgetAlerts === 'object' && !Array.isArray(parsed.budgetAlerts)) {
         state.budgetAlerts = { ...parsed.budgetAlerts }
@@ -338,7 +403,7 @@ export function createState({ file, logger, chatId } = {}) {
       if (!blockedSaveWarned) {
         blockedSaveWarned = true
         logger?.warn?.(
-          'refusing to overwrite MAX state file %s written by a newer schema (stored %d, supported %d); persistence stays disabled',
+          'refusing to overwrite MAX state file %s written by a newer schema or with an unparseable schema marker (stored %s, supported %d); persistence stays disabled',
           file,
           storedSchemaVersion,
           STATE_SCHEMA_VERSION,
@@ -390,11 +455,15 @@ export function createState({ file, logger, chatId } = {}) {
 
   return {
     schemaVersion: STATE_SCHEMA_VERSION,
-    /** Schema found on disk (`undefined` for legacy files without a marker). */
+    /**
+     * Schema marker found on disk. Absent marker → `undefined` (legacy file);
+     * a positive integer when valid; the raw stored value when it is present but
+     * unparseable (in that case `persistenceBlocked` is true).
+     */
     get storedSchemaVersion() {
       return storedSchemaVersion
     },
-    /** True when the file belongs to a newer release and must not be written. */
+    /** True when the file is newer/unparseable and must not be written. */
     get persistenceBlocked() {
       return persistenceBlocked
     },
@@ -549,10 +618,15 @@ export function createState({ file, logger, chatId } = {}) {
     getWebhookQueue() {
       return state.webhookQueue.map((entry) => ({ ...entry }))
     },
-    setWebhookQueue(queue) {
-      const list = Array.isArray(queue) ? queue.filter((entry) => entry && entry.update) : []
-      state.webhookQueue = list.slice(-200)
-      recalcWebhookQueueBytes()
+    /**
+     * Replace the durable queue. The same BOTH caps as `pushWebhookQueue`
+     * apply (count and total bytes, oldest first), so a caller cannot bypass
+     * them by installing a whole list. Defaults are 200 entries / 8 MiB; the
+     * optional arguments exist for mirrored configuration in tests/callers.
+     */
+    setWebhookQueue(queue, max = WEBHOOK_QUEUE_MAX, maxBytes = WEBHOOK_QUEUE_BYTES_MAX) {
+      state.webhookQueue = Array.isArray(queue) ? queue.filter(validWebhookEntry) : []
+      trimWebhookQueue(max, maxBytes)
       saveSoon()
     },
     /**
@@ -565,12 +639,12 @@ export function createState({ file, logger, chatId } = {}) {
      */
     pushWebhookQueue(
       entry,
-      max = 200,
+      max = WEBHOOK_QUEUE_MAX,
       maxBytes = WEBHOOK_QUEUE_BYTES_MAX,
       entryMaxBytes = WEBHOOK_ENTRY_BYTES_MAX,
     ) {
-      if (!entry || !entry.update || typeof entry.update !== 'object') return webhookQueueResult()
-      const limit = Math.max(1, Number(max) || 200)
+      if (!validWebhookEntry(entry)) return webhookQueueResult()
+      const limit = Math.max(1, Number(max) || WEBHOOK_QUEUE_MAX)
       const byteLimit = positiveInt(maxBytes, WEBHOOK_QUEUE_BYTES_MAX)
       const entryLimit = positiveInt(entryMaxBytes, WEBHOOK_ENTRY_BYTES_MAX)
       const size = measureWebhookEntry(entry)

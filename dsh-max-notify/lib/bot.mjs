@@ -34,6 +34,13 @@ import { targetQuery } from './target.mjs'
 /** Upper bound for every per-chat cache below; stale entries are evicted LRU. */
 const CACHE_MAX = 500
 
+/**
+ * Consecutive handler failures after which a polled update is skipped instead
+ * of being retried forever. A poison update must never freeze the poll marker
+ * (that would stop remote control until restart).
+ */
+const MAX_UPDATE_ATTEMPTS = 3
+
 const COMMANDS = [
   { name: 'help', description: 'Справка; /help all — все команды' },
   { name: 'status', description: 'Сессия, модель, стоимость' },
@@ -177,6 +184,12 @@ export function createBot({
   const incomingBuckets = createLruMap({ max: CACHE_MAX })
   /** chatKey -> last "too fast" warning (LRU-bounded). */
   const incomingWarnedAt = createLruMap({ max: CACHE_MAX })
+  /**
+   * update key -> consecutive handler failures observed by the poll loop.
+   * Bounded: a poison update, or a flood of distinct hostile payloads, must
+   * not grow memory without limit.
+   */
+  const updateFailures = createLruMap({ max: CACHE_MAX })
 
   /**
    * Record a successful poll. A running poller must never be reported as
@@ -1027,6 +1040,14 @@ export function createBot({
       await client.answerCallback(callbackId, { notification: 'Действие устарело.' })
     } catch (error) {
       logger?.warn?.('cannot handle MAX callback: %s', error?.message || String(error))
+      // Best effort: dismiss the inline-keyboard spinner in MAX. A failed
+      // handler must not leave the user staring at a loading button forever,
+      // and a failing answerCallback must not escape this handler either.
+      try {
+        await client.answerCallback(callbackId, { notification: 'Ошибка обработки' })
+      } catch (answerError) {
+        logger?.debug?.('cannot answer failed MAX callback: %s', answerError?.message || String(answerError))
+      }
     }
   }
 
@@ -1182,6 +1203,89 @@ export function createBot({
     }
   }
 
+  /**
+   * Stable attempt key for the poison-update guard. `updateKey` can throw on a
+   * hostile payload (throwing getters); a deterministic payload fingerprint is
+   * the fallback so attempt counting stays stable.
+   */
+  function attemptKey(update) {
+    try {
+      const key = updateKey(update)
+      if (typeof key === 'string' && key !== '') return key
+    } catch {
+      // fall through to the fingerprint
+    }
+    try {
+      return `unkeyed:${updateFingerprint(update)}`
+    } catch {
+      return 'unkeyed:unknown'
+    }
+  }
+
+  /** Best-effort type/chat id for warning logs; never throws on hostile payloads. */
+  function updateLogContext(update) {
+    let type
+    let chatId
+    try {
+      type = update?.update_type
+    } catch {
+      type = undefined
+    }
+    try {
+      chatId = update?.chat_id ?? update?.message?.recipient?.chat_id
+    } catch {
+      chatId = undefined
+    }
+    return { type: String(type ?? 'unknown'), chatId }
+  }
+
+  /**
+   * Apply one polled update without letting a throwing handler abort the batch.
+   * Failures are counted per stable update key in a bounded LRU; after
+   * MAX_UPDATE_ATTEMPTS consecutive failures the update is skipped so the rest
+   * of the batch and the poll marker can move on.
+   */
+  async function applyUpdateSafely(update) {
+    const key = attemptKey(update)
+    try {
+      const applied = await applyUpdate(update)
+      if (applied) updateFailures.delete(key)
+      return applied
+    } catch (error) {
+      const previous = updateFailures.get(key) ?? 0
+      const { type, chatId } = updateLogContext(update)
+      const description = error?.message || String(error)
+      if (previous >= MAX_UPDATE_ATTEMPTS) {
+        // Already given up on this update: a redelivery is skipped instead of
+        // paying for another round of failing handler calls.
+        logger?.debug?.('MAX update %s (chat %s) still failing, skipped: %s', type, chatId, description)
+        return false
+      }
+      const attempts = previous + 1
+      if (attempts >= MAX_UPDATE_ATTEMPTS) {
+        updateFailures.set(key, MAX_UPDATE_ATTEMPTS)
+        logger?.warn?.(
+          'skipping MAX update %s (chat %s) after %d failures: %s',
+          type,
+          chatId,
+          MAX_UPDATE_ATTEMPTS,
+          description,
+        )
+        return false
+      }
+      updateFailures.set(key, attempts)
+      logger?.warn?.(
+        'cannot handle MAX update %s (chat %s), attempt %d/%d: %s',
+        type,
+        chatId,
+        attempts,
+        MAX_UPDATE_ATTEMPTS,
+        description,
+      )
+      return false
+    }
+  }
+
   /** One long-poll iteration; returns `{primed, count, handled}` (exposed for tests). */
   async function pollOnce() {
     if (disposed) return { primed: false, count: 0, handled: 0 }
@@ -1204,13 +1308,19 @@ export function createBot({
     if (disposed) return { primed: false, count: 0, handled: 0 }
     const updates = Array.isArray(response?.updates) ? response.updates : []
     let handled = 0
-    for (const update of updates) {
-      if (disposed) break
-      // A handler failure must leave the marker untouched: the batch is retried
-      // and already handled updates are skipped by their dedupe keys.
-      if (await applyUpdate(update)) handled += 1
+    try {
+      for (const update of updates) {
+        if (disposed) break
+        // A handler failure is contained per update: one poison update must not
+        // abort the batch (the whole batch would be retried forever and remote
+        // control would stop moving).
+        if (await applyUpdateSafely(update)) handled += 1
+      }
+    } finally {
+      // The marker advances even when an update failed or was skipped; otherwise
+      // the same batch is redelivered forever and the poller wedges.
+      if (response?.marker !== undefined) state?.setMarker?.(response.marker)
     }
-    if (response?.marker !== undefined) state?.setMarker?.(response.marker)
     if (updates.length > 0) runtime?.healthUpdate?.({ lastUpdateAt: Date.now() })
     return { primed: false, count: updates.length, handled }
   }

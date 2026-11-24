@@ -138,7 +138,7 @@ HTTP 200 означает «запрос дошёл и обработан», н�
 | Не более 2 сообщений/с на чат, 30 rps суммарно | лимитер: `ratePerChatPerSecond: 2`, `rateGlobalPerSecond: 30` |
 | Текст до 4000 символов | чанкинг абзацами (`maxChars: 3800`), жёсткий лимит API — 4000 |
 | `PATCH /me/commands` | `setCommands()` (меню бота, ≤32 команд) |
-| HTTP 200 + `success: false` | с v1.11 считается ошибкой (`MaxApiError` с `code`/`message`) для всех методов из списка выше |
+| HTTP 200 + `success: false` | с v1.11 ответ с `success: false` считается ошибкой (`MaxApiError` с `code`/`message`); проверка общая для всех JSON-ответов клиента, из затронутых методов в нём есть `PUT`/`DELETE /messages`, `POST /answers`, `POST`/`DELETE /subscriptions`, `POST /chats/{chatId}/actions` (методы `members`/`pin` плагин не вызывает) |
 | `bot_added` без `user` | плагин у этого события использует только `chat_id` (лог); `update.user` нужен только `bot_started`, где он остался |
 | `GET /chats` удалён | не используется: `chat_id` берётся из конфига и из `GET /updates` (`tools/pair.mjs`) |
 | Webhook только HTTPS | регистрируется на публичном HTTPS-эндпоинте DSH (MAX принимает только HTTPS :443); без secret или `webServer` — fallback на polling |

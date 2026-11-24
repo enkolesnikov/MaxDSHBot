@@ -20,6 +20,7 @@ import {
   normalizeMaxApiBaseUrl,
   splitText,
   MAX_RESPONSE_BYTES,
+  MAX_RETRY_AFTER_MS,
   MAX_TEXT_LIMIT,
   MAX_UPLOAD_FILENAME_CHARS,
 } from '../lib/transport.mjs'
@@ -390,11 +391,15 @@ test('200 responses with success:false are rejected as MAX API errors and not re
     sendJson(res, 200, { success: false, code: 'message.not.found', message: 'no such message' })
   })
   const client = testClient(server, { maxRetries: 2 })
+  // Every mutating endpoint MAX can answer with a 200 error envelope: PUT/DELETE
+  // messages, answers, webhook subscriptions (POST + DELETE) and chat actions.
   const calls = [
     () => client.editMessage({ messageId: 1, text: 'edited' }),
     () => client.deleteMessage(1),
     () => client.answerCallback('cb1', { notification: 'ok' }),
     () => client.subscribeWebhook({ url: 'https://example.test/hook' }),
+    () => client.unsubscribeWebhook('https://example.test/hook'),
+    () => client.sendAction(42),
   ]
   for (const call of calls) {
     await assert.rejects(call, (error) => {
@@ -419,6 +424,8 @@ test('200 responses with success:true still resolve normally', { skip: skipNoTls
   assert.deepEqual(await client.deleteMessage(1), { success: true })
   assert.deepEqual(await client.answerCallback('cb1'), { success: true })
   assert.deepEqual(await client.subscribeWebhook({ url: 'https://example.test/hook' }), { success: true })
+  assert.deepEqual(await client.unsubscribeWebhook('https://example.test/hook'), { success: true })
+  assert.deepEqual(await client.sendAction(42), { success: true })
 })
 
 test('429 Retry-After seconds are parsed into retryAfterMs', { skip: skipNoTls }, async (t) => {
@@ -448,6 +455,108 @@ test('429 Retry-After HTTP-date is parsed into retryAfterMs', { skip: skipNoTls 
     assert.ok(error.retryAfterMs > 20_000 && error.retryAfterMs <= 30_000, `retryAfterMs=${error.retryAfterMs}`)
     return true
   })
+})
+
+test('the default Retry-After cap is 60 seconds', () => {
+  assert.equal(MAX_RETRY_AFTER_MS, 60_000)
+})
+
+test('an explicit Retry-After above the cap is clamped and logged', { skip: skipNoTls }, async (t) => {
+  let attempts = 0
+  const logs = []
+  const server = await startServer(t, async (req, res) => {
+    await readBody(req)
+    attempts += 1
+    if (attempts === 1) {
+      sendJson(res, 429, { code: 'rate.limit', message: 'slow down' }, { 'retry-after': '120' })
+      return
+    }
+    sendJson(res, 200, { ok: true })
+  })
+  // A 120s header would stall the suite, so a tiny cap exercises the same clamp
+  // path the 60s production default uses, without ever sleeping it.
+  const client = testClient(server, {
+    maxRetries: 1,
+    maxRetryAfterMs: 25,
+    log: (level, message) => logs.push({ level, message }),
+  })
+  const started = Date.now()
+  assert.deepEqual(await client.sendMessage({ chatId: 1, text: 'hi' }), { ok: true })
+  const elapsed = Date.now() - started
+  assert.equal(attempts, 2)
+  assert.ok(elapsed < 5000, `a 120s Retry-After must not be honoured, got ${elapsed}ms`)
+  assert.deepEqual(logs.map((entry) => entry.level), ['warn', 'warn'])
+  assert.match(logs[0].message, /MAX API Retry-After 120000ms exceeds the 25ms cap; using 25ms/)
+  assert.match(logs[1].message, /MAX API retry 1\/1 in 25ms: MAX API 429 rate\.limit: slow down/)
+})
+
+test('a Retry-After below the cap is honoured without a clamp warning', { skip: skipNoTls }, async (t) => {
+  let attempts = 0
+  const logs = []
+  const server = await startServer(t, async (req, res) => {
+    await readBody(req)
+    attempts += 1
+    if (attempts === 1) {
+      sendJson(res, 429, { code: 'rate.limit', message: 'slow down' }, { 'retry-after': '0' })
+      return
+    }
+    sendJson(res, 200, { ok: true })
+  })
+  const client = testClient(server, {
+    maxRetries: 1,
+    log: (level, message) => logs.push({ level, message }),
+  })
+  assert.deepEqual(await client.sendMessage({ chatId: 1, text: 'hi' }), { ok: true })
+  assert.equal(attempts, 2)
+  assert.equal(logs.length, 1, 'only the retry line; nothing was capped')
+  assert.match(logs[0].message, /MAX API retry 1\/1 in 0ms: MAX API 429 rate\.limit: slow down/)
+})
+
+test('a non-JSON 2xx body is rejected for write methods while empty bodies and GET stay lenient', { skip: skipNoTls }, async (t) => {
+  let mode = 'html'
+  const server = await startServer(t, async (req, res) => {
+    await readBody(req)
+    if (mode === 'html') {
+      res.writeHead(200, { 'content-type': 'text/html' })
+      res.end('<html>proxy error</html>')
+      return
+    }
+    if (mode === 'whitespace') {
+      res.writeHead(200, { 'content-type': 'text/plain' })
+      res.end('  \n')
+      return
+    }
+    res.writeHead(200, { 'content-length': '0' })
+    res.end()
+  })
+  const client = testClient(server, { maxRetries: 0 })
+  const isBadResponse = (error) => {
+    assert.equal(error.name, 'MaxApiError')
+    assert.equal(error.status, 200)
+    assert.equal(error.code, 'max.bad.response')
+    assert.equal(error.message, 'MAX API 200 max.bad.response: expected a JSON envelope, got a non-JSON body')
+    assert.equal(error.response, '<html>proxy error</html>')
+    return true
+  }
+
+  // POST, PUT and DELETE write methods all reject a proxied HTML page instead
+  // of resolving `undefined` as if the side effect had happened.
+  await assert.rejects(() => client.sendMessage({ chatId: 1, text: 'hi' }), isBadResponse)
+  await assert.rejects(() => client.editMessage({ messageId: 1, text: 'x' }), isBadResponse)
+  await assert.rejects(() => client.sendAction(42), isBadResponse)
+
+  // GET stays lenient: some read endpoints may answer with plain text.
+  assert.equal(await client.getMe(), undefined)
+
+  // A 2xx write with no body at all (DELETE may return none) is a success.
+  mode = 'empty'
+  assert.equal(await client.deleteMessage(1), undefined)
+  assert.equal(await client.sendAction(42), undefined)
+  assert.equal(await client.unsubscribeWebhook('https://example.test/hook'), undefined)
+
+  // Whitespace-only bodies count as empty, not as malformed JSON.
+  mode = 'whitespace'
+  assert.equal(await client.deleteMessage(1), undefined)
 })
 
 test('429 without Retry-After is retried with capped exponential backoff', { skip: skipNoTls }, async (t) => {
@@ -843,6 +952,53 @@ test('uploadMedia truncates filenames above 200 chars but keeps the extension', 
   for (const name of sentNames) {
     assert.ok(Array.from(name).length <= MAX_UPLOAD_FILENAME_CHARS, `multipart filename exceeds the cap: ${name}`)
   }
+})
+
+test('multipart filenames cannot inject CRLF, quotes or NUL into the part header', { skip: skipNoTls }, async (t) => {
+  const multiparts = []
+  const server = await startServer(t, async (req, res) => {
+    const body = await readBody(req)
+    if (typeof req.url === 'string' && req.url.startsWith('/uploads?')) {
+      sendJson(res, 200, { url: `${server.url}/upload-target` })
+      return
+    }
+    if (req.url === '/upload-target') {
+      multiparts.push(body.toString('utf8'))
+      sendJson(res, 200, { token: 'uploaded-token' })
+      return
+    }
+    res.statusCode = 404
+    res.end('unexpected path')
+  })
+  const client = testClient(server)
+  const filenameFrom = (multipart) => /name="data"; filename="([^"]*)"/.exec(multipart)?.[1]
+
+  // A hostile name: CR/LF would end the header line, a quote would close the
+  // quoted parameter, NUL is not valid in a header value. Unicode must survive.
+  const hostile = 'отчёт\r\nX-Injected: yes"\0.png'
+  const result = await client.uploadMedia({ buffer: Buffer.from('bytes'), filename: hostile })
+  assert.equal(result.name, hostile, 'the returned display name is unchanged')
+  assert.equal(multiparts.length, 1)
+  const headerName = filenameFrom(multiparts[0])
+  assert.equal(headerName, 'отчёт__X-Injected: yes__.png')
+  assert.ok(!/["\r\n\0]/.test(headerName), 'no header-breaking character may reach the part header')
+  // The injected text stays inside the quoted filename instead of becoming a
+  // header line of its own.
+  assert.ok(!multiparts[0].split('\r\n').includes('X-Injected: yes'))
+  assert.ok(multiparts[0].includes(`Content-Disposition: form-data; name="data"; filename="${headerName}"\r\n`))
+
+  // Sanitisation runs after the 200-code-point truncation: the cap still holds
+  // and the CR/LF inside the kept prefix is replaced, not dropped.
+  const longHostile = `${'a'.repeat(50)}\r\n${'b'.repeat(200)}.png`
+  const truncated = await client.uploadMedia({ buffer: Buffer.from('more'), filename: longHostile })
+  const truncatedHeaderName = filenameFrom(multiparts[1])
+  assert.equal(Array.from(truncatedHeaderName).length, MAX_UPLOAD_FILENAME_CHARS)
+  assert.ok(truncatedHeaderName.startsWith(`${'a'.repeat(50)}__`))
+  assert.ok(truncatedHeaderName.endsWith('.png'))
+  assert.ok(!/["\r\n\0]/.test(truncatedHeaderName))
+  // The display name keeps the raw truncated value; only the header is sanitised.
+  assert.ok(truncated.name.includes('\r\n'))
+  assert.equal(Array.from(truncated.name).length, MAX_UPLOAD_FILENAME_CHARS)
 })
 
 // ---------------------------------------------------------------------------
